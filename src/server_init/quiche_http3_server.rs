@@ -45,6 +45,7 @@ mod quiche_implementation {
         let mut events = mio::Events::with_capacity(1024);
         // Create the UDP listening socket, and register it with the event loop.
         let mut socket = mio::net::UdpSocket::bind(*server_config.server_address()).unwrap();
+        println!("socket [{:?}]", socket);
         poll.registry()
             .register(&mut socket, mio::Token(0), mio::Interest::READABLE)
             .unwrap();
@@ -246,12 +247,14 @@ mod quiche_implementation {
                                 server_config
                                     .request_handler()
                                     .parse_headers(&list, stream_id, client);
+                                /*
                                 handle_request(
                                     client,
                                     stream_id,
                                     &list,
                                     &server_config.request_handler(),
                                 );
+                                */
                             }
                             Ok((stream_id, quiche::h3::Event::Data)) => {
                                 &server_config
@@ -375,9 +378,43 @@ mod quiche_implementation {
     pub fn send_response(
         client: &mut Client,
         stream_id: u64,
-        headers: &[quiche::h3::Header],
-        body: &[u8],
+        headers: Vec<quiche::h3::Header>,
+        body: Vec<u8>,
     ) {
+        let http3_conn = &mut client.http3_conn.as_mut().unwrap();
+        let conn = &mut client.conn;
+        match http3_conn.send_response(conn, stream_id, &headers, false) {
+            Ok(v) => v,
+            Err(quiche::h3::Error::StreamBlocked) => {
+                let response = PartialResponse {
+                    headers: Some(headers),
+                    body,
+                    written: 0,
+                };
+                client.partial_responses.insert(stream_id, response);
+                return;
+            }
+            Err(e) => {
+                error!("{} stream send failed {:?}", conn.trace_id(), e);
+                return;
+            }
+        }
+        let written = match http3_conn.send_body(conn, stream_id, &body, true) {
+            Ok(v) => v,
+            Err(quiche::h3::Error::Done) => 0,
+            Err(e) => {
+                error!("{} stream send failed {:?}", conn.trace_id(), e);
+                return;
+            }
+        };
+        if written < body.len() {
+            let response = PartialResponse {
+                headers: None,
+                body,
+                written,
+            };
+            client.partial_responses.insert(stream_id, response);
+        }
         /*
          *
          * Send reponse to the client

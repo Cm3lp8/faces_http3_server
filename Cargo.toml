@@ -3,6 +3,10 @@ name = "faces_quic_server"
 version = "0.1.0"
 edition = "2021"
 
+[[bin]]
+name = "quiche_server_testing"
+path = "./bin_test/main_server_test.rs"
+
 [dependencies]
 quiche = "0.23.2"
 log = "0.4.25"

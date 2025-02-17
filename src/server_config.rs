@@ -1,6 +1,8 @@
 #![allow(warnings)]
 pub use request_handler::RequestHandler;
-pub use request_manager::{RequestForm, RequestManager, RequestType};
+pub use request_manager::{
+    H3Method, RequestForm, RequestFormBuilder, RequestManager, RequestManagerBuilder, RequestType,
+};
 pub use server_config_builder::ServerConfig;
 mod server_config_builder {
     use std::{net::SocketAddr, sync::Arc};
@@ -25,7 +27,7 @@ mod server_config_builder {
             self.cert
         }
         pub fn key_path(&self) -> &str {
-            self.cert
+            self.key
         }
         pub fn request_handler(&self) -> RequestHandler {
             self.request_manager.request_handler()
@@ -47,20 +49,32 @@ mod server_config_builder {
                 key: None,
             }
         }
+        ///
+        ///set the previously created RequestManager
+        ///
         pub fn set_request_manager(&mut self, request_manager: RequestManager) -> &mut Self {
             self.request_manager = Some(request_manager);
             self
         }
+        ///
+        ///Set the server the server ip + port. Example "127.0.0.1:3000"
+        ///
         pub fn set_address(&mut self, address: &'static str) -> &mut Self {
             self.server_socket_address = Some(address);
             self
         }
+        ///
+        ///path to the cert. Try absolute path if problems
+        ///
         pub fn set_cert_path(&mut self, path: &'static str) -> &mut Self {
             self.cert = Some(path);
             self
         }
+        ///
+        ///path to the key. Try absolute path if problems
+        ///
         pub fn set_key_path(&mut self, path: &'static str) -> &mut Self {
-            self.cert = Some(path);
+            self.key = Some(path);
             self
         }
         pub fn build(&mut self) -> ServerConfig {
@@ -149,7 +163,7 @@ mod request_handler {
             for hdr in headers {
                 match hdr.name() {
                     b":method" => method = Some(hdr.value()),
-                    b":path" => path = Some(std::str::from_utf8(hdr.name()).unwrap()),
+                    b":path" => path = Some(std::str::from_utf8(hdr.value()).unwrap()),
                     _ => {}
                 }
             }
@@ -172,10 +186,7 @@ mod request_handler {
                                         request_form.build_response(sub_path_args)
                                     {
                                         quiche_http3_server::send_response(
-                                            client,
-                                            stream_id,
-                                            &headers,
-                                            &body[..],
+                                            client, stream_id, headers, body,
                                         )
                                     }
                                 }
@@ -250,6 +261,13 @@ mod request_manager {
         requests_formats: HashMap<ReqPath, Vec<RequestForm>>,
     }
     impl RequestManager {
+        ///
+        ///Init the request manager builder.
+        ///You can add new request forms with add_new_request_form();
+        ///
+        ///
+        ///
+        ///
         pub fn new() -> RequestManagerBuilder {
             RequestManagerBuilder {
                 requests_formats: HashMap::new(),
@@ -291,6 +309,9 @@ mod request_manager {
                 requests_formats: std::mem::replace(&mut self.requests_formats, HashMap::new()),
             }
         }
+        ///
+        ///Add a new RequestForm to the server.
+        ///
         pub fn add_new_request_form(&mut self, request_form: RequestForm) -> &mut Self {
             let path = request_form.path();
 
@@ -321,6 +342,10 @@ mod request_manager {
     }
 
     impl H3Method {
+        ///
+        ///Parse method name from raw bytes.
+        ///
+        ///
         pub fn parse(input: &[u8]) -> Result<H3Method, ()> {
             match &String::from_utf8_lossy(input)[..] {
                 "GET" => Ok(H3Method::GET),
@@ -344,8 +369,12 @@ mod request_manager {
         path: &'static str,
         scheme: &'static str,
         authority: Option<&'static str>,
-        body_cb:
-            Box<dyn Fn(&str, Option<Vec<&str>>) -> Result<Vec<u8>, ()> + Send + Sync + 'static>,
+        body_cb: Box<
+            dyn Fn(&str, Option<Vec<&str>>) -> Result<(Vec<u8>, Vec<u8>), ()>
+                + Send
+                + Sync
+                + 'static,
+        >,
         request_type: RequestType,
     }
 
@@ -377,7 +406,15 @@ mod request_manager {
             &self,
             args: Option<Vec<&str>>,
         ) -> Result<(Vec<h3::Header>, Vec<u8>), ()> {
-            if let Ok(body) = (self.body_cb)(self.path(), args) {}
+            if let Ok((body, content_type)) = (self.body_cb)(self.path(), args) {
+                let headers = vec![
+                    h3::Header::new(b":status", b"200"),
+                    h3::Header::new(b"alt-svc", b"h3=\":3000\""),
+                    h3::Header::new(b"content-type", &content_type),
+                    h3::Header::new(b"content-lenght", body.len().to_string().as_bytes()),
+                ];
+                return Ok((headers, body));
+            }
             //to do
             Err(())
         }
@@ -389,7 +426,13 @@ mod request_manager {
         scheme: Option<&'static str>,
         authority: Option<&'static str>,
         body_cb: Option<
-            Box<dyn Fn(&str, Option<Vec<&str>>) -> Result<Vec<u8>, ()> + Sync + Send + 'static>,
+            Box<
+                dyn Fn(&str, Option<Vec<&str>>) -> Result<(Vec<u8>, Vec<u8>), ()>
+                    /*body, content-type*/
+                    + Sync
+                    + Send
+                    + 'static,
+            >,
         >,
         request_type: Option<RequestType>,
     }
@@ -405,36 +448,60 @@ mod request_manager {
                 request_type: None,
             }
         }
+
         pub fn build(&mut self) -> RequestForm {
             RequestForm {
                 method: self.method.take().unwrap(),
                 path: self.path.take().unwrap(),
-                scheme: self.scheme.take().unwrap(),
+                scheme: self.scheme.take().expect("expected scheme"),
                 authority: self.authority.clone(),
                 body_cb: self.body_cb.take().expect("No callback cb set"),
                 request_type: self.request_type.take().unwrap(),
             }
         }
 
+        ///
+        /// Set the callback for the response. It exposes in parameters 0 = the path of the request,
+        /// parameters 1 = the list of args if any "/path?id=foo&name=bar&other=etc"
+        ///
+        ///The callback returns (body, value of content-type field as bytes)
+        ///
         pub fn set_body_callback(
             &mut self,
-            body_cb: impl Fn(&str, Option<Vec<&str>>) -> Result<Vec<u8>, ()> + Sync + Send + 'static,
+            body_cb: impl Fn(&str, Option<Vec<&str>>) -> Result<(Vec<u8>, Vec<u8>), ()>
+                + Sync
+                + Send
+                + 'static,
         ) -> &mut Self {
             self.body_cb = Some(Box::new(body_cb));
             self
         }
+        ///
+        ///Set the http method. H3Method::GET, ::POST, ::PUT, ::DELETE
+        ///
+        ///
         pub fn set_method(&mut self, method: H3Method) -> &mut Self {
             self.method = Some(method);
             self
         }
+        ///
+        /// Set the request path as "/home"
+        ///
+        ///
         pub fn set_path(&mut self, path: &'static str) -> &mut Self {
             self.path = Some(path);
             self
         }
+        ///
+        /// Set the connexion type : https here
+        ///
         pub fn set_scheme(&mut self, scheme: &'static str) -> &mut Self {
             self.scheme = Some(scheme);
             self
         }
+        ///
+        ///set the request type, in the context of the faces app
+        ///
         pub fn set_request_type(&mut self, request_type: RequestType) -> &mut Self {
             self.request_type = Some(request_type);
             self
@@ -471,7 +538,7 @@ mod test {
             .set_method(request_manager::H3Method::GET)
             .set_path("/upload")
             .set_scheme("https")
-            .set_body_callback(|path, args| Ok(vec![0, 1, 2, 3]))
+            .set_body_callback(|path, args| Ok((vec![0, 1, 2, 3], b"data".to_vec())))
             .set_request_type(RequestType::Ping)
             .build();
 
@@ -479,20 +546,20 @@ mod test {
             .set_method(request_manager::H3Method::GET)
             .set_path("/upload")
             .set_scheme("https")
-            .set_body_callback(|path, args| Ok(vec![0, 1, 2, 3]))
+            .set_body_callback(|path, args| Ok((vec![0, 1, 2, 3], b"data".to_vec())))
             .set_request_type(RequestType::Message("salut !".to_string()))
             .build();
         let new_request_2 = RequestForm::new()
             .set_method(request_manager::H3Method::GET)
             .set_path("/")
-            .set_body_callback(|path, args| Ok(vec![0, 1, 2, 3]))
+            .set_body_callback(|path, args| Ok((vec![0, 1, 2, 3], b"data".to_vec())))
             .set_scheme("https")
             .set_request_type(RequestType::Ping)
             .build();
         let new_request_3 = RequestForm::new()
             .set_method(request_manager::H3Method::GET)
             .set_path("/time")
-            .set_body_callback(|path, args| Ok(vec![0, 1, 2, 3]))
+            .set_body_callback(|path, args| Ok((vec![0, 1, 2, 3], b"data".to_vec())))
             .set_scheme("https")
             .set_request_type(RequestType::Ping)
             .build();

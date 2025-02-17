@@ -1,5 +1,5 @@
-#![allow(warnings)]
 pub mod quiche_http3_server;
+pub use server_initiation::Http3Server;
 
 mod server_initiation {
     use std::sync::Arc;
