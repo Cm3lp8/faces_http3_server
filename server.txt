@@ -47,11 +47,7 @@ mod quiche_implementation {
         let mut socket = mio::net::UdpSocket::bind(*server_config.server_address()).unwrap();
         println!("socket [{:?}]", socket);
         poll.registry()
-            .register(
-                &mut socket,
-                mio::Token(0),
-                mio::Interest::READABLE | mio::Interest::WRITABLE,
-            )
+            .register(&mut socket, mio::Token(0), mio::Interest::READABLE)
             .unwrap();
         // Create the configuration for the QUIC connections.
         let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
@@ -302,7 +298,6 @@ mod quiche_implementation {
             // them on the UDP socket, until quiche reports that there are no more
             // packets to be sent.
             for client in clients.values_mut() {
-                let mut packet_send = 0;
                 loop {
                     let (write, send_info) = match client.conn.send(&mut out) {
                         Ok(v) => v,
@@ -328,12 +323,7 @@ mod quiche_implementation {
                     }
                     //debug!("{} written {} bytes", client.conn.trace_id(), write);
                     println!("{} written {} bytes", client.conn.trace_id(), write);
-                    packet_send += 1;
-                    if packet_send >= 30 {
-                        break;
-                    }
                 }
-                //std::thread::sleep(Duration::from_micros(500));
             }
             // Garbage collect closed connections.
             clients.retain(|_, ref mut c| {
