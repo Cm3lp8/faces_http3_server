@@ -254,10 +254,13 @@ mod quiche_implementation {
                     loop {
                         let http3_conn = client.http3_conn.as_mut().unwrap();
                         match http3_conn.poll(&mut client.conn) {
-                            Ok((stream_id, quiche::h3::Event::Headers { list, .. })) => {
-                                server_config
-                                    .request_handler()
-                                    .parse_headers(&list, stream_id, client);
+                            Ok((stream_id, quiche::h3::Event::Headers { list, more_frames })) => {
+                                server_config.request_handler().parse_headers(
+                                    &list,
+                                    stream_id,
+                                    client,
+                                    more_frames,
+                                );
                                 /*
                                 handle_request(
                                     client,
@@ -268,9 +271,16 @@ mod quiche_implementation {
                                 */
                             }
                             Ok((stream_id, quiche::h3::Event::Data)) => {
-                                &server_config
-                                    .request_handler()
-                                    .fetch_data_stream(stream_id, &client.conn);
+                                while let Ok(read) =
+                                    http3_conn.recv_body(&mut client.conn, stream_id, &mut out)
+                                {
+                                    &server_config.request_handler().write_body_packet(
+                                        stream_id,
+                                        client.conn.trace_id(),
+                                        &out[..read],
+                                        false,
+                                    );
+                                }
                                 info!(
                                     "{} got data on stream id {}",
                                     client.conn.trace_id(),
@@ -281,7 +291,7 @@ mod quiche_implementation {
                             Ok((stream_id, quiche::h3::Event::Finished)) => {
                                 server_config
                                     .request_handler()
-                                    .handle_finished_stream(stream_id, client);
+                                    .handle_finished_stream(stream_id, client.conn.trace_id());
                                 ()
                             }
                             Ok((_stream_id, quiche::h3::Event::Reset { .. })) => (),
@@ -401,10 +411,11 @@ mod quiche_implementation {
         stream_id: u64,
         headers: Vec<quiche::h3::Header>,
         body: Vec<u8>,
+        is_end: bool,
     ) {
         let http3_conn = &mut client.http3_conn.as_mut().unwrap();
         let conn = &mut client.conn;
-        match http3_conn.send_response(conn, stream_id, &headers, false) {
+        match http3_conn.send_response(conn, stream_id, &headers, is_end) {
             Ok(v) => v,
             Err(quiche::h3::Error::StreamBlocked) => {
                 let response = PartialResponse {
@@ -419,6 +430,9 @@ mod quiche_implementation {
                 error!("{} stream send failed {:?}", conn.trace_id(), e);
                 return;
             }
+        }
+        if body.is_empty() {
+            return;
         }
         println!("sending body [{}] bytes", body.len());
         let written = match http3_conn.send_body(conn, stream_id, &body, true) {

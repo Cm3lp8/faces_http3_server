@@ -1,4 +1,5 @@
 pub mod quiche_http3_server;
+pub use quiche_http3_server::QClient;
 pub use server_initiation::Http3Server;
 
 mod server_initiation {
