@@ -49,18 +49,6 @@ mod request_hndlr {
                 println!("entrie [{}]", i.0);
             }
         }
-        pub fn handle_finished_stream(&self, stream_id: u64, conn_id: &str) {
-
-            /*
-             *
-             * Send received data to the output queue,
-             *
-             * clean stream_id in RequestHandler state
-             *
-             * send response to client
-             *
-             * */
-        }
         pub fn fetch_data_stream(
             &self,
             stream_id: u64,
@@ -71,7 +59,7 @@ mod request_hndlr {
         fn get_requests_from_path(&self, path: &str) -> Option<&Vec<RequestForm>> {
             self.request_formats.get(path)
         }
-        pub fn process_response(
+        pub fn handle_finished_stream(
             &self,
             conn_id: &str,
             stream_id: u64,

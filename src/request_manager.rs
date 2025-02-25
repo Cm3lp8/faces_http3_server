@@ -160,9 +160,9 @@ mod request_mngr {
             request_event: RequestEvent,
         ) -> Result<(Vec<h3::Header>, Vec<u8>), ()> {
             if let Some(request_cb) = &self.body_cb {
-                if let Ok(request_response) = request_cb(request_event) {
+                if let Ok(mut request_response) = request_cb(request_event) {
                     let headers = request_response.get_headers();
-                    let body = request_response.get_body();
+                    let body = request_response.take_body();
                     return Ok((headers, body));
                 }
             }

@@ -126,7 +126,7 @@ mod test {
             .set_method(H3Method::GET)
             .set_path("/upload")
             .set_scheme("https")
-            .set_request_callback(|req_event| Ok(RequestResponse))
+            .set_request_callback(|req_event| Ok(RequestResponse::new_ok_200()))
             .set_request_type(RequestType::Ping)
             .build();
 
@@ -134,20 +134,20 @@ mod test {
             .set_method(H3Method::GET)
             .set_path("/upload")
             .set_scheme("https")
-            .set_request_callback(|req_event| Ok(RequestResponse))
+            .set_request_callback(|req_event| Ok(RequestResponse::new_ok_200()))
             .set_request_type(RequestType::Message("salut !".to_string()))
             .build();
         let new_request_2 = RequestForm::new()
             .set_method(H3Method::GET)
             .set_path("/")
-            .set_request_callback(|req_event| Ok(RequestResponse))
+            .set_request_callback(|req_event| Ok(RequestResponse::new_ok_200()))
             .set_scheme("https")
             .set_request_type(RequestType::Ping)
             .build();
         let new_request_3 = RequestForm::new()
             .set_method(H3Method::GET)
             .set_path("/time")
-            .set_request_callback(|req_event| Ok(RequestResponse))
+            .set_request_callback(|req_event| Ok(RequestResponse::new_ok_200()))
             .set_scheme("https")
             .set_request_type(RequestType::Ping)
             .build();

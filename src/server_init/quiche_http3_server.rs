@@ -289,9 +289,12 @@ mod quiche_implementation {
                                 //handle_data
                             }
                             Ok((stream_id, quiche::h3::Event::Finished)) => {
-                                server_config
-                                    .request_handler()
-                                    .handle_finished_stream(stream_id, client.conn.trace_id());
+                                let trace_id = client.conn.trace_id().to_owned();
+                                server_config.request_handler().handle_finished_stream(
+                                    trace_id.as_str(),
+                                    stream_id,
+                                    client,
+                                );
                                 ()
                             }
                             Ok((_stream_id, quiche::h3::Event::Reset { .. })) => (),
