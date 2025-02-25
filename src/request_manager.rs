@@ -1,22 +1,72 @@
 use crate::request_handler::RequestHandler;
+pub use crate::request_manager::request_mngr::RequestManagerInner;
 pub use request_mngr::{
     H3Method, RequestForm, RequestFormBuilder, RequestManager, RequestManagerBuilder, RequestType,
 };
+
 mod request_mngr {
-    use std::collections::HashMap;
+    use std::{
+        collections::HashMap,
+        hash::Hash,
+        sync::{Arc, Mutex},
+    };
 
     use quiche::h3;
 
-    use crate::{request_events::RequestEvent, request_response::RequestResponse};
+    use crate::{
+        request_events::RequestEvent, request_handler::RequestsTable,
+        request_response::RequestResponse,
+    };
 
     use super::*;
 
     type ReqPath = &'static str;
 
     pub struct RequestManager {
-        requests_formats: HashMap<ReqPath, Vec<RequestForm>>,
+        inner: Arc<Mutex<RequestManagerInner>>,
     }
     impl RequestManager {
+        pub fn new() -> RequestManagerBuilder {
+            RequestManagerBuilder {
+                requests_formats: HashMap::new(),
+            }
+        }
+        pub fn get_requests_from_path(
+            &self,
+            path: &str,
+            cb: impl FnOnce(Option<&Vec<RequestForm>>),
+        ) {
+            let guard = &*self.inner.lock().unwrap();
+
+            cb(guard.get_requests_from_path(path));
+        }
+        pub fn get_requests_from_path_and_method_and_request_type(
+            &self,
+            path: &str,
+            methode: H3Method,
+            request_type: RequestType,
+            cb: impl FnOnce(Option<&RequestForm>),
+        ) {
+            let guard = &*self.inner.lock().unwrap();
+
+            cb(guard.get_requests_from_path_and_method_and_request_type(
+                path,
+                methode,
+                request_type,
+            ));
+        }
+        pub fn request_handler(&self) -> RequestHandler {
+            RequestHandler::new(self.inner.clone())
+        }
+    }
+
+    pub struct RequestManagerInner {
+        requests_formats: HashMap<ReqPath, Vec<RequestForm>>,
+        request_states: RequestsTable, //trace_id of the Connection as
+                                       //key value is HashMap
+                                       //for stream_id u64
+    }
+    impl RequestManagerInner {
         ///
         ///Init the request manager builder.
         ///You can add new request forms with add_new_request_form();
@@ -29,10 +79,13 @@ mod request_mngr {
                 requests_formats: HashMap::new(),
             }
         }
-
-        pub fn request_handler(&self) -> RequestHandler {
-            RequestHandler::new(&self.requests_formats)
+        pub fn request_states(&self) -> &RequestsTable {
+            &self.request_states
         }
+        pub fn request_formats(&self) -> &HashMap<ReqPath, Vec<RequestForm>> {
+            &self.requests_formats
+        }
+
         pub fn get_requests_from_path(&self, path: &str) -> Option<&Vec<RequestForm>> {
             self.requests_formats.get(path)
         }
@@ -54,6 +107,36 @@ mod request_mngr {
                 None
             }
         }
+        /// Search for the corresponding request format to build the response and send it by triggering the
+        /// associated callback.
+        pub fn get_requests_from_path_and_method<'b>(
+            &self,
+            path: &'b str,
+            methode: H3Method,
+        ) -> Option<(&RequestForm, Option<Vec<&'b str>>)> {
+            //if param in path
+
+            let mut path_s = path.to_string();
+            let mut param_trail: Option<Vec<&str>> = None;
+
+            if let Some((path, id)) = path.split_once("?") {
+                path_s = path.to_string();
+
+                let args_it: Vec<&str> = id.split("&").collect();
+                param_trail = Some(args_it);
+            }
+
+            if let Some(request_coll) = self.get_requests_from_path(path_s.as_str()) {
+                if let Some(found_request) =
+                    request_coll.iter().find(|item| item.method() == &methode)
+                {
+                    return Some((found_request, param_trail));
+                }
+                None
+            } else {
+                None
+            }
+        }
     }
 
     pub struct RequestManagerBuilder {
@@ -61,8 +144,13 @@ mod request_mngr {
     }
     impl RequestManagerBuilder {
         pub fn build(&mut self) -> RequestManager {
-            RequestManager {
+            let request_manager_inner = RequestManagerInner {
                 requests_formats: std::mem::replace(&mut self.requests_formats, HashMap::new()),
+                request_states: RequestsTable::new(),
+            };
+
+            RequestManager {
+                inner: Arc::new(Mutex::new(request_manager_inner)),
             }
         }
         ///
@@ -89,7 +177,7 @@ mod request_mngr {
         }
     }
 
-    #[derive(Clone, Copy, PartialEq)]
+    #[derive(Clone, Debug, Copy, PartialEq)]
     pub enum H3Method {
         GET,
         POST,

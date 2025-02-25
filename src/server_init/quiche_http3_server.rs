@@ -255,6 +255,7 @@ mod quiche_implementation {
                         let http3_conn = client.http3_conn.as_mut().unwrap();
                         match http3_conn.poll(&mut client.conn) {
                             Ok((stream_id, quiche::h3::Event::Headers { list, more_frames })) => {
+                                println!("new req [{:?}]", list);
                                 server_config.request_handler().parse_headers(
                                     &list,
                                     stream_id,
@@ -274,6 +275,12 @@ mod quiche_implementation {
                                 while let Ok(read) =
                                     http3_conn.recv_body(&mut client.conn, stream_id, &mut out)
                                 {
+                                    println!(
+                                        "{} got data on stream id {} \n[{:?}]",
+                                        client.conn.trace_id(),
+                                        stream_id,
+                                        &out[..read]
+                                    );
                                     &server_config.request_handler().write_body_packet(
                                         stream_id,
                                         client.conn.trace_id(),
@@ -281,14 +288,10 @@ mod quiche_implementation {
                                         false,
                                     );
                                 }
-                                info!(
-                                    "{} got data on stream id {}",
-                                    client.conn.trace_id(),
-                                    stream_id
-                                );
                                 //handle_data
                             }
                             Ok((stream_id, quiche::h3::Event::Finished)) => {
+                                println!("finished ! stream [{}]", stream_id);
                                 let trace_id = client.conn.trace_id().to_owned();
                                 server_config.request_handler().handle_finished_stream(
                                     trace_id.as_str(),
@@ -434,7 +437,7 @@ mod quiche_implementation {
                 return;
             }
         }
-        if body.is_empty() {
+        if body.len() == 0 {
             return;
         }
         println!("sending body [{}] bytes", body.len());

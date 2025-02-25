@@ -1,6 +1,6 @@
 use std::thread;
 
-use faces_quic_server::{H3Method, Http3Server, RequestForm};
+use faces_quic_server::{ContentType, H3Method, Http3Server, RequestForm, RequestResponse};
 use faces_quic_server::{RequestManager, RequestManagerBuilder, RequestType, ServerConfig};
 fn main() {
     let addr = "127.0.0.1:3000";
@@ -13,7 +13,8 @@ fn main() {
         .set_request_callback(|mut req_event| {
             let args = req_event.args();
             let body = req_event.take_body();
-            Err(())
+
+            Ok(RequestResponse::new_ok_200())
         })
         .set_request_type(RequestType::Ping)
         .build();
@@ -22,6 +23,7 @@ fn main() {
         .set_method(H3Method::POST)
         .set_scheme("https")
         .set_request_callback(|req_event| {
+            println!("callback triggered large data");
             /*
                         let mut name: Option<&str> = None;
                         if let Some(args) = args {
@@ -52,7 +54,13 @@ fn main() {
                             b"Hello unknown person, I made a dream last night! However, It wasn't about Tibet"
                                 .to_vec();
             */
-            Err(())
+
+            let response = RequestResponse::new()
+                .set_status(faces_quic_server::Status::Ok(200))
+                .set_body(b"Hello new test !!!".to_vec())
+                .set_content_type(ContentType::Text)
+                .build();
+            response
         })
         .set_request_type(RequestType::Ping)
         .build();

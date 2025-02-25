@@ -1,6 +1,7 @@
 #[macro_use]
 extern crate log;
 
+pub use request_response::{ContentType, RequestResponse, Status};
 pub use server_config::{
     H3Method, RequestForm, RequestManager, RequestManagerBuilder, RequestType, ServerConfig,
 };
