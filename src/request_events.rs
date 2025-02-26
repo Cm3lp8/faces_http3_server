@@ -12,12 +12,18 @@ mod request_event {
         is_end: bool,
     }
     impl RequestEvent {
-        pub fn new(path: &str, method: H3Method, args: Option<Vec<ReqArgs>>, is_end: bool) -> Self {
+        pub fn new(
+            path: &str,
+            method: H3Method,
+            args: Option<Vec<ReqArgs>>,
+            body: Option<Vec<u8>>,
+            is_end: bool,
+        ) -> Self {
             Self {
                 path: path.to_owned(),
                 method,
                 args,
-                body: vec![],
+                body: body.unwrap_or(vec![]),
                 is_end,
             }
         }

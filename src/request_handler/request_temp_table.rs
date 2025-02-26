@@ -32,7 +32,6 @@ mod req_temp_table {
             stream_id: u64,
         ) -> Result<RequestEvent, ()> {
             let mut can_clean = false;
-            println!("table [{:#?}]", self.table);
             let res = if let Some(partial_req) = self
                 .table
                 .lock()
@@ -60,7 +59,6 @@ mod req_temp_table {
             is_end: bool,
         ) {
             if let Some(entry) = self.table.lock().unwrap().get_mut(&(conn_id, stream_id)) {
-                println!("writing data to body !!!");
                 entry.extend_data(packet, is_end);
             }
         }
@@ -74,12 +72,10 @@ mod req_temp_table {
             is_end: bool,
         ) {
             let partial_request = PartialReq::new(conn_id.clone(), stream_id, method, path, is_end);
-            println!("adding partial request [{:?}]", partial_request);
             self.table
                 .lock()
                 .unwrap()
                 .insert((conn_id, stream_id), partial_request);
-            println!("tabe [{:#?}]", self.table);
         }
     }
     #[derive(Debug)]
@@ -120,6 +116,7 @@ mod req_temp_table {
                 self.path.as_str(),
                 self.method,
                 self.args.take(),
+                Some(std::mem::replace(&mut self.body, vec![])),
                 self.is_end,
             )
         }

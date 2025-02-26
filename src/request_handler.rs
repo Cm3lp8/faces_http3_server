@@ -11,6 +11,7 @@ mod request_hndlr {
     use std::{
         collections::HashMap,
         env::args,
+        fmt::Pointer,
         sync::{Arc, Mutex},
     };
 
@@ -72,7 +73,6 @@ mod request_hndlr {
                 .request_states()
                 .build_request_event(conn_id.to_owned(), stream_id)
             {
-                println!(" !!!!found req !!!");
                 let is_end = request_event.is_end();
                 if let Some((request_form, _)) = guard
                     .get_requests_from_path_and_method(request_event.path(), request_event.method())
@@ -108,7 +108,7 @@ mod request_hndlr {
                     }
                 }
             } else {
-                println!("did not fonud");
+                debug!("Not found");
             }
         }
         pub fn parse_headers(
@@ -134,7 +134,6 @@ mod request_hndlr {
             }
             let guard = &*self.inner.lock().unwrap();
             if let Ok(method) = H3Method::parse(method.unwrap()) {
-                println!("adding partial repsonse");
                 guard.request_states().add_partial_request(
                     conn_id.clone(),
                     stream_id,
@@ -147,7 +146,7 @@ mod request_hndlr {
             }
 
             if more_frames {
-                println!("returning because more frames");
+                debug!("returning because more frames");
                 return;
             }
 

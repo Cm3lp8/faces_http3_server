@@ -1,3 +1,4 @@
+use std::ops::Add;
 use std::thread;
 
 use faces_quic_server::{ContentType, H3Method, Http3Server, RequestForm, RequestResponse};
@@ -23,41 +24,20 @@ fn main() {
         .set_method(H3Method::POST)
         .set_scheme("https")
         .set_request_callback(|req_event| {
-            println!("callback triggered large data");
-            /*
-                        let mut name: Option<&str> = None;
-                        if let Some(args) = args {
-                            args.iter().find(|item| {
-                                if let Some((field, value)) = item.split_once("=") {
-                                    if field == "name" {
-                                        name = Some(value);
-                                    }
-                                    true
-                                } else {
-                                    false
-                                }
-                            });
-                        }
+            println!("Large data received len [{:?}]", req_event.as_body().len());
+            let len = req_event.as_body().len();
+            println!("body extract [{:?}]", &req_event.as_body()[len - 10..len]);
 
-                        let mut body: Vec<u8> = vec![];
-                        if let Some(name) = name {
-                            body = format!(
-                                "Hello {}, I made a dream last night! However, It wasn't about Tibet",
-                                name
-                            )
-                            .as_str()
-                            .as_bytes()
-                            .to_vec();
-                            return Ok((body, b"text/plain".to_vec()));
-                        }
-                        body =
-                            b"Hello unknown person, I made a dream last night! However, It wasn't about Tibet"
-                                .to_vec();
-            */
-
+            let extract = &req_event.as_body()[len - 5..len].to_vec();
+            let mut s = String::new();
+            for it in extract {
+                s = s.add(it.to_string().as_str());
+                s = s.add(", ");
+            }
+            let resp = format!("Hello this is the trail : {}", s);
             let response = RequestResponse::new()
                 .set_status(faces_quic_server::Status::Ok(200))
-                .set_body(b"Hello new test !!!".to_vec())
+                .set_body(resp.as_bytes().to_vec())
                 .set_content_type(ContentType::Text)
                 .build();
             response

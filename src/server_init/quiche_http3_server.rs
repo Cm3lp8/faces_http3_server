@@ -27,7 +27,10 @@ impl Client {
 type ClientMap = HashMap<quiche::ConnectionId<'static>, Client>;
 pub use quiche_implementation::run;
 mod quiche_implementation {
-    use std::{sync::Arc, time::Duration};
+    use std::{
+        sync::Arc,
+        time::{Duration, Instant},
+    };
 
     use crate::{
         server_config::{self, RequestHandler},
@@ -188,7 +191,7 @@ mod quiche_implementation {
                     // instead of changing it again.
                     let scid = hdr.dcid.clone();
                     //debug!("New connection: dcid={:?} scid={:?}", hdr.dcid, scid);
-                    println!("New connection: dcid={:?} scid={:?}", hdr.dcid, scid);
+                    debug!("New connection: dcid={:?} scid={:?}", hdr.dcid, scid);
                     let conn = quiche::accept(&scid, odcid.as_ref(), local_addr, from, &mut config)
                         .unwrap();
                     let client = Client {
@@ -228,7 +231,7 @@ mod quiche_implementation {
                                             client.conn.trace_id()
                                         );
                     */
-                    println!(
+                    debug!(
                         "{} QUIC handshake completed, now trying HTTP/3",
                         client.conn.trace_id()
                     );
@@ -255,7 +258,7 @@ mod quiche_implementation {
                         let http3_conn = client.http3_conn.as_mut().unwrap();
                         match http3_conn.poll(&mut client.conn) {
                             Ok((stream_id, quiche::h3::Event::Headers { list, more_frames })) => {
-                                println!("new req [{:?}]", list);
+                                // println!("new req [{:?}]", list);
                                 server_config.request_handler().parse_headers(
                                     &list,
                                     stream_id,
@@ -275,12 +278,14 @@ mod quiche_implementation {
                                 while let Ok(read) =
                                     http3_conn.recv_body(&mut client.conn, stream_id, &mut out)
                                 {
-                                    println!(
-                                        "{} got data on stream id {} \n[{:?}]",
-                                        client.conn.trace_id(),
-                                        stream_id,
-                                        &out[..read]
-                                    );
+                                    /*
+                                                                        log!(
+                                                                            "{} got data on stream id {} \n[{:?}]",
+                                                                            client.conn.trace_id(),
+                                                                            stream_id,
+                                                                            &out[..read]
+                                                                        );
+                                    */
                                     &server_config.request_handler().write_body_packet(
                                         stream_id,
                                         client.conn.trace_id(),
@@ -291,7 +296,7 @@ mod quiche_implementation {
                                 //handle_data
                             }
                             Ok((stream_id, quiche::h3::Event::Finished)) => {
-                                println!("finished ! stream [{}]", stream_id);
+                                debug!("finished ! stream [{}]", stream_id);
                                 let trace_id = client.conn.trace_id().to_owned();
                                 server_config.request_handler().handle_finished_stream(
                                     trace_id.as_str(),
@@ -317,6 +322,9 @@ mod quiche_implementation {
             // Generate outgoing QUIC packets for all active connections and send
             // them on the UDP socket, until quiche reports that there are no more
             // packets to be sent.
+
+            let pacing_delay = Duration::from_micros(112);
+            let mut send_duration = Instant::now();
             for client in clients.values_mut() {
                 let mut packet_send = 0;
                 loop {
@@ -324,12 +332,12 @@ mod quiche_implementation {
                         Ok(v) => v,
                         Err(quiche::Error::Done) => {
                             //debug!("{} done writing", client.conn.trace_id());
-                            println!("{} done writing", client.conn.trace_id());
+                            debug!("{} done writing", client.conn.trace_id());
                             break;
                         }
                         Err(e) => {
                             //error!("{} send failed: {:?}", client.conn.trace_id(), e);
-                            println!("{} send failed: {:?}", client.conn.trace_id(), e);
+                            debug!("{} send failed: {:?}", client.conn.trace_id(), e);
                             client.conn.close(false, 0x1, b"fail").ok();
                             break;
                         }
@@ -342,12 +350,17 @@ mod quiche_implementation {
                         }
                         panic!("send() failed: {:?}", e);
                     }
-                    //debug!("{} written {} bytes", client.conn.trace_id(), write);
-                    println!("{} written {} bytes", client.conn.trace_id(), write);
+                    debug!("{} written {} bytes", client.conn.trace_id(), write);
+                    //  println!("{} written {} bytes", client.conn.trace_id(), write);
                     packet_send += 1;
                     if packet_send >= 30 {
                         break;
                     }
+
+                    while send_duration.elapsed() < pacing_delay {
+                        std::thread::yield_now();
+                    }
+                    send_duration = Instant::now();
                 }
                 //std::thread::sleep(Duration::from_micros(500));
             }
@@ -440,7 +453,7 @@ mod quiche_implementation {
         if body.len() == 0 {
             return;
         }
-        println!("sending body [{}] bytes", body.len());
+        debug!("sending body [{}] bytes", body.len());
         let written = match http3_conn.send_body(conn, stream_id, &body, true) {
             Ok(v) => v,
             Err(quiche::h3::Error::Done) => 0,
