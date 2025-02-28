@@ -45,7 +45,7 @@ mod quiche_implementation {
 
         // Setup the event loop.
         let mut poll = mio::Poll::new().unwrap();
-        let mut events = mio::Events::with_capacity(1024);
+        let mut events = mio::Events::with_capacity(8192);
         // Create the UDP listening socket, and register it with the event loop.
         let mut socket = mio::net::UdpSocket::bind(*server_config.server_address()).unwrap();
         println!("socket [{:?}]", socket);
@@ -67,16 +67,17 @@ mod quiche_implementation {
         config
             .set_application_protos(quiche::h3::APPLICATION_PROTOCOL)
             .unwrap();
-        config.set_max_idle_timeout(5000);
+        config.set_max_idle_timeout(10_000);
         config.set_max_recv_udp_payload_size(MAX_DATAGRAM_SIZE);
         config.set_max_send_udp_payload_size(MAX_DATAGRAM_SIZE);
-        config.set_initial_max_data(10_000_000);
-        config.set_initial_max_stream_data_bidi_local(1_000_000);
-        config.set_initial_max_stream_data_bidi_remote(1_000_000);
+        config.set_initial_max_data(100_000_000);
+        config.set_initial_max_stream_data_bidi_local(100_000_000);
+        config.set_initial_max_stream_data_bidi_remote(100_000_000);
         config.set_initial_max_stream_data_uni(1_000_000);
         config.set_initial_max_streams_bidi(100);
         config.set_initial_max_streams_uni(100);
         config.set_disable_active_migration(true);
+        config.set_cc_algorithm(quiche::CongestionControlAlgorithm::Reno);
         config.enable_early_data();
         let h3_config = quiche::h3::Config::new().unwrap();
         let rng = SystemRandom::new();
@@ -254,7 +255,8 @@ mod quiche_implementation {
                         handle_writable(client, stream_id);
                     }
                     // Process HTTP/3 events.
-                    loop {
+                    let mut req_recvd = 0;
+                    while req_recvd < 100 {
                         let http3_conn = client.http3_conn.as_mut().unwrap();
                         match http3_conn.poll(&mut client.conn) {
                             Ok((stream_id, quiche::h3::Event::Headers { list, more_frames })) => {
@@ -265,6 +267,7 @@ mod quiche_implementation {
                                     client,
                                     more_frames,
                                 );
+                                req_recvd += 1;
                                 /*
                                 handle_request(
                                     client,
@@ -278,25 +281,18 @@ mod quiche_implementation {
                                 while let Ok(read) =
                                     http3_conn.recv_body(&mut client.conn, stream_id, &mut out)
                                 {
-                                    /*
-                                                                        log!(
-                                                                            "{} got data on stream id {} \n[{:?}]",
-                                                                            client.conn.trace_id(),
-                                                                            stream_id,
-                                                                            &out[..read]
-                                                                        );
-                                    */
                                     &server_config.request_handler().write_body_packet(
                                         stream_id,
                                         client.conn.trace_id(),
                                         &out[..read],
                                         false,
                                     );
+                                    req_recvd += 1;
                                 }
                                 //handle_data
                             }
                             Ok((stream_id, quiche::h3::Event::Finished)) => {
-                                debug!("finished ! stream [{}]", stream_id);
+                                warn!("finished ! stream [{}]", stream_id);
                                 let trace_id = client.conn.trace_id().to_owned();
                                 server_config.request_handler().handle_finished_stream(
                                     trace_id.as_str(),
@@ -306,12 +302,19 @@ mod quiche_implementation {
                                 ()
                             }
                             Ok((_stream_id, quiche::h3::Event::Reset { .. })) => (),
-                            Ok((_prioritized_element_id, quiche::h3::Event::PriorityUpdate)) => (),
-                            Ok((_goaway_id, quiche::h3::Event::GoAway)) => (),
+                            Ok((_prioritized_element_id, quiche::h3::Event::PriorityUpdate)) => {
+                                warn!("prioritytupdate");
+                                ()
+                            }
+                            Ok((_goaway_id, quiche::h3::Event::GoAway)) => {
+                                warn!("GoAway");
+                                ()
+                            }
                             Err(quiche::h3::Error::Done) => {
                                 break;
                             }
                             Err(e) => {
+                                warn!("other error");
                                 error!("{} HTTP/3 error {:?}", client.conn.trace_id(), e);
                                 break;
                             }
@@ -323,7 +326,7 @@ mod quiche_implementation {
             // them on the UDP socket, until quiche reports that there are no more
             // packets to be sent.
 
-            let pacing_delay = Duration::from_micros(112);
+            let pacing_delay = Duration::from_micros(1);
             let mut send_duration = Instant::now();
             for client in clients.values_mut() {
                 let mut packet_send = 0;
@@ -337,24 +340,23 @@ mod quiche_implementation {
                         }
                         Err(e) => {
                             //error!("{} send failed: {:?}", client.conn.trace_id(), e);
-                            debug!("{} send failed: {:?}", client.conn.trace_id(), e);
+                            warn!("{} send failed: {:?}", client.conn.trace_id(), e);
                             client.conn.close(false, 0x1, b"fail").ok();
                             break;
                         }
                     };
                     if let Err(e) = socket.send_to(&out[..write], send_info.to) {
                         if e.kind() == std::io::ErrorKind::WouldBlock {
-                            //debug!("send() would block");
-                            //       println!("send() would block");
+                            warn!("send() would block, [{:?}]", e);
                             break;
                         }
                         panic!("send() failed: {:?}", e);
                     }
-                    debug!("{} written {} bytes", client.conn.trace_id(), write);
+                    debug!("\n{} written {} bytes", client.conn.trace_id(), write);
                     //  println!("{} written {} bytes", client.conn.trace_id(), write);
                     packet_send += 1;
-                    if packet_send >= 30 {
-                        break;
+                    if packet_send >= 10 {
+                        //        break;
                     }
 
                     while send_duration.elapsed() < pacing_delay {

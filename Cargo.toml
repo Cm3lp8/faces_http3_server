@@ -12,3 +12,4 @@ quiche = "0.23.2"
 log = "0.4.25"
 mio = { version = "1.0.3", features = ["net", "os-poll"] }
 ring = "0.17.9"
+env_logger = "0.11.6"

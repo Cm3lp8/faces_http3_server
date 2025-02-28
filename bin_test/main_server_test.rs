@@ -3,7 +3,9 @@ use std::thread;
 
 use faces_quic_server::{ContentType, H3Method, Http3Server, RequestForm, RequestResponse};
 use faces_quic_server::{RequestManager, RequestManagerBuilder, RequestType, ServerConfig};
+use log::info;
 fn main() {
+    env_logger::init();
     let addr = "127.0.0.1:3000";
     let mut request_manager = RequestManager::new();
 
@@ -26,7 +28,7 @@ fn main() {
         .set_request_callback(|req_event| {
             println!("Large data received len [{:?}]", req_event.as_body().len());
             let len = req_event.as_body().len();
-            println!("body extract [{:?}]", &req_event.as_body()[len - 10..len]);
+            info!("body extract [{:?}]", &req_event.as_body()[len - 10..len]);
 
             let extract = &req_event.as_body()[len - 5..len].to_vec();
             let mut s = String::new();
@@ -57,6 +59,6 @@ fn main() {
 
     Http3Server::new(server_config).run();
 
-    println!("[Server is listening at [{:?}] ]", addr);
+    info!("[Server is listening at [{:?}] ]", addr);
     thread::park();
 }
