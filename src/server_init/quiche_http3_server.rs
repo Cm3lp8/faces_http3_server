@@ -1,4 +1,6 @@
-pub use self::quiche_implementation::send_response;
+pub use self::quiche_implementation::{
+    send_body, send_header, send_response, send_response_when_finished,
+};
 use quiche::h3::{self, NameValue};
 use quiche::Connection;
 use ring::rand::*;
@@ -15,6 +17,7 @@ pub struct Client {
     conn: quiche::Connection,
     http3_conn: Option<quiche::h3::Connection>,
     partial_responses: HashMap<u64, PartialResponse>,
+    progress_status_requests: HashMap<u64, u64>,
 }
 impl Client {
     pub fn conn(&mut self) -> &mut Connection {
@@ -27,10 +30,13 @@ impl Client {
 type ClientMap = HashMap<quiche::ConnectionId<'static>, Client>;
 pub use quiche_implementation::run;
 mod quiche_implementation {
+    use core::error;
     use std::{
         sync::Arc,
         time::{Duration, Instant},
     };
+
+    use quiche::h3::Priority;
 
     use crate::{
         server_config::{self, RequestHandler},
@@ -199,6 +205,7 @@ mod quiche_implementation {
                         conn,
                         http3_conn: None,
                         partial_responses: HashMap::new(),
+                        progress_status_requests: HashMap::new(),
                     };
                     clients.insert(scid.clone(), client);
                     clients.get_mut(&scid).unwrap()
@@ -281,15 +288,28 @@ mod quiche_implementation {
                                 while let Ok(read) =
                                     http3_conn.recv_body(&mut client.conn, stream_id, &mut out)
                                 {
-                                    &server_config.request_handler().write_body_packet(
-                                        stream_id,
-                                        client.conn.trace_id(),
-                                        &out[..read],
-                                        false,
-                                    );
+                                    if let Err(_) =
+                                        server_config.request_handler().write_body_packet(
+                                            stream_id,
+                                            client.conn.trace_id(),
+                                            &out[..read],
+                                            false,
+                                        )
+                                    {
+                                        error!(
+                                            "Failed writing body packet on stream_id [{stream_id}]"
+                                        )
+                                    }
                                     req_recvd += 1;
                                 }
-                                //handle_data
+                                let trace_id = client.conn.trace_id().to_string();
+
+                                if let Err(_) = server_config
+                                    .request_handler()
+                                    .send_reception_status(client, stream_id, trace_id.as_str())
+                                {
+                                    error!("Failed to send progress response status")
+                                }
                             }
                             Ok((stream_id, quiche::h3::Event::Finished)) => {
                                 warn!("finished ! stream [{}]", stream_id);
@@ -427,16 +447,71 @@ mod quiche_implementation {
         Some(quiche::ConnectionId::from_ref(&token[addr.len()..]))
     }
     /// Handles incoming HTTP/3 requests.
-    pub fn send_response(
+    pub fn send_header(
+        client: &mut Client,
+        stream_id: u64,
+        headers: Vec<quiche::h3::Header>,
+        is_end: bool,
+    ) -> Result<usize, ()> {
+        let http3_conn = &mut client.http3_conn.as_mut().unwrap();
+        let conn = &mut client.conn;
+        if let Err(_) = http3_conn.send_response_with_priority(
+            conn,
+            stream_id,
+            &headers,
+            &Priority::new(7, true),
+            is_end,
+        ) {
+            error!("Failed send intermediate 100 response")
+        };
+        Ok(1)
+    }
+    pub fn send_body(
+        client: &mut Client,
+        stream_id: u64,
+        body: Vec<u8>,
+        is_end: bool,
+    ) -> Result<usize, ()> {
+        if body.len() == 0 {
+            return Ok(0);
+        }
+        debug!("sending body [{}] bytes", body.len());
+        let http3_conn = &mut client.http3_conn.as_mut().unwrap();
+        let conn = &mut client.conn;
+        let written = match http3_conn.send_body(conn, stream_id, &body, is_end) {
+            Ok(v) => v,
+            Err(quiche::h3::Error::Done) => 0,
+            Err(e) => {
+                error!("{} stream send failed {:?}", conn.trace_id(), e);
+                return Err(());
+            }
+        };
+        if written < body.len() {
+            let response = PartialResponse {
+                headers: None,
+                body,
+                written,
+            };
+            client.partial_responses.insert(stream_id, response);
+        }
+        return Ok(written);
+        /*
+         *
+         * Send reponse to the client
+         *
+         * */
+        Err(())
+    }
+    pub fn send_response_when_finished(
         client: &mut Client,
         stream_id: u64,
         headers: Vec<quiche::h3::Header>,
         body: Vec<u8>,
         is_end: bool,
-    ) {
+    ) -> Result<usize, ()> {
         let http3_conn = &mut client.http3_conn.as_mut().unwrap();
         let conn = &mut client.conn;
-        match http3_conn.send_response(conn, stream_id, &headers, is_end) {
+        match http3_conn.send_additional_headers(conn, stream_id, &headers, false, false) {
             Ok(v) => v,
             Err(quiche::h3::Error::StreamBlocked) => {
                 let response = PartialResponse {
@@ -445,15 +520,41 @@ mod quiche_implementation {
                     written: 0,
                 };
                 client.partial_responses.insert(stream_id, response);
-                return;
+                return Err(());
             }
             Err(e) => {
-                error!("{} stream send failed {:?}", conn.trace_id(), e);
-                return;
+                error!(
+                    "{}, headers [{:#?}] stream send failed {:?}",
+                    conn.trace_id(),
+                    headers,
+                    e
+                );
+                return Err(());
+            }
+        }
+        match http3_conn.send_additional_headers(conn, stream_id, &headers, false, false) {
+            Ok(v) => v,
+            Err(quiche::h3::Error::StreamBlocked) => {
+                let response = PartialResponse {
+                    headers: Some(headers),
+                    body,
+                    written: 0,
+                };
+                client.partial_responses.insert(stream_id, response);
+                return Err(());
+            }
+            Err(e) => {
+                error!(
+                    "{}, headers [{:#?}] stream send failed {:?}",
+                    conn.trace_id(),
+                    headers,
+                    e
+                );
+                return Err(());
             }
         }
         if body.len() == 0 {
-            return;
+            return Ok(0);
         }
         debug!("sending body [{}] bytes", body.len());
         let written = match http3_conn.send_body(conn, stream_id, &body, true) {
@@ -461,7 +562,7 @@ mod quiche_implementation {
             Err(quiche::h3::Error::Done) => 0,
             Err(e) => {
                 error!("{} stream send failed {:?}", conn.trace_id(), e);
-                return;
+                return Err(());
             }
         };
         if written < body.len() {
@@ -477,6 +578,70 @@ mod quiche_implementation {
          * Send reponse to the client
          *
          * */
+        Ok(written)
+    }
+    pub fn send_response(
+        client: &mut Client,
+        stream_id: u64,
+        headers: Vec<quiche::h3::Header>,
+        body: Vec<u8>,
+        is_end: bool,
+    ) -> Result<usize, ()> {
+        let http3_conn = &mut client.http3_conn.as_mut().unwrap();
+        let conn = &mut client.conn;
+        match http3_conn.send_response_with_priority(
+            conn,
+            stream_id,
+            &headers,
+            &Priority::default(),
+            is_end,
+        ) {
+            Ok(v) => v,
+            Err(quiche::h3::Error::StreamBlocked) => {
+                let response = PartialResponse {
+                    headers: Some(headers),
+                    body,
+                    written: 0,
+                };
+                client.partial_responses.insert(stream_id, response);
+                return Err(());
+            }
+            Err(e) => {
+                error!(
+                    "{}, headers [{:#?}] stream send failed {:?}",
+                    conn.trace_id(),
+                    headers,
+                    e
+                );
+                return Err(());
+            }
+        }
+        if body.len() == 0 {
+            return Ok(0);
+        }
+        debug!("sending body [{}] bytes", body.len());
+        let written = match http3_conn.send_body(conn, stream_id, &body, true) {
+            Ok(v) => v,
+            Err(quiche::h3::Error::Done) => 0,
+            Err(e) => {
+                error!("{} stream send failed {:?}", conn.trace_id(), e);
+                return Err(());
+            }
+        };
+        if written < body.len() {
+            let response = PartialResponse {
+                headers: None,
+                body,
+                written,
+            };
+            client.partial_responses.insert(stream_id, response);
+        }
+        /*
+         *
+         * Send reponse to the client
+         *
+         * */
+        Ok(written)
     }
     fn handle_request(
         client: &mut Client,

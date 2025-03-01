@@ -39,11 +39,69 @@ mod request_hndlr {
                 inner: request_mngr_inner,
             }
         }
-        pub fn write_body_packet(&self, stream_id: u64, conn_id: &str, packet: &[u8], end: bool) {
+        ///
+        /// Send a reception status to the client, only if something can be updated.
+        ///
+        ///
+        pub fn send_reception_status(
+            &self,
+            client: &mut quiche_http3_server::QClient,
+            stream_id: u64,
+            conn_id: &str,
+        ) -> Result<usize, ()> {
             let guard = &*self.inner.lock().unwrap();
-            guard
+            let reception_status = guard
                 .request_states()
-                .write_body_packet(conn_id.to_owned(), stream_id, packet, end);
+                .get_reception_status_infos(stream_id, conn_id.to_owned());
+
+            if let Some((reception_status, header_send)) = reception_status {
+                if reception_status.has_something_to_update() {
+                    if let Some(percentage_written) =
+                        reception_status.get_percentage_written_to_string()
+                    {
+                        let headers = vec![
+                            h3::Header::new(b":status", b"100"),
+                            h3::Header::new(b"x-for", stream_id.to_string().as_bytes()),
+                            h3::Header::new(b"x-progress", percentage_written.as_bytes()),
+                        ];
+
+                        if !header_send {
+                            guard
+                                .request_states()
+                                .set_intermediate_headers_send(stream_id, conn_id.to_string());
+                            return quiche_http3_server::send_header(
+                                client, stream_id, headers, false,
+                            );
+                        }
+                        {
+                            if let Some(body) = reception_status.body() {
+                                if let Err(()) =
+                                    quiche_http3_server::send_body(client, stream_id, body, false)
+                                {
+                                    error!("Failed sending progress body status")
+                                }
+                            }
+                        }
+                    };
+                }
+            }
+            Ok(0)
+        }
+        pub fn write_body_packet(
+            &self,
+            stream_id: u64,
+            conn_id: &str,
+            packet: &[u8],
+            end: bool,
+        ) -> Result<usize, ()> {
+            let guard = &*self.inner.lock().unwrap();
+            let written_data = guard.request_states().write_body_packet(
+                conn_id.to_owned(),
+                stream_id,
+                packet,
+                end,
+            );
+            written_data
         }
         pub fn print_entries(&self) {
             let guard = &*self.inner.lock().unwrap();
@@ -87,9 +145,11 @@ mod request_hndlr {
                                 .unwrap();
                             if let Ok((headers, body)) = request_form.build_response(request_event)
                             {
-                                quiche_http3_server::send_response(
+                                if let Err(_) = quiche_http3_server::send_response(
                                     client, stream_id, headers, body, is_end,
-                                )
+                                ) {
+                                    error!("Failed sending h3 response after GET request")
+                                }
                             }
                         }
                         H3Method::POST => {
@@ -99,9 +159,11 @@ mod request_hndlr {
                                 .unwrap();
                             if let Ok((headers, body)) = request_form.build_response(request_event)
                             {
-                                quiche_http3_server::send_response(
-                                    client, stream_id, headers, body, is_end,
-                                )
+                                if let Err(_) = quiche_http3_server::send_response_when_finished(
+                                    client, stream_id, headers, body, true,
+                                ) {
+                                    error!("Failed to send response after a post request")
+                                }
                             }
                         }
                         _ => {}
@@ -121,11 +183,35 @@ mod request_hndlr {
             let conn_id = client.conn().trace_id().to_string();
             let mut method: Option<&[u8]> = None;
             let mut path: Option<&str> = None;
+            let mut content_length: Option<usize> = None;
 
             for hdr in headers {
                 match hdr.name() {
                     b":method" => method = Some(hdr.value()),
                     b":path" => path = Some(std::str::from_utf8(hdr.value()).unwrap()),
+                    b"content-length" => {
+                        if let Some(method) = method {
+                            if let Ok(method_parsed) = H3Method::parse(method) {
+                                if H3Method::POST == method_parsed || H3Method::PUT == method_parsed
+                                {
+                                    content_length = Some(
+                                    std::str::from_utf8(hdr.value())
+                                .unwrap_or_else(|item| {
+                                    error!(
+                                        "Failed to parse bytes into str, default is \"0\" length "
+                                    );
+                                    "0"
+                                })
+                                .parse::<usize>()
+                                .unwrap_or_else(|_| {
+                                    error!("Failed to parse digit_string to usize. Default is \"0\" length");
+                                    0
+                                }),
+                        )
+                                }
+                            }
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -139,6 +225,7 @@ mod request_hndlr {
                     stream_id,
                     method,
                     path.unwrap(),
+                    content_length,
                     !more_frames,
                 );
             } else {
@@ -170,7 +257,7 @@ mod request_hndlr {
                             {
                                 quiche_http3_server::send_response(
                                     client, stream_id, headers, body, is_end,
-                                )
+                                );
                             }
                         }
                         H3Method::POST => { /*create entry in handler state*/ }
