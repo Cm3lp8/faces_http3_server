@@ -39,7 +39,7 @@ fn main() {
             let resp = format!("Hello this is the trail : {}", s);
             let response = RequestResponse::new()
                 .set_status(faces_quic_server::Status::Ok(200))
-                .set_body(resp.as_bytes().to_vec())
+                .set_body(vec![9; 2_000_000])
                 .set_content_type(ContentType::Text)
                 .build();
             response

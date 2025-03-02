@@ -112,7 +112,7 @@ mod req_temp_table {
             }
             None
         }
-        /// Build the request event.  Once builded the registered partial request entry is removed.
+        /// Once all the data is received by the server, this takes infos from it, builds the request event  that trigger a reponse for the client.
         pub fn build_request_event(
             &self,
             conn_id: String,

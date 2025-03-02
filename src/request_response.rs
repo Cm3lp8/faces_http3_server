@@ -23,7 +23,10 @@ mod request_reponse_builder {
                 .build()
                 .unwrap()
         }
-        pub fn get_headers(&self) -> Vec<h3::Header> {
+        pub fn get_headers(
+            &self,
+            custom_headers: Option<impl FnOnce() -> Vec<h3::Header>>,
+        ) -> Vec<h3::Header> {
             let mut headers: Vec<h3::Header> = vec![self.status.clone()];
             if let Some(content_type) = &self.content_type {
                 headers.push(content_type.clone());
@@ -31,6 +34,10 @@ mod request_reponse_builder {
 
             if let Some(content_length) = &self.content_length {
                 headers.push(content_length.clone());
+            }
+
+            if let Some(custom_hdr_cb) = custom_headers {
+                headers.extend(custom_hdr_cb());
             }
 
             headers

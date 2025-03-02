@@ -36,6 +36,9 @@ mod request_event {
         pub fn is_end(&self) -> bool {
             self.is_end
         }
+        pub fn body_size(&self) -> usize {
+            self.body.len()
+        }
         pub fn extend_body_data(&mut self, data: &[u8]) {
             self.body.extend_from_slice(data);
         }

@@ -107,7 +107,7 @@ mod request_mngr {
                 None
             }
         }
-        /// Search for the corresponding request format to build the response and send it by triggering the
+        /// Search for the corresponding request format that contains the
         /// associated callback.
         pub fn get_requests_from_path_and_method<'b>(
             &self,
@@ -248,8 +248,14 @@ mod request_mngr {
             request_event: RequestEvent,
         ) -> Result<(Vec<h3::Header>, Vec<u8>), ()> {
             if let Some(request_cb) = &self.body_cb {
+                let body_size = request_event.body_size();
                 if let Ok(mut request_response) = request_cb(request_event) {
-                    let headers = request_response.get_headers();
+                    let headers = request_response.get_headers(Some(|| {
+                        vec![h3::Header::new(
+                            b"x-received-data",
+                            body_size.to_string().as_bytes(),
+                        )]
+                    }));
                     let body = request_response.take_body();
                     return Ok((headers, body));
                 }

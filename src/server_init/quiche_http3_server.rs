@@ -142,7 +142,7 @@ mod quiche_implementation {
                         continue 'read;
                     }
                     if !quiche::version_is_supported(hdr.version) {
-                        warn!("Doing version negotiation");
+                        debug!("Doing version negotiation");
                         let len =
                             quiche::negotiate_version(&hdr.scid, &hdr.dcid, &mut out).unwrap();
                         let out = &out[..len];
@@ -162,7 +162,7 @@ mod quiche_implementation {
                     let token = hdr.token.as_ref().unwrap();
                     // Do stateless retry if the client didn't send a token.
                     if token.is_empty() {
-                        warn!("Doing stateless retry");
+                        debug!("Doing stateless retry");
                         let new_token = mint_token(&hdr, &from);
                         let len = quiche::retry(
                             &hdr.scid,
@@ -323,18 +323,17 @@ mod quiche_implementation {
                             }
                             Ok((_stream_id, quiche::h3::Event::Reset { .. })) => (),
                             Ok((_prioritized_element_id, quiche::h3::Event::PriorityUpdate)) => {
-                                warn!("prioritytupdate");
+                                debug!("prioritytupdate");
                                 ()
                             }
                             Ok((_goaway_id, quiche::h3::Event::GoAway)) => {
-                                warn!("GoAway");
+                                debug!("GoAway");
                                 ()
                             }
                             Err(quiche::h3::Error::Done) => {
                                 break;
                             }
                             Err(e) => {
-                                warn!("other error");
                                 error!("{} HTTP/3 error {:?}", client.conn.trace_id(), e);
                                 break;
                             }
@@ -367,7 +366,7 @@ mod quiche_implementation {
                     };
                     if let Err(e) = socket.send_to(&out[..write], send_info.to) {
                         if e.kind() == std::io::ErrorKind::WouldBlock {
-                            warn!("send() would block, [{:?}]", e);
+                            debug!("send() would block, [{:?}]", e);
                             break;
                         }
                         panic!("send() failed: {:?}", e);
@@ -390,7 +389,7 @@ mod quiche_implementation {
             clients.retain(|_, ref mut c| {
                 debug!("Collecting garbage");
                 if c.conn.is_closed() {
-                    info!(
+                    debug!(
                         "{} connection collected {:?}",
                         c.conn.trace_id(),
                         c.conn.stats()
@@ -478,11 +477,17 @@ mod quiche_implementation {
         debug!("sending body [{}] bytes", body.len());
         let http3_conn = &mut client.http3_conn.as_mut().unwrap();
         let conn = &mut client.conn;
+        warn!("sending body stream {stream_id}");
         let written = match http3_conn.send_body(conn, stream_id, &body, is_end) {
             Ok(v) => v,
             Err(quiche::h3::Error::Done) => 0,
             Err(e) => {
-                error!("{} stream send failed {:?}", conn.trace_id(), e);
+                error!(
+                    "{}-[{}] DStream send failed {:?}",
+                    conn.trace_id(),
+                    stream_id,
+                    e
+                );
                 return Err(());
             }
         };
@@ -520,11 +525,12 @@ mod quiche_implementation {
                     written: 0,
                 };
                 client.partial_responses.insert(stream_id, response);
+                warn!("streamblocked [{stream_id}]");
                 return Err(());
             }
             Err(e) => {
                 error!(
-                    "{}, headers [{:#?}] stream send failed {:?}",
+                    "{}, headers [{:#?}] Estream send failed {:?}",
                     conn.trace_id(),
                     headers,
                     e
@@ -535,6 +541,7 @@ mod quiche_implementation {
         match http3_conn.send_additional_headers(conn, stream_id, &headers, false, false) {
             Ok(v) => v,
             Err(quiche::h3::Error::StreamBlocked) => {
+                warn!("streamblocked  send_additional_headers[{stream_id}]");
                 let response = PartialResponse {
                     headers: Some(headers),
                     body,
@@ -545,7 +552,7 @@ mod quiche_implementation {
             }
             Err(e) => {
                 error!(
-                    "{}, headers [{:#?}] stream send failed {:?}",
+                    "{}, headers [{:#?}] Astream send failed {:?}",
                     conn.trace_id(),
                     headers,
                     e
@@ -561,7 +568,7 @@ mod quiche_implementation {
             Ok(v) => v,
             Err(quiche::h3::Error::Done) => 0,
             Err(e) => {
-                error!("{} stream send failed {:?}", conn.trace_id(), e);
+                error!("{} Bstream send failed {:?}", conn.trace_id(), e);
                 return Err(());
             }
         };
@@ -624,7 +631,7 @@ mod quiche_implementation {
             Ok(v) => v,
             Err(quiche::h3::Error::Done) => 0,
             Err(e) => {
-                error!("{} stream send failed {:?}", conn.trace_id(), e);
+                error!("{} [{}] Esend failed {:?}", conn.trace_id(), stream_id, e);
                 return Err(());
             }
         };
@@ -651,7 +658,7 @@ mod quiche_implementation {
     ) {
         let conn = &mut client.conn;
         let http3_conn = &mut client.http3_conn.as_mut().unwrap();
-        info!(
+        debug!(
             "{} got request {:?} on stream id {}",
             conn.trace_id(),
             hdrs_to_strings(headers),

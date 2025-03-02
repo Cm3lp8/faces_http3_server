@@ -75,10 +75,18 @@ mod request_hndlr {
                         }
                         {
                             if let Some(body) = reception_status.body() {
-                                if let Err(()) =
-                                    quiche_http3_server::send_body(client, stream_id, body, false)
+                                if let Ok(stream_writable) =
+                                    client.conn().stream_writable(stream_id, 1350)
                                 {
-                                    error!("Failed sending progress body status")
+                                    if stream_writable {
+                                        if let Err(()) = quiche_http3_server::send_body(
+                                            client, stream_id, body, false,
+                                        ) {
+                                            error!("Failed sending progress body status")
+                                        }
+                                    }
+                                } else {
+                                    warn!("stream [{stream_id}] is closed");
                                 }
                             }
                         }
@@ -153,10 +161,19 @@ mod request_hndlr {
                             }
                         }
                         H3Method::POST => {
-                            client
-                                .conn()
-                                .stream_shutdown(stream_id, quiche::Shutdown::Read, 0)
-                                .unwrap();
+                            match client.conn().stream_shutdown(
+                                stream_id,
+                                quiche::Shutdown::Read,
+                                0,
+                            ) {
+                                Ok(_v) => {}
+                                Err(e) => {
+                                    error!(
+                                        "error stream_shutdown stream_id [{stream_id}] [{:?}]",
+                                        e
+                                    )
+                                }
+                            }
                             if let Ok((headers, body)) = request_form.build_response(request_event)
                             {
                                 if let Err(_) = quiche_http3_server::send_response_when_finished(
