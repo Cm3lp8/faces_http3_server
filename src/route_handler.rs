@@ -1,7 +1,7 @@
-pub use request_hndlr::RequestHandler;
+pub use request_hndlr::RouteHandler;
 
-pub use crate::request_manager::{
-    H3Method, RequestForm, RequestFormBuilder, RequestManager, RequestManagerBuilder, RequestType,
+pub use crate::route_manager::{
+    H3Method, RequestType, RouteForm, RouteFormBuilder, RouteManager, RouteManagerBuilder,
 };
 pub use request_temp_table::ReqArgs;
 pub use request_temp_table::RequestsTable;
@@ -17,7 +17,7 @@ mod request_hndlr {
 
     use crate::{
         request_events::{self, RequestEvent},
-        request_manager::RequestManagerInner,
+        route_manager::RouteManagerInner,
         server_init::quiche_http3_server::{self, Client},
     };
     use quiche::{
@@ -29,14 +29,14 @@ mod request_hndlr {
 
     use super::*;
 
-    pub struct RequestHandler {
-        inner: Arc<Mutex<RequestManagerInner>>,
+    pub struct RouteHandler {
+        inner: Arc<Mutex<RouteManagerInner>>,
     }
 
-    impl RequestHandler {
-        pub fn new(request_mngr_inner: Arc<Mutex<RequestManagerInner>>) -> Self {
-            RequestHandler {
-                inner: request_mngr_inner,
+    impl RouteHandler {
+        pub fn new(route_mngr_inner: Arc<Mutex<RouteManagerInner>>) -> Self {
+            RouteHandler {
+                inner: route_mngr_inner,
             }
         }
         ///
@@ -51,7 +51,7 @@ mod request_hndlr {
         ) -> Result<usize, ()> {
             let guard = &*self.inner.lock().unwrap();
             let reception_status = guard
-                .request_states()
+                .routes_states()
                 .get_reception_status_infos(stream_id, conn_id.to_owned());
 
             if let Some((reception_status, header_send)) = reception_status {
@@ -67,7 +67,7 @@ mod request_hndlr {
 
                         if !header_send {
                             guard
-                                .request_states()
+                                .routes_states()
                                 .set_intermediate_headers_send(stream_id, conn_id.to_string());
                             return quiche_http3_server::send_header(
                                 client, stream_id, headers, false,
@@ -103,17 +103,15 @@ mod request_hndlr {
             end: bool,
         ) -> Result<usize, ()> {
             let guard = &*self.inner.lock().unwrap();
-            let written_data = guard.request_states().write_body_packet(
-                conn_id.to_owned(),
-                stream_id,
-                packet,
-                end,
-            );
+            let written_data =
+                guard
+                    .routes_states()
+                    .write_body_packet(conn_id.to_owned(), stream_id, packet, end);
             written_data
         }
         pub fn print_entries(&self) {
             let guard = &*self.inner.lock().unwrap();
-            for i in guard.request_formats().iter() {
+            for i in guard.routes_formats().iter() {
                 println!("entrie [{}]", i.0);
             }
         }
@@ -124,9 +122,9 @@ mod request_hndlr {
             h3_conn: &mut h3::Connection,
         ) {
         }
-        fn get_requests_from_path(&self, path: &str, cb: impl FnOnce(Option<&Vec<RequestForm>>)) {
+        fn get_routes_from_path(&self, path: &str, cb: impl FnOnce(Option<&Vec<RouteForm>>)) {
             let guard = &*self.inner.lock().unwrap();
-            cb(guard.request_formats().get(path));
+            cb(guard.routes_formats().get(path));
         }
         pub fn handle_finished_stream(
             &self,
@@ -136,12 +134,12 @@ mod request_hndlr {
         ) {
             let guard = &*self.inner.lock().unwrap();
             if let Ok(request_event) = guard
-                .request_states()
+                .routes_states()
                 .build_request_event(conn_id.to_owned(), stream_id)
             {
                 let is_end = request_event.is_end();
                 if let Some((request_form, _)) = guard
-                    .get_requests_from_path_and_method(request_event.path(), request_event.method())
+                    .get_routes_from_path_and_method(request_event.path(), request_event.method())
                 {
                     match request_form.method() {
                         H3Method::GET => {
@@ -161,25 +159,26 @@ mod request_hndlr {
                             }
                         }
                         H3Method::POST => {
-                            match client.conn().stream_shutdown(
-                                stream_id,
-                                quiche::Shutdown::Read,
-                                0,
-                            ) {
-                                Ok(_v) => {}
-                                Err(e) => {
-                                    error!(
-                                        "error stream_shutdown stream_id [{stream_id}] [{:?}]",
-                                        e
-                                    )
-                                }
-                            }
                             if let Ok((headers, body)) = request_form.build_response(request_event)
                             {
                                 if let Err(_) = quiche_http3_server::send_response_when_finished(
                                     client, stream_id, headers, body, true,
                                 ) {
                                     error!("Failed to send response after a post request")
+                                } else {
+                                    match client.conn().stream_shutdown(
+                                        stream_id,
+                                        quiche::Shutdown::Read,
+                                        0,
+                                    ) {
+                                        Ok(_v) => {}
+                                        Err(e) => {
+                                            error!(
+                                        "error stream_shutdown stream_id [{stream_id}] [{:?}]",
+                                        e
+                                    )
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -237,10 +236,11 @@ mod request_hndlr {
             }
             let guard = &*self.inner.lock().unwrap();
             if let Ok(method) = H3Method::parse(method.unwrap()) {
-                guard.request_states().add_partial_request(
+                guard.routes_states().add_partial_request(
                     conn_id.clone(),
                     stream_id,
                     method,
+                    headers,
                     path.unwrap(),
                     content_length,
                     !more_frames,
@@ -255,12 +255,12 @@ mod request_hndlr {
             }
 
             if let Ok(request_event) = guard
-                .request_states()
+                .routes_states()
                 .build_request_event(conn_id, stream_id)
             {
                 let is_end = request_event.is_end();
                 if let Some((request_form, _)) = self
-                    .get_requests_from_path_and_method(request_event.path(), request_event.method())
+                    .get_routes_from_path_and_method(request_event.path(), request_event.method())
                 {
                     match request_form.method() {
                         H3Method::GET => {
@@ -283,18 +283,18 @@ mod request_hndlr {
                 }
             }
         }
-        pub fn get_requests_from_path_and_method_and_request_type(
+        pub fn get_routes_from_path_and_method_and_request_type(
             &self,
             path: &str,
             methode: H3Method,
             request_type: RequestType,
-            cb: impl FnOnce(Option<&RequestForm>),
+            cb: impl FnOnce(Option<&RouteForm>),
         ) {
-            self.get_requests_from_path(path, |request_coll: Option<&Vec<RequestForm>>| {
+            self.get_routes_from_path(path, |request_coll: Option<&Vec<RouteForm>>| {
                 if request_coll.is_none() {
                     cb(None)
                 } else {
-                    let coll: &Vec<RequestForm> = request_coll.unwrap();
+                    let coll: &Vec<RouteForm> = request_coll.unwrap();
                     if let Some(found_request) = coll.iter().find(|item| {
                         item.method() == &methode && *item.request_type() == request_type
                     }) {
@@ -307,11 +307,11 @@ mod request_hndlr {
         }
         /// Search for the corresponding request format to build the response and send it by triggering the
         /// associated callback.
-        pub fn get_requests_from_path_and_method<'b>(
+        pub fn get_routes_from_path_and_method<'b>(
             &self,
             path: &'b str,
             methode: H3Method,
-        ) -> Option<(&RequestForm, Option<Vec<&'b str>>)> {
+        ) -> Option<(&RouteForm, Option<Vec<&'b str>>)> {
             //if param in path
 
             /*

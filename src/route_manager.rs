@@ -1,10 +1,21 @@
-use crate::request_handler::RequestHandler;
-pub use crate::request_manager::request_mngr::RequestManagerInner;
-pub use request_mngr::{
-    H3Method, RequestForm, RequestFormBuilder, RequestManager, RequestManagerBuilder, RequestType,
+pub use crate::route_handler::RouteHandler;
+pub use crate::route_manager::route_mngr::RouteManagerInner;
+pub use route_config::RouteConfig;
+pub use route_mngr::{
+    H3Method, RequestType, RouteForm, RouteFormBuilder, RouteManager, RouteManagerBuilder,
 };
 
-mod request_mngr {
+mod route_config {
+    pub struct RouteConfig;
+
+    impl Default for RouteConfig {
+        fn default() -> Self {
+            Self
+        }
+    }
+}
+
+mod route_mngr {
     use std::{
         collections::HashMap,
         hash::Hash,
@@ -14,59 +25,58 @@ mod request_mngr {
     use quiche::h3;
 
     use crate::{
-        request_events::RequestEvent, request_handler::RequestsTable,
-        request_response::RequestResponse,
+        request_events::RequestEvent, request_response::RequestResponse,
+        route_handler::RequestsTable,
     };
 
     use super::*;
 
     type ReqPath = &'static str;
 
-    pub struct RequestManager {
-        inner: Arc<Mutex<RequestManagerInner>>,
+    pub struct RouteManager {
+        inner: Arc<Mutex<RouteManagerInner>>,
     }
-    impl RequestManager {
-        pub fn new() -> RequestManagerBuilder {
-            RequestManagerBuilder {
-                requests_formats: HashMap::new(),
+    impl Clone for RouteManager {
+        fn clone(&self) -> Self {
+            Self {
+                inner: self.inner.clone(),
             }
         }
-        pub fn get_requests_from_path(
-            &self,
-            path: &str,
-            cb: impl FnOnce(Option<&Vec<RequestForm>>),
-        ) {
+    }
+    impl RouteManager {
+        pub fn new() -> RouteManagerBuilder {
+            RouteManagerBuilder {
+                routes_formats: HashMap::new(),
+            }
+        }
+        pub fn get_routes_from_path(&self, path: &str, cb: impl FnOnce(Option<&Vec<RouteForm>>)) {
             let guard = &*self.inner.lock().unwrap();
 
-            cb(guard.get_requests_from_path(path));
+            cb(guard.get_routes_from_path(path));
         }
-        pub fn get_requests_from_path_and_method_and_request_type(
+        pub fn get_routes_from_path_and_method_and_request_type(
             &self,
             path: &str,
             methode: H3Method,
             request_type: RequestType,
-            cb: impl FnOnce(Option<&RequestForm>),
+            cb: impl FnOnce(Option<&RouteForm>),
         ) {
             let guard = &*self.inner.lock().unwrap();
 
-            cb(guard.get_requests_from_path_and_method_and_request_type(
-                path,
-                methode,
-                request_type,
-            ));
+            cb(guard.get_routes_from_path_and_method_and_request_type(path, methode, request_type));
         }
-        pub fn request_handler(&self) -> RequestHandler {
-            RequestHandler::new(self.inner.clone())
+        pub fn routes_handler(&self) -> RouteHandler {
+            RouteHandler::new(self.inner.clone())
         }
     }
 
-    pub struct RequestManagerInner {
-        requests_formats: HashMap<ReqPath, Vec<RequestForm>>,
-        request_states: RequestsTable, //trace_id of the Connection as
-                                       //key value is HashMap
-                                       //for stream_id u64
+    pub struct RouteManagerInner {
+        routes_formats: HashMap<ReqPath, Vec<RouteForm>>,
+        route_states: RequestsTable, //trace_id of the Connection as
+                                     //key value is HashMap
+                                     //for stream_id u64
     }
-    impl RequestManagerInner {
+    impl RouteManagerInner {
         ///
         ///Init the request manager builder.
         ///You can add new request forms with add_new_request_form();
@@ -74,33 +84,33 @@ mod request_mngr {
         ///
         ///
         ///
-        pub fn new() -> RequestManagerBuilder {
-            RequestManagerBuilder {
-                requests_formats: HashMap::new(),
+        pub fn new() -> RouteManagerBuilder {
+            RouteManagerBuilder {
+                routes_formats: HashMap::new(),
             }
         }
-        pub fn request_states(&self) -> &RequestsTable {
-            &self.request_states
+        pub fn routes_states(&self) -> &RequestsTable {
+            &self.route_states
         }
-        pub fn request_formats(&self) -> &HashMap<ReqPath, Vec<RequestForm>> {
-            &self.requests_formats
+        pub fn routes_formats(&self) -> &HashMap<ReqPath, Vec<RouteForm>> {
+            &self.routes_formats
         }
 
-        pub fn get_requests_from_path(&self, path: &str) -> Option<&Vec<RequestForm>> {
-            self.requests_formats.get(path)
+        pub fn get_routes_from_path(&self, path: &str) -> Option<&Vec<RouteForm>> {
+            self.routes_formats.get(path)
         }
-        pub fn get_requests_from_path_and_method_and_request_type(
+        pub fn get_routes_from_path_and_method_and_request_type(
             &self,
             path: &str,
             methode: H3Method,
             request_type: RequestType,
-        ) -> Option<&RequestForm> {
-            if let Some(request_coll) = self.get_requests_from_path(path) {
-                if let Some(found_request) = request_coll
+        ) -> Option<&RouteForm> {
+            if let Some(request_coll) = self.get_routes_from_path(path) {
+                if let Some(found_route) = request_coll
                     .iter()
                     .find(|item| item.method() == &methode && item.request_type() == &request_type)
                 {
-                    return Some(found_request);
+                    return Some(found_route);
                 }
                 None
             } else {
@@ -109,11 +119,11 @@ mod request_mngr {
         }
         /// Search for the corresponding request format that contains the
         /// associated callback.
-        pub fn get_requests_from_path_and_method<'b>(
+        pub fn get_routes_from_path_and_method<'b>(
             &self,
             path: &'b str,
             methode: H3Method,
-        ) -> Option<(&RequestForm, Option<Vec<&'b str>>)> {
+        ) -> Option<(&RouteForm, Option<Vec<&'b str>>)> {
             //if param in path
 
             let mut path_s = path.to_string();
@@ -126,11 +136,10 @@ mod request_mngr {
                 param_trail = Some(args_it);
             }
 
-            if let Some(request_coll) = self.get_requests_from_path(path_s.as_str()) {
-                if let Some(found_request) =
-                    request_coll.iter().find(|item| item.method() == &methode)
+            if let Some(route_coll) = self.get_routes_from_path(path_s.as_str()) {
+                if let Some(found_route) = route_coll.iter().find(|item| item.method() == &methode)
                 {
-                    return Some((found_request, param_trail));
+                    return Some((found_route, param_trail));
                 }
                 None
             } else {
@@ -139,39 +148,39 @@ mod request_mngr {
         }
     }
 
-    pub struct RequestManagerBuilder {
-        requests_formats: HashMap<ReqPath, Vec<RequestForm>>,
+    pub struct RouteManagerBuilder {
+        routes_formats: HashMap<ReqPath, Vec<RouteForm>>,
     }
-    impl RequestManagerBuilder {
-        pub fn build(&mut self) -> RequestManager {
-            let request_manager_inner = RequestManagerInner {
-                requests_formats: std::mem::replace(&mut self.requests_formats, HashMap::new()),
-                request_states: RequestsTable::new(),
+    impl RouteManagerBuilder {
+        pub fn build(&mut self) -> RouteManager {
+            let request_manager_inner = RouteManagerInner {
+                routes_formats: std::mem::replace(&mut self.routes_formats, HashMap::new()),
+                route_states: RequestsTable::new(),
             };
 
-            RequestManager {
+            RouteManager {
                 inner: Arc::new(Mutex::new(request_manager_inner)),
             }
         }
         ///
-        ///Add a new RequestForm to the server.
+        ///Add a new RouteForm to the server.
         ///
-        pub fn add_new_request_form(&mut self, request_form: RequestForm) -> &mut Self {
-            let path = request_form.path();
+        pub fn add_new_route(&mut self, route_form: RouteForm) -> &mut Self {
+            let path = route_form.path();
 
-            if !self.requests_formats.contains_key(path) {
-                self.requests_formats.insert(path, vec![request_form]);
+            if !self.routes_formats.contains_key(path) {
+                self.routes_formats.insert(path, vec![route_form]);
             } else {
                 assert!(!self
-                    .requests_formats
+                    .routes_formats
                     .get(path)
                     .as_ref()
                     .unwrap()
-                    .contains(&request_form));
-                self.requests_formats
+                    .contains(&route_form));
+                self.routes_formats
                     .get_mut(path)
                     .expect(&format!("can't access value for {:?}", path))
-                    .push(request_form);
+                    .push(route_form);
             }
             self
         }
@@ -208,7 +217,7 @@ mod request_mngr {
         File(String),
     }
 
-    pub struct RequestForm {
+    pub struct RouteForm {
         method: H3Method,
         path: &'static str,
         scheme: &'static str,
@@ -219,7 +228,7 @@ mod request_mngr {
         request_type: RequestType,
     }
 
-    impl PartialEq for RequestForm {
+    impl PartialEq for RouteForm {
         fn eq(&self, other: &Self) -> bool {
             self.method() == other.method()
                 && self.path() == self.path()
@@ -229,9 +238,9 @@ mod request_mngr {
         }
     }
 
-    impl RequestForm {
-        pub fn new() -> RequestFormBuilder {
-            RequestFormBuilder::new()
+    impl RouteForm {
+        pub fn new() -> RouteFormBuilder {
+            RouteFormBuilder::new()
         }
         pub fn path(&self) -> &'static str {
             self.path
@@ -265,7 +274,7 @@ mod request_mngr {
         }
     }
 
-    pub struct RequestFormBuilder {
+    pub struct RouteFormBuilder {
         method: Option<H3Method>,
         path: Option<&'static str>,
         scheme: Option<&'static str>,
@@ -282,7 +291,7 @@ mod request_mngr {
         request_type: Option<RequestType>,
     }
 
-    impl RequestFormBuilder {
+    impl RouteFormBuilder {
         pub fn new() -> Self {
             Self {
                 method: None,
@@ -294,8 +303,8 @@ mod request_mngr {
             }
         }
 
-        pub fn build(&mut self) -> RequestForm {
-            RequestForm {
+        pub fn build(&mut self) -> RouteForm {
+            RouteForm {
                 method: self.method.take().unwrap(),
                 path: self.path.take().unwrap(),
                 scheme: self.scheme.take().expect("expected scheme"),

@@ -39,13 +39,13 @@ mod quiche_implementation {
     use quiche::h3::Priority;
 
     use crate::{
-        server_config::{self, RequestHandler},
-        ServerConfig,
+        server_config::{self, RouteHandler},
+        RouteManager, ServerConfig,
     };
 
     use super::*;
 
-    pub fn run(server_config: Arc<ServerConfig>) {
+    pub fn run(server_config: Arc<ServerConfig>, route_manager: RouteManager) {
         let mut buf = [0; 65535];
         let mut out = [0; MAX_DATAGRAM_SIZE];
 
@@ -76,20 +76,21 @@ mod quiche_implementation {
         config.set_max_idle_timeout(10_000);
         config.set_max_recv_udp_payload_size(MAX_DATAGRAM_SIZE);
         config.set_max_send_udp_payload_size(MAX_DATAGRAM_SIZE);
-        config.set_initial_max_data(100_000_000);
-        config.set_initial_max_stream_data_bidi_local(100_000_000);
-        config.set_initial_max_stream_data_bidi_remote(100_000_000);
+        config.set_initial_max_data(20_000_000);
+        config.set_initial_max_stream_data_bidi_local(20_000_000);
+        config.set_initial_max_stream_data_bidi_remote(20_000_000);
         config.set_initial_max_stream_data_uni(1_000_000);
         config.set_initial_max_streams_bidi(100);
         config.set_initial_max_streams_uni(100);
         config.set_disable_active_migration(true);
-        config.set_cc_algorithm(quiche::CongestionControlAlgorithm::Reno);
+        //config.set_cc_algorithm(quiche::CongestionControlAlgorithm::BBR2);
         config.enable_early_data();
         let h3_config = quiche::h3::Config::new().unwrap();
         let rng = SystemRandom::new();
         let conn_id_seed = ring::hmac::Key::generate(ring::hmac::HMAC_SHA256, &rng).unwrap();
         let mut clients = ClientMap::new();
         let local_addr = socket.local_addr().unwrap();
+        let mut total = 0;
         loop {
             // Find the shorter timeout from all the active connections.
             //
@@ -268,7 +269,7 @@ mod quiche_implementation {
                         match http3_conn.poll(&mut client.conn) {
                             Ok((stream_id, quiche::h3::Event::Headers { list, more_frames })) => {
                                 // println!("new req [{:?}]", list);
-                                server_config.request_handler().parse_headers(
+                                route_manager.routes_handler().parse_headers(
                                     &list,
                                     stream_id,
                                     client,
@@ -289,7 +290,7 @@ mod quiche_implementation {
                                     http3_conn.recv_body(&mut client.conn, stream_id, &mut out)
                                 {
                                     if let Err(_) =
-                                        server_config.request_handler().write_body_packet(
+                                        route_manager.routes_handler().write_body_packet(
                                             stream_id,
                                             client.conn.trace_id(),
                                             &out[..read],
@@ -300,21 +301,22 @@ mod quiche_implementation {
                                             "Failed writing body packet on stream_id [{stream_id}]"
                                         )
                                     }
+                                    total += read;
                                     req_recvd += 1;
                                 }
                                 let trace_id = client.conn.trace_id().to_string();
 
-                                if let Err(_) = server_config
-                                    .request_handler()
+                                if let Err(_) = route_manager
+                                    .routes_handler()
                                     .send_reception_status(client, stream_id, trace_id.as_str())
                                 {
                                     error!("Failed to send progress response status")
                                 }
                             }
                             Ok((stream_id, quiche::h3::Event::Finished)) => {
-                                warn!("finished ! stream [{}]", stream_id);
+                                debug!("finished ! stream [{}]", stream_id);
                                 let trace_id = client.conn.trace_id().to_owned();
-                                server_config.request_handler().handle_finished_stream(
+                                route_manager.routes_handler().handle_finished_stream(
                                     trace_id.as_str(),
                                     stream_id,
                                     client,
@@ -345,7 +347,7 @@ mod quiche_implementation {
             // them on the UDP socket, until quiche reports that there are no more
             // packets to be sent.
 
-            let pacing_delay = Duration::from_micros(1);
+            let pacing_delay = Duration::from_micros(16);
             let mut send_duration = Instant::now();
             for client in clients.values_mut() {
                 let mut packet_send = 0;
@@ -354,7 +356,7 @@ mod quiche_implementation {
                         Ok(v) => v,
                         Err(quiche::Error::Done) => {
                             //debug!("{} done writing", client.conn.trace_id());
-                            debug!("{} done writing", client.conn.trace_id());
+                            // error!("{} done writing", client.conn.trace_id());
                             break;
                         }
                         Err(e) => {
@@ -366,7 +368,7 @@ mod quiche_implementation {
                     };
                     if let Err(e) = socket.send_to(&out[..write], send_info.to) {
                         if e.kind() == std::io::ErrorKind::WouldBlock {
-                            debug!("send() would block, [{:?}]", e);
+                            error!("send() would block, [{:?}]", e);
                             break;
                         }
                         panic!("send() failed: {:?}", e);
@@ -477,7 +479,7 @@ mod quiche_implementation {
         debug!("sending body [{}] bytes", body.len());
         let http3_conn = &mut client.http3_conn.as_mut().unwrap();
         let conn = &mut client.conn;
-        warn!("sending body stream {stream_id}");
+        // warn!("sending body stream {stream_id}");
         let written = match http3_conn.send_body(conn, stream_id, &body, is_end) {
             Ok(v) => v,
             Err(quiche::h3::Error::Done) => 0,
@@ -525,7 +527,7 @@ mod quiche_implementation {
                     written: 0,
                 };
                 client.partial_responses.insert(stream_id, response);
-                warn!("streamblocked [{stream_id}]");
+                debug!("streamblocked [{stream_id}]");
                 return Err(());
             }
             Err(e) => {
@@ -541,7 +543,7 @@ mod quiche_implementation {
         match http3_conn.send_additional_headers(conn, stream_id, &headers, false, false) {
             Ok(v) => v,
             Err(quiche::h3::Error::StreamBlocked) => {
-                warn!("streamblocked  send_additional_headers[{stream_id}]");
+                debug!("streamblocked  send_additional_headers[{stream_id}]");
                 let response = PartialResponse {
                     headers: Some(headers),
                     body,
@@ -654,7 +656,7 @@ mod quiche_implementation {
         client: &mut Client,
         stream_id: u64,
         headers: &[quiche::h3::Header],
-        request_handler: &RequestHandler,
+        route_handler: &RouteHandler,
     ) {
         let conn = &mut client.conn;
         let http3_conn = &mut client.http3_conn.as_mut().unwrap();
@@ -669,7 +671,7 @@ mod quiche_implementation {
         // are not generated.
         //conn.stream_shutdown(stream_id, quiche::Shutdown::Read, 0)
         //   .unwrap();
-        let (headers, body) = build_response("", headers, request_handler);
+        let (headers, body) = build_response("", headers, route_handler);
         match http3_conn.send_response(conn, stream_id, &headers, false) {
             Ok(v) => v,
             Err(quiche::h3::Error::StreamBlocked) => {
@@ -707,7 +709,7 @@ mod quiche_implementation {
     fn build_response(
         root: &str,
         request: &[quiche::h3::Header],
-        request_handler: &RequestHandler,
+        request_handler: &RouteHandler,
     ) -> (Vec<quiche::h3::Header>, Vec<u8>) {
         let mut file_path = std::path::PathBuf::from(root);
         let mut path = std::path::Path::new("");

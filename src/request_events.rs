@@ -1,11 +1,14 @@
 pub use request_event::RequestEvent;
 mod request_event {
-    use crate::{request_handler::ReqArgs, H3Method};
+    use quiche::h3;
+
+    use crate::{route_handler::ReqArgs, H3Method};
 
     use super::*;
 
     pub struct RequestEvent {
         path: String,
+        headers: Vec<h3::Header>,
         method: H3Method,
         args: Option<Vec<ReqArgs>>,
         body: Vec<u8>,
@@ -15,6 +18,7 @@ mod request_event {
         pub fn new(
             path: &str,
             method: H3Method,
+            headers: Vec<h3::Header>,
             args: Option<Vec<ReqArgs>>,
             body: Option<Vec<u8>>,
             is_end: bool,
@@ -22,6 +26,7 @@ mod request_event {
             Self {
                 path: path.to_owned(),
                 method,
+                headers,
                 args,
                 body: body.unwrap_or(vec![]),
                 is_end,
@@ -32,6 +37,9 @@ mod request_event {
         }
         pub fn method(&self) -> H3Method {
             self.method
+        }
+        pub fn headers(&self) -> &Vec<h3::Header> {
+            &self.headers
         }
         pub fn is_end(&self) -> bool {
             self.is_end

@@ -3,28 +3,76 @@ pub use quiche_http3_server::QClient;
 pub use server_initiation::Http3Server;
 
 mod server_initiation {
-    use std::sync::Arc;
+    use std::{path::Path, sync::Arc};
 
-    use crate::ServerConfig;
+    use crate::{
+        route_manager::{RouteForm, RouteFormBuilder},
+        server_config::ServerConfigBuilder,
+        RouteConfig, RouteManager, RouteManagerBuilder, ServerConfig,
+    };
 
     use super::*;
 
     pub struct Http3Server {
         server_config: Arc<ServerConfig>,
+        route_manager: RouteManager,
     }
 
     impl Http3Server {
-        pub fn new(config: ServerConfig) -> Http3Server {
-            Self {
-                server_config: Arc::new(config),
+        pub fn new(socket: &'static str) -> Http3ServerBuilder {
+            let mut server_config_builder = ServerConfig::new();
+            server_config_builder.set_address(socket);
+            Http3ServerBuilder {
+                server_config: server_config_builder,
+                route_manager: RouteManager::new(),
             }
         }
+    }
 
-        pub fn run(&self) {
-            let config_clone = self.server_config.clone();
+    pub struct Http3ServerBuilder {
+        server_config: ServerConfigBuilder,
+        route_manager: RouteManagerBuilder,
+    }
+
+    impl Http3ServerBuilder {
+        pub fn add_cert_path(&mut self, path: impl AsRef<Path> + 'static) -> &mut Self {
+            if let Some(cert_path) = path.as_ref().to_str() {
+                self.server_config.set_cert_path(cert_path);
+            }
+            self
+        }
+        pub fn add_key_path(&mut self, path: impl AsRef<Path> + 'static) -> &mut Self {
+            if let Some(key_path) = path.as_ref().to_str() {
+                self.server_config.set_key_path(key_path);
+            }
+            self
+        }
+        pub fn add_route(
+            &mut self,
+            path: &str,
+            route_configuration: RouteConfig,
+            route: impl FnOnce(&mut RouteFormBuilder),
+        ) -> &mut Self {
+            let mut route_form = RouteForm::new();
+
+            route(&mut route_form);
+
+            let route = route_form.build();
+            self.route_manager.add_new_route(route);
+            self
+        }
+        pub fn run(&mut self) -> Http3Server {
+            let config_clone = self.server_config.build();
+            let config_clone = Arc::new(config_clone);
+            let route_manager = self.route_manager.build();
+            let server = Http3Server {
+                server_config: config_clone.clone(),
+                route_manager: route_manager.clone(),
+            };
             std::thread::spawn(move || {
-                quiche_http3_server::run(config_clone);
+                quiche_http3_server::run(config_clone, route_manager);
             });
+            server
         }
     }
 }

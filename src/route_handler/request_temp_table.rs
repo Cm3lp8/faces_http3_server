@@ -51,6 +51,7 @@ mod reception_status {
     }
 }
 mod req_temp_table {
+    use quiche::h3;
     use request_argument_parser::ReqArgs;
     use std::{
         collections::HashMap,
@@ -128,7 +129,11 @@ mod req_temp_table {
                 let request_event = partial_req.to_request_event();
 
                 can_clean = true;
-                Ok(request_event)
+                if let Some(req_event) = request_event {
+                    Ok(req_event)
+                } else {
+                    Err(())
+                }
             } else {
                 Err(())
             };
@@ -136,6 +141,7 @@ mod req_temp_table {
             if can_clean {
                 self.table.lock().unwrap().remove(&(conn_id, stream_id));
             }
+
             res
         }
         pub fn write_body_packet(
@@ -158,6 +164,7 @@ mod req_temp_table {
             conn_id: String,
             stream_id: u64,
             method: H3Method,
+            headers: &[h3::Header],
             path: &str,
             content_length: Option<usize>,
             is_end: bool,
@@ -166,6 +173,7 @@ mod req_temp_table {
                 conn_id.clone(),
                 stream_id,
                 method,
+                headers,
                 path,
                 content_length,
                 is_end,
@@ -180,6 +188,7 @@ mod req_temp_table {
     struct PartialReq {
         conn_id: String,
         stream_id: u64,
+        headers: Option<Vec<h3::Header>>,
         method: H3Method,
         path: String,
         args: Option<Vec<ReqArgs>>,
@@ -194,6 +203,7 @@ mod req_temp_table {
             conn_id: String,
             stream_id: u64,
             method: H3Method,
+            headers: &[h3::Header],
             path: &str,
             content_length: Option<usize>,
             is_end: bool,
@@ -203,6 +213,7 @@ mod req_temp_table {
             Self {
                 conn_id,
                 stream_id,
+                headers: Some(headers.to_vec()),
                 method,
                 path,
                 args,
@@ -220,14 +231,19 @@ mod req_temp_table {
         pub fn written(&self) -> usize {
             self.body.len()
         }
-        pub fn to_request_event(&mut self) -> RequestEvent {
-            RequestEvent::new(
-                self.path.as_str(),
-                self.method,
-                self.args.take(),
-                Some(std::mem::replace(&mut self.body, vec![])),
-                self.is_end,
-            )
+        pub fn to_request_event(&mut self) -> Option<RequestEvent> {
+            if let Some(headers) = self.headers.as_ref() {
+                Some(RequestEvent::new(
+                    self.path.as_str(),
+                    self.method,
+                    headers.clone(),
+                    self.args.take(),
+                    Some(std::mem::replace(&mut self.body, vec![])),
+                    self.is_end,
+                ))
+            } else {
+                None
+            }
         }
     }
 }
