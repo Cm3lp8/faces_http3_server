@@ -55,6 +55,7 @@ mod req_temp_table {
     use request_argument_parser::ReqArgs;
     use std::{
         collections::HashMap,
+        fmt::{Debug, Formatter},
         fs::{File, Permissions},
         io::{BufReader, BufWriter, Write},
         path::PathBuf,
@@ -64,8 +65,9 @@ mod req_temp_table {
     use uuid::Uuid;
 
     use crate::{
-        request_events::{self, RequestEvent},
-        server_config, BodyStorage, H3Method, ServerConfig,
+        request_events::{self, DataEvent, RouteEvent},
+        route_manager::DataManagement,
+        server_config, BodyStorage, H3Method, RouteEventListener, ServerConfig,
     };
 
     use self::reception_status::ReceptionStatus;
@@ -123,7 +125,7 @@ mod req_temp_table {
             &self,
             conn_id: String,
             stream_id: u64,
-        ) -> Result<RequestEvent, ()> {
+        ) -> Result<RouteEvent, ()> {
             let mut can_clean = false;
             let res = if let Some(partial_req) = self
                 .table
@@ -158,16 +160,26 @@ mod req_temp_table {
         ) -> Result<usize, ()> {
             let mut total_written: Result<usize, ()> = Err(());
             if let Some(entry) = self.table.lock().unwrap().get_mut(&(conn_id, stream_id)) {
-                if let Some(storage_type) = entry.storage_type {
-                    match storage_type {
-                        BodyStorage::InMemory => {
-                            entry.extend_data(packet, is_end);
-                            total_written = Ok(entry.written());
+                if let Some(data_mngmt) = entry.data_management_type() {
+                    match data_mngmt {
+                        DataManagement::Stream => {
+                            if let Some(suscriber) = entry.event_subscriber() {
+                                suscriber.on_data(DataEvent::new(packet.to_vec(), is_end));
+                            }
                         }
-                        BodyStorage::File => {
-                            entry.write_file(packet, is_end);
-                            total_written = Ok(entry.written());
-                        }
+                        DataManagement::Storage(body_storage) => match body_storage {
+                            BodyStorage::InMemory => {
+                                entry.extend_data(packet, is_end);
+                                total_written = Ok(entry.written());
+                            }
+                            BodyStorage::File => {
+                                if let Some(suscriber) = entry.event_subscriber() {
+                                    suscriber.on_data(DataEvent::new(packet.to_vec(), is_end));
+                                }
+                                entry.write_file(packet, is_end);
+                                total_written = Ok(entry.written());
+                            }
+                        },
                     }
                 }
             }
@@ -180,46 +192,51 @@ mod req_temp_table {
             conn_id: String,
             stream_id: u64,
             method: H3Method,
-            storage_type: Option<BodyStorage>,
+            data_management_type: Option<DataManagement>,
+            event_subscriber: Option<Arc<Box<dyn RouteEventListener + 'static + Send + Sync>>>,
             headers: &[h3::Header],
             path: &str,
             content_length: Option<usize>,
             is_end: bool,
         ) {
             let mut file_opened: Option<BufWriter<File>> = None;
-            let storage_path = if let Some(body_storage) = storage_type.as_ref() {
-                if let BodyStorage::File = body_storage {
-                    let mut path = server_config.get_storage_path();
+            let storage_path = if let Some(data_management_type) = data_management_type.as_ref() {
+                if let Some(body_storage) = data_management_type.is_body_storage() {
+                    if let BodyStorage::File = body_storage {
+                        let mut path = server_config.get_storage_path();
 
-                    let mut extension: Option<String> = None;
+                        let mut extension: Option<String> = None;
 
-                    if let Some(found_content_type) =
-                        headers.iter().find(|hdr| hdr.name() == b"content-type")
-                    {
-                        match found_content_type.value() {
-                            b"text/plain" => {
-                                extension = Some(String::from(".txt"));
+                        if let Some(found_content_type) =
+                            headers.iter().find(|hdr| hdr.name() == b"content-type")
+                        {
+                            match found_content_type.value() {
+                                b"text/plain" => {
+                                    extension = Some(String::from(".txt"));
+                                }
+                                _ => {}
                             }
-                            _ => {}
+                        };
+
+                        let uuid = Uuid::new_v4();
+                        let mut uuid = uuid.to_string();
+
+                        if let Some(ext) = extension {
+                            uuid = format!("{}{}", uuid, ext);
                         }
-                    };
 
-                    let uuid = Uuid::new_v4();
-                    let mut uuid = uuid.to_string();
+                        path.push(uuid);
 
-                    if let Some(ext) = extension {
-                        uuid = format!("{}{}", uuid, ext);
-                    }
+                        if let Ok(file) = File::create(path.clone()) {
+                            file_opened = Some(BufWriter::new(file));
+                        } else {
+                            error!("Failed creating [{:?}] file", path);
+                        }
 
-                    path.push(uuid);
-
-                    if let Ok(file) = File::create(path.clone()) {
-                        file_opened = Some(BufWriter::new(file));
+                        Some(path)
                     } else {
-                        error!("Failed creating [{:?}] file", path);
+                        None
                     }
-
-                    Some(path)
                 } else {
                     None
                 }
@@ -231,7 +248,8 @@ mod req_temp_table {
                 conn_id.clone(),
                 stream_id,
                 method,
-                storage_type,
+                data_management_type,
+                event_subscriber,
                 storage_path,
                 file_opened,
                 headers,
@@ -245,29 +263,40 @@ mod req_temp_table {
                 .insert((conn_id, stream_id), partial_request);
         }
     }
-    #[derive(Debug)]
     struct PartialReq {
         conn_id: String,
         stream_id: u64,
         headers: Option<Vec<h3::Header>>,
         method: H3Method,
-        storage_type: Option<BodyStorage>,
+        data_management_type: Option<DataManagement>,
+        event_subscriber: Option<Arc<Box<dyn RouteEventListener + 'static + Send + Sync>>>,
         storage_path: Option<PathBuf>,
         file_opened: Option<BufWriter<File>>,
         path: String,
         args: Option<Vec<ReqArgs>>,
+        body_written_size: usize,
         content_length: Option<usize>,
         precedent_percentage_written: Option<usize>,
         progress_header_sent: bool,
         body: Vec<u8>,
         is_end: bool,
     }
+    impl Debug for PartialReq {
+        fn fmt(&self, f: &mut Formatter) -> Result<(), std::fmt::Error> {
+            write!(
+                f,
+                "partial req entry [{:?}] [{:#?}]",
+                self.conn_id, self.headers
+            )
+        }
+    }
     impl PartialReq {
         pub fn new(
             conn_id: String,
             stream_id: u64,
             method: H3Method,
-            storage_type: Option<BodyStorage>,
+            data_management_type: Option<DataManagement>,
+            event_subscriber: Option<Arc<Box<dyn RouteEventListener + Send + 'static + Sync>>>,
             storage_path: Option<PathBuf>,
             file_opened: Option<BufWriter<File>>,
             headers: &[h3::Header],
@@ -282,11 +311,13 @@ mod req_temp_table {
                 stream_id,
                 headers: Some(headers.to_vec()),
                 method,
-                storage_type,
+                data_management_type,
+                event_subscriber,
                 storage_path,
                 file_opened,
                 path,
                 args,
+                body_written_size: 0,
                 content_length,
                 precedent_percentage_written: None,
                 progress_header_sent: false,
@@ -300,6 +331,7 @@ mod req_temp_table {
             if let Some(file) = &mut self.file_opened {
                 let mut write = packet.len();
                 while let Ok(n) = file.write(&packet[..write]) {
+                    self.body_written_size += n;
                     if n == write {
                         break;
                     }
@@ -310,6 +342,7 @@ mod req_temp_table {
         }
         pub fn extend_data(&mut self, packet: &[u8], is_end: bool) {
             self.is_end = is_end;
+            self.body_written_size += packet.len();
             self.body.extend_from_slice(packet);
         }
         pub fn written(&self) -> usize {
@@ -321,18 +354,29 @@ mod req_temp_table {
             self.file_opened.take();
             self.storage_path.clone()
         }
-        pub fn storage_type(&self) -> &Option<BodyStorage> {
-            &self.storage_type
+        /*
+                pub fn storage_type(&self) -> &Option<BodyStorage> {
+                    &self.storage_type
+                }
+        */
+        pub fn data_management_type(&self) -> Option<DataManagement> {
+            self.data_management_type
         }
-        pub fn to_request_event(&mut self) -> Option<RequestEvent> {
+        pub fn event_subscriber(
+            &mut self,
+        ) -> Option<&Arc<Box<dyn RouteEventListener + 'static + Send + Sync>>> {
+            self.event_subscriber.as_ref()
+        }
+        pub fn to_request_event(&mut self) -> Option<RouteEvent> {
             let file_path = self.close_file();
             if let Some(headers) = self.headers.as_ref() {
-                Some(RequestEvent::new(
+                Some(RouteEvent::new(
                     self.path.as_str(),
                     self.method,
                     headers.clone(),
                     self.args.take(),
                     file_path,
+                    self.body_written_size,
                     Some(std::mem::replace(&mut self.body, vec![])),
                     self.is_end,
                 ))

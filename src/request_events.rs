@@ -1,4 +1,4 @@
-pub use request_event::RequestEvent;
+pub use request_event::{DataEvent, RouteEvent};
 mod request_event {
     use std::path::PathBuf;
 
@@ -8,22 +8,36 @@ mod request_event {
 
     use super::*;
 
-    pub struct RequestEvent {
+    pub struct DataEvent {
+        packet: Vec<u8>,
+        is_end: bool,
+    }
+    impl DataEvent {
+        pub fn new(packet: Vec<u8>, is_end: bool) -> Self {
+            Self { packet, is_end }
+        }
+        pub fn packet_len(&self) -> usize {
+            self.packet.len()
+        }
+    }
+    pub struct RouteEvent {
         path: String,
         headers: Vec<h3::Header>,
         method: H3Method,
         args: Option<Vec<ReqArgs>>,
         file_path: Option<PathBuf>,
+        bytes_written: usize,
         body: Vec<u8>,
         is_end: bool,
     }
-    impl RequestEvent {
+    impl RouteEvent {
         pub fn new(
             path: &str,
             method: H3Method,
             headers: Vec<h3::Header>,
             args: Option<Vec<ReqArgs>>,
             file_path: Option<PathBuf>,
+            bytes_written: usize,
             body: Option<Vec<u8>>,
             is_end: bool,
         ) -> Self {
@@ -33,9 +47,13 @@ mod request_event {
                 headers,
                 args,
                 file_path,
+                bytes_written,
                 body: body.unwrap_or(vec![]),
                 is_end,
             }
+        }
+        pub fn bytes_written(&self) -> usize {
+            self.bytes_written
         }
         pub fn get_file_path(&self) -> Option<&PathBuf> {
             self.file_path.as_ref()

@@ -16,11 +16,11 @@ mod request_hndlr {
     };
 
     use crate::{
-        request_events::{self, RequestEvent},
-        route_manager::RouteManagerInner,
+        request_events::{self, RouteEvent},
+        route_manager::{DataManagement, RouteManagerInner},
         server_config,
         server_init::quiche_http3_server::{self, Client},
-        BodyStorage, ServerConfig,
+        BodyStorage, RouteEventListener, ServerConfig,
     };
     use quiche::{
         h3::{self, NameValue},
@@ -241,19 +241,24 @@ mod request_hndlr {
             let guard = &*self.inner.lock().unwrap();
             warn!("Ici");
 
-            let mut storage_type: Option<BodyStorage> = None;
+            let mut data_management: Option<DataManagement> = None;
+            let mut event_subscriber: Option<
+                Arc<Box<dyn RouteEventListener + 'static + Send + Sync>>,
+            > = None;
             if let Ok(method) = H3Method::parse(method.unwrap()) {
                 if let Some((route_form, _)) =
                     guard.get_routes_from_path_and_method(path.unwrap(), method)
                 {
-                    storage_type = route_form.storage_type();
+                    data_management = route_form.data_management_type();
+                    event_subscriber = route_form.event_subscriber();
                 }
                 guard.routes_states().add_partial_request(
                     server_config,
                     conn_id.clone(),
                     stream_id,
                     method,
-                    storage_type,
+                    data_management,
+                    event_subscriber,
                     headers,
                     path.unwrap(),
                     content_length,

@@ -1,11 +1,27 @@
 pub use crate::route_handler::RouteHandler;
 pub use crate::route_manager::route_mngr::RouteManagerInner;
-pub use route_config::{BodyStorage, RouteConfig};
+pub use route_config::{BodyStorage, DataManagement, RouteConfig};
 pub use route_mngr::{
     H3Method, RequestType, RouteForm, RouteFormBuilder, RouteManager, RouteManagerBuilder,
 };
 
 mod route_config {
+
+    #[derive(Clone, Copy, Debug)]
+    pub enum DataManagement {
+        Stream,
+        Storage(BodyStorage),
+    }
+    impl DataManagement {
+        pub fn is_body_storage(&self) -> Option<&BodyStorage> {
+            if let Self::Storage(storage) = self {
+                Some(storage)
+            } else {
+                None
+            }
+        }
+    }
+
     #[derive(Clone, Copy, Debug)]
     pub enum BodyStorage {
         InMemory,
@@ -13,22 +29,22 @@ mod route_config {
     }
     #[derive(Debug)]
     pub struct RouteConfig {
-        storage_type: BodyStorage,
+        data_management: DataManagement,
     }
 
     impl Default for RouteConfig {
         fn default() -> Self {
             Self {
-                storage_type: BodyStorage::InMemory,
+                data_management: DataManagement::Storage(BodyStorage::InMemory),
             }
         }
     }
     impl RouteConfig {
-        pub fn new(storage_type: BodyStorage) -> RouteConfig {
-            Self { storage_type }
+        pub fn new(data_management: DataManagement) -> RouteConfig {
+            Self { data_management }
         }
-        pub fn body_storage(&self) -> BodyStorage {
-            self.storage_type
+        pub fn data_management(&self) -> DataManagement {
+            self.data_management
         }
     }
 }
@@ -43,9 +59,11 @@ mod route_mngr {
     use quiche::h3;
 
     use crate::{
-        request_events::RequestEvent, request_response::RequestResponse,
-        route_handler::RequestsTable,
+        event_listener, request_events::RouteEvent, request_response::RequestResponse,
+        route_handler::RequestsTable, RouteEventListener,
     };
+
+    use self::route_config::DataManagement;
 
     use super::*;
 
@@ -180,10 +198,43 @@ mod route_mngr {
                 inner: Arc::new(Mutex::new(request_manager_inner)),
             }
         }
+        pub fn route_post(
+            &mut self,
+            path: &'static str,
+            route_configuration: RouteConfig,
+            route: impl FnOnce(&mut RouteFormBuilder),
+        ) -> &mut Self {
+            self.add_route(path, H3Method::POST, route_configuration, route);
+            self
+        }
+        pub fn route_get(
+            &mut self,
+            path: &'static str,
+            route_configuration: RouteConfig,
+            route: impl FnOnce(&mut RouteFormBuilder),
+        ) -> &mut Self {
+            self.add_route(path, H3Method::POST, route_configuration, route);
+            self
+        }
+        fn add_route(
+            &mut self,
+            path: &'static str,
+            method: H3Method,
+            route_configuration: RouteConfig,
+            route: impl FnOnce(&mut RouteFormBuilder),
+        ) -> &mut Self {
+            let mut route_form = RouteForm::new(path, method, route_configuration);
+
+            route(&mut route_form);
+
+            let route = route_form.build();
+            self.add_new_route(route);
+            self
+        }
         ///
         ///Add a new RouteForm to the server.
         ///
-        pub fn add_new_route(&mut self, route_form: RouteForm) -> &mut Self {
+        fn add_new_route(&mut self, route_form: RouteForm) -> &mut Self {
             let path = route_form.path();
 
             if !self.routes_formats.contains_key(path) {
@@ -237,13 +288,13 @@ mod route_mngr {
 
     pub struct RouteForm {
         method: H3Method,
+        event_subscriber: Option<Arc<Box<dyn RouteEventListener + 'static + Send + Sync>>>,
         path: &'static str,
         route_configuration: Option<RouteConfig>,
         scheme: &'static str,
         authority: Option<&'static str>,
-        body_cb: Option<
-            Box<dyn Fn(RequestEvent) -> Result<RequestResponse, ()> + Send + Sync + 'static>,
-        >,
+        body_cb:
+            Option<Box<dyn Fn(RouteEvent) -> Result<RequestResponse, ()> + Send + Sync + 'static>>,
         request_type: RequestType,
     }
 
@@ -279,25 +330,31 @@ mod route_mngr {
         pub fn request_type(&self) -> &RequestType {
             &self.request_type
         }
+        pub fn event_subscriber(
+            &self,
+        ) -> Option<Arc<Box<dyn RouteEventListener + 'static + Send + Sync>>> {
+            self.event_subscriber.clone()
+        }
 
-        pub fn storage_type(&self) -> Option<BodyStorage> {
+        pub fn data_management_type(&self) -> Option<DataManagement> {
             if let Some(config) = &self.route_configuration {
-                Some(config.body_storage())
+                Some(config.data_management())
             } else {
                 None
             }
         }
         pub fn build_response(
             &self,
-            request_event: RequestEvent,
+            route_event: RouteEvent,
         ) -> Result<(Vec<h3::Header>, Vec<u8>), ()> {
             if let Some(request_cb) = &self.body_cb {
-                let body_size = request_event.body_size();
-                if let Ok(mut request_response) = request_cb(request_event) {
+                let body_size = route_event.body_size();
+                let bytes_written = route_event.bytes_written();
+                if let Ok(mut request_response) = request_cb(route_event) {
                     let headers = request_response.get_headers(Some(|| {
                         vec![h3::Header::new(
                             b"x-received-data",
-                            body_size.to_string().as_bytes(),
+                            bytes_written.to_string().as_bytes(),
                         )]
                     }));
                     let body = request_response.take_body();
@@ -311,13 +368,14 @@ mod route_mngr {
 
     pub struct RouteFormBuilder {
         method: Option<H3Method>,
+        event_subscriber: Option<Arc<Box<dyn RouteEventListener + 'static + Send + Sync>>>,
         route_configuration: Option<RouteConfig>,
         path: Option<&'static str>,
         scheme: Option<&'static str>,
         authority: Option<&'static str>,
         body_cb: Option<
             Box<
-                dyn Fn(RequestEvent) -> Result<(RequestResponse), ()>
+                dyn Fn(RouteEvent) -> Result<(RequestResponse), ()>
                     /*body, content-type*/
                     + Sync
                     + Send
@@ -331,6 +389,7 @@ mod route_mngr {
         pub fn new() -> Self {
             Self {
                 method: None,
+                event_subscriber: None,
                 path: None,
                 route_configuration: None,
                 scheme: None,
@@ -340,9 +399,17 @@ mod route_mngr {
             }
         }
 
+        pub fn subscribe_event(
+            &mut self,
+            event_listener: Arc<Box<dyn RouteEventListener + 'static + Send + Sync>>,
+        ) -> &mut Self {
+            self.event_subscriber = Some(event_listener);
+            self
+        }
         pub fn build(&mut self) -> RouteForm {
             RouteForm {
                 method: self.method.take().unwrap(),
+                event_subscriber: self.event_subscriber.take(),
                 path: self.path.take().unwrap(),
                 route_configuration: self.route_configuration.take(),
                 scheme: self.scheme.take().expect("expected scheme"),
@@ -358,9 +425,9 @@ mod route_mngr {
         ///
         ///The callback returns (body, value of content-type field as bytes)
         ///
-        pub fn set_route_callback(
+        pub fn on_finished_callback(
             &mut self,
-            body_cb: impl Fn(RequestEvent) -> Result<(RequestResponse), ()> + Sync + Send + 'static,
+            body_cb: impl Fn(RouteEvent) -> Result<(RequestResponse), ()> + Sync + Send + 'static,
         ) -> &mut Self {
             self.body_cb = Some(Box::new(body_cb));
             self
