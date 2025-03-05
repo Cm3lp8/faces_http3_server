@@ -1,8 +1,8 @@
 #![allow(warnings)]
 
 pub use crate::route_manager::{
-    H3Method, RequestType, RouteConfig, RouteForm, RouteFormBuilder, RouteHandler, RouteManager,
-    RouteManagerBuilder,
+    BodyStorage, H3Method, RequestType, RouteConfig, RouteForm, RouteFormBuilder, RouteHandler,
+    RouteManager, RouteManagerBuilder,
 };
 pub use crate::server_init::QClient;
 pub use server_config_builder::{ServerConfig, ServerConfigBuilder};
@@ -19,6 +19,7 @@ mod server_config_builder {
 
     pub struct ServerConfig {
         server_socket_address: SocketAddr,
+        file_storage_path: PathBuf,
         cert: String,
         key: String,
     }
@@ -36,10 +37,14 @@ mod server_config_builder {
         pub fn key_path(&self) -> &str {
             self.key.as_str()
         }
+        pub fn get_storage_path(&self) -> PathBuf {
+            self.file_storage_path.to_path_buf()
+        }
     }
 
     pub struct ServerConfigBuilder {
         server_socket_address: Option<&'static str>,
+        file_storage_path: Option<PathBuf>,
         cert: Option<PathBuf>,
         key: Option<PathBuf>,
     }
@@ -47,6 +52,7 @@ mod server_config_builder {
         fn new() -> Self {
             ServerConfigBuilder {
                 server_socket_address: None,
+                file_storage_path: None,
                 cert: None,
                 key: None,
             }
@@ -64,6 +70,10 @@ mod server_config_builder {
             self.cert = Some(path.as_ref().to_path_buf());
             self
         }
+        pub fn set_file_storage_path(&mut self, path: impl AsRef<Path>) -> &mut Self {
+            self.file_storage_path = Some(path.as_ref().to_path_buf());
+            self
+        }
         ///
         ///path to the key. Try absolute path if problems
         ///
@@ -72,6 +82,9 @@ mod server_config_builder {
             self
         }
         pub fn build(&mut self) -> ServerConfig {
+            if let Err(_) = std::fs::create_dir_all(self.file_storage_path.as_ref().unwrap()) {
+                error!("failed creating path");
+            }
             ServerConfig {
                 server_socket_address: self
                     .server_socket_address
@@ -79,6 +92,14 @@ mod server_config_builder {
                     .unwrap()
                     .parse()
                     .expect("can't get the socket address"),
+                file_storage_path: self
+                    .file_storage_path
+                    .as_ref()
+                    .unwrap_or_else(|| {
+                        error!("No file storage path set ");
+                        panic!()
+                    })
+                    .clone(),
                 cert: self
                     .cert
                     .as_ref()
@@ -128,33 +149,21 @@ mod test {
     fn request_manager_setup() {
         let mut request_manager_builder = RouteManager::new();
 
-        let new_request = RouteForm::new()
-            .set_method(H3Method::GET)
-            .set_path("/upload")
-            .set_scheme("https")
-            .set_request_callback(|req_event| Ok(RequestResponse::new_ok_200()))
+        let new_request = RouteForm::new("/upload", H3Method::GET, RouteConfig::default())
+            .set_route_callback(|req_event| Ok(RequestResponse::new_ok_200()))
             .set_request_type(RequestType::Ping)
             .build();
 
-        let new_request_1 = RouteForm::new()
-            .set_method(H3Method::GET)
-            .set_path("/upload")
-            .set_scheme("https")
-            .set_request_callback(|req_event| Ok(RequestResponse::new_ok_200()))
+        let new_request_1 = RouteForm::new("/upload", H3Method::GET, RouteConfig::default())
+            .set_route_callback(|req_event| Ok(RequestResponse::new_ok_200()))
             .set_request_type(RequestType::Message("salut !".to_string()))
             .build();
-        let new_request_2 = RouteForm::new()
-            .set_method(H3Method::GET)
-            .set_path("/")
-            .set_request_callback(|req_event| Ok(RequestResponse::new_ok_200()))
-            .set_scheme("https")
+        let new_request_2 = RouteForm::new("/", H3Method::GET, RouteConfig::default())
+            .set_route_callback(|req_event| Ok(RequestResponse::new_ok_200()))
             .set_request_type(RequestType::Ping)
             .build();
-        let new_request_3 = RouteForm::new()
-            .set_method(H3Method::GET)
-            .set_path("/time")
-            .set_request_callback(|req_event| Ok(RequestResponse::new_ok_200()))
-            .set_scheme("https")
+        let new_request_3 = RouteForm::new("/", H3Method::GET, RouteConfig::default())
+            .set_route_callback(|req_event| Ok(RequestResponse::new_ok_200()))
             .set_request_type(RequestType::Ping)
             .build();
         request_manager_builder.add_new_route(new_request);

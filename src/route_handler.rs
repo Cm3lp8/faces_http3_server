@@ -18,7 +18,9 @@ mod request_hndlr {
     use crate::{
         request_events::{self, RequestEvent},
         route_manager::RouteManagerInner,
+        server_config,
         server_init::quiche_http3_server::{self, Client},
+        BodyStorage, ServerConfig,
     };
     use quiche::{
         h3::{self, NameValue},
@@ -191,6 +193,7 @@ mod request_hndlr {
         }
         pub fn parse_headers(
             &self,
+            server_config: &Arc<ServerConfig>,
             headers: &[h3::Header],
             stream_id: u64,
             client: &mut quiche_http3_server::QClient,
@@ -234,12 +237,23 @@ mod request_hndlr {
             if method.is_none() || path.is_none() {
                 return;
             }
+
             let guard = &*self.inner.lock().unwrap();
+            warn!("Ici");
+
+            let mut storage_type: Option<BodyStorage> = None;
             if let Ok(method) = H3Method::parse(method.unwrap()) {
+                if let Some((route_form, _)) =
+                    guard.get_routes_from_path_and_method(path.unwrap(), method)
+                {
+                    storage_type = route_form.storage_type();
+                }
                 guard.routes_states().add_partial_request(
+                    server_config,
                     conn_id.clone(),
                     stream_id,
                     method,
+                    storage_type,
                     headers,
                     path.unwrap(),
                     content_length,

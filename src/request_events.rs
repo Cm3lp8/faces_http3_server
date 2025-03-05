@@ -1,5 +1,7 @@
 pub use request_event::RequestEvent;
 mod request_event {
+    use std::path::PathBuf;
+
     use quiche::h3;
 
     use crate::{route_handler::ReqArgs, H3Method};
@@ -11,6 +13,7 @@ mod request_event {
         headers: Vec<h3::Header>,
         method: H3Method,
         args: Option<Vec<ReqArgs>>,
+        file_path: Option<PathBuf>,
         body: Vec<u8>,
         is_end: bool,
     }
@@ -20,6 +23,7 @@ mod request_event {
             method: H3Method,
             headers: Vec<h3::Header>,
             args: Option<Vec<ReqArgs>>,
+            file_path: Option<PathBuf>,
             body: Option<Vec<u8>>,
             is_end: bool,
         ) -> Self {
@@ -28,9 +32,13 @@ mod request_event {
                 method,
                 headers,
                 args,
+                file_path,
                 body: body.unwrap_or(vec![]),
                 is_end,
             }
+        }
+        pub fn get_file_path(&self) -> Option<&PathBuf> {
+            self.file_path.as_ref()
         }
         pub fn path(&self) -> &str {
             self.path.as_str()

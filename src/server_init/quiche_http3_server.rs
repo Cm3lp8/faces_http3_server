@@ -240,7 +240,7 @@ mod quiche_implementation {
                                             client.conn.trace_id()
                                         );
                     */
-                    debug!(
+                    info!(
                         "{} QUIC handshake completed, now trying HTTP/3",
                         client.conn.trace_id()
                     );
@@ -268,8 +268,9 @@ mod quiche_implementation {
                         let http3_conn = client.http3_conn.as_mut().unwrap();
                         match http3_conn.poll(&mut client.conn) {
                             Ok((stream_id, quiche::h3::Event::Headers { list, more_frames })) => {
-                                // println!("new req [{:?}]", list);
+                                info!("new req [{:?}]", list);
                                 route_manager.routes_handler().parse_headers(
+                                    &server_config,
                                     &list,
                                     stream_id,
                                     client,
@@ -299,7 +300,7 @@ mod quiche_implementation {
                                     {
                                         error!(
                                             "Failed writing body packet on stream_id [{stream_id}]"
-                                        )
+                                        );
                                     }
                                     total += read;
                                     req_recvd += 1;

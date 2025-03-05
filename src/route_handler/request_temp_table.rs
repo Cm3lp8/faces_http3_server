@@ -51,16 +51,21 @@ mod reception_status {
     }
 }
 mod req_temp_table {
-    use quiche::h3;
+    use quiche::h3::{self, NameValue};
     use request_argument_parser::ReqArgs;
     use std::{
         collections::HashMap,
+        fs::{File, Permissions},
+        io::{BufReader, BufWriter, Write},
+        path::PathBuf,
         sync::{Arc, Mutex},
+        time::SystemTimeError,
     };
+    use uuid::Uuid;
 
     use crate::{
         request_events::{self, RequestEvent},
-        H3Method,
+        server_config, BodyStorage, H3Method, ServerConfig,
     };
 
     use self::reception_status::ReceptionStatus;
@@ -153,26 +158,82 @@ mod req_temp_table {
         ) -> Result<usize, ()> {
             let mut total_written: Result<usize, ()> = Err(());
             if let Some(entry) = self.table.lock().unwrap().get_mut(&(conn_id, stream_id)) {
-                entry.extend_data(packet, is_end);
-                total_written = Ok(entry.written());
+                if let Some(storage_type) = entry.storage_type {
+                    match storage_type {
+                        BodyStorage::InMemory => {
+                            entry.extend_data(packet, is_end);
+                            total_written = Ok(entry.written());
+                        }
+                        BodyStorage::File => {
+                            entry.write_file(packet, is_end);
+                            total_written = Ok(entry.written());
+                        }
+                    }
+                }
             }
             total_written
         }
         /// Keep track of a client request based on unique connexion_id and stream_id
         pub fn add_partial_request(
             &self,
+            server_config: &Arc<ServerConfig>,
             conn_id: String,
             stream_id: u64,
             method: H3Method,
+            storage_type: Option<BodyStorage>,
             headers: &[h3::Header],
             path: &str,
             content_length: Option<usize>,
             is_end: bool,
         ) {
+            let mut file_opened: Option<BufWriter<File>> = None;
+            let storage_path = if let Some(body_storage) = storage_type.as_ref() {
+                if let BodyStorage::File = body_storage {
+                    let mut path = server_config.get_storage_path();
+
+                    let mut extension: Option<String> = None;
+
+                    if let Some(found_content_type) =
+                        headers.iter().find(|hdr| hdr.name() == b"content-type")
+                    {
+                        match found_content_type.value() {
+                            b"text/plain" => {
+                                extension = Some(String::from(".txt"));
+                            }
+                            _ => {}
+                        }
+                    };
+
+                    let uuid = Uuid::new_v4();
+                    let mut uuid = uuid.to_string();
+
+                    if let Some(ext) = extension {
+                        uuid = format!("{}{}", uuid, ext);
+                    }
+
+                    path.push(uuid);
+
+                    if let Ok(file) = File::create(path.clone()) {
+                        file_opened = Some(BufWriter::new(file));
+                    } else {
+                        error!("Failed creating [{:?}] file", path);
+                    }
+
+                    Some(path)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
             let partial_request = PartialReq::new(
                 conn_id.clone(),
                 stream_id,
                 method,
+                storage_type,
+                storage_path,
+                file_opened,
                 headers,
                 path,
                 content_length,
@@ -190,6 +251,9 @@ mod req_temp_table {
         stream_id: u64,
         headers: Option<Vec<h3::Header>>,
         method: H3Method,
+        storage_type: Option<BodyStorage>,
+        storage_path: Option<PathBuf>,
+        file_opened: Option<BufWriter<File>>,
         path: String,
         args: Option<Vec<ReqArgs>>,
         content_length: Option<usize>,
@@ -203,6 +267,9 @@ mod req_temp_table {
             conn_id: String,
             stream_id: u64,
             method: H3Method,
+            storage_type: Option<BodyStorage>,
+            storage_path: Option<PathBuf>,
+            file_opened: Option<BufWriter<File>>,
             headers: &[h3::Header],
             path: &str,
             content_length: Option<usize>,
@@ -215,6 +282,9 @@ mod req_temp_table {
                 stream_id,
                 headers: Some(headers.to_vec()),
                 method,
+                storage_type,
+                storage_path,
+                file_opened,
                 path,
                 args,
                 content_length,
@@ -224,6 +294,20 @@ mod req_temp_table {
                 is_end,
             }
         }
+        pub fn write_file(&mut self, packet: &[u8], is_end: bool) {
+            self.is_end = is_end;
+
+            if let Some(file) = &mut self.file_opened {
+                let mut write = packet.len();
+                while let Ok(n) = file.write(&packet[..write]) {
+                    if n == write {
+                        break;
+                    }
+                    write = write - n;
+                }
+                file.flush().unwrap();
+            }
+        }
         pub fn extend_data(&mut self, packet: &[u8], is_end: bool) {
             self.is_end = is_end;
             self.body.extend_from_slice(packet);
@@ -231,13 +315,24 @@ mod req_temp_table {
         pub fn written(&self) -> usize {
             self.body.len()
         }
+        ///
+        ///Drop the file to close it and return the file path.
+        pub fn close_file(&mut self) -> Option<PathBuf> {
+            self.file_opened.take();
+            self.storage_path.clone()
+        }
+        pub fn storage_type(&self) -> &Option<BodyStorage> {
+            &self.storage_type
+        }
         pub fn to_request_event(&mut self) -> Option<RequestEvent> {
+            let file_path = self.close_file();
             if let Some(headers) = self.headers.as_ref() {
                 Some(RequestEvent::new(
                     self.path.as_str(),
                     self.method,
                     headers.clone(),
                     self.args.take(),
+                    file_path,
                     Some(std::mem::replace(&mut self.body, vec![])),
                     self.is_end,
                 ))

@@ -1,16 +1,34 @@
 pub use crate::route_handler::RouteHandler;
 pub use crate::route_manager::route_mngr::RouteManagerInner;
-pub use route_config::RouteConfig;
+pub use route_config::{BodyStorage, RouteConfig};
 pub use route_mngr::{
     H3Method, RequestType, RouteForm, RouteFormBuilder, RouteManager, RouteManagerBuilder,
 };
 
 mod route_config {
-    pub struct RouteConfig;
+    #[derive(Clone, Copy, Debug)]
+    pub enum BodyStorage {
+        InMemory,
+        File,
+    }
+    #[derive(Debug)]
+    pub struct RouteConfig {
+        storage_type: BodyStorage,
+    }
 
     impl Default for RouteConfig {
         fn default() -> Self {
-            Self
+            Self {
+                storage_type: BodyStorage::InMemory,
+            }
+        }
+    }
+    impl RouteConfig {
+        pub fn new(storage_type: BodyStorage) -> RouteConfig {
+            Self { storage_type }
+        }
+        pub fn body_storage(&self) -> BodyStorage {
+            self.storage_type
         }
     }
 }
@@ -220,6 +238,7 @@ mod route_mngr {
     pub struct RouteForm {
         method: H3Method,
         path: &'static str,
+        route_configuration: Option<RouteConfig>,
         scheme: &'static str,
         authority: Option<&'static str>,
         body_cb: Option<
@@ -239,8 +258,17 @@ mod route_mngr {
     }
 
     impl RouteForm {
-        pub fn new() -> RouteFormBuilder {
-            RouteFormBuilder::new()
+        pub fn new(
+            path: &'static str,
+            method: H3Method,
+            route_config: RouteConfig,
+        ) -> RouteFormBuilder {
+            let mut builder = RouteFormBuilder::new();
+            builder.set_path(path);
+            builder.set_method(method);
+            builder.set_route_config(route_config);
+            builder.set_scheme("https");
+            builder
         }
         pub fn path(&self) -> &'static str {
             self.path
@@ -252,6 +280,13 @@ mod route_mngr {
             &self.request_type
         }
 
+        pub fn storage_type(&self) -> Option<BodyStorage> {
+            if let Some(config) = &self.route_configuration {
+                Some(config.body_storage())
+            } else {
+                None
+            }
+        }
         pub fn build_response(
             &self,
             request_event: RequestEvent,
@@ -276,6 +311,7 @@ mod route_mngr {
 
     pub struct RouteFormBuilder {
         method: Option<H3Method>,
+        route_configuration: Option<RouteConfig>,
         path: Option<&'static str>,
         scheme: Option<&'static str>,
         authority: Option<&'static str>,
@@ -296,6 +332,7 @@ mod route_mngr {
             Self {
                 method: None,
                 path: None,
+                route_configuration: None,
                 scheme: None,
                 authority: None,
                 body_cb: None,
@@ -307,6 +344,7 @@ mod route_mngr {
             RouteForm {
                 method: self.method.take().unwrap(),
                 path: self.path.take().unwrap(),
+                route_configuration: self.route_configuration.take(),
                 scheme: self.scheme.take().expect("expected scheme"),
                 authority: self.authority.clone(),
                 body_cb: self.body_cb.take(),
@@ -320,18 +358,22 @@ mod route_mngr {
         ///
         ///The callback returns (body, value of content-type field as bytes)
         ///
-        pub fn set_request_callback(
+        pub fn set_route_callback(
             &mut self,
             body_cb: impl Fn(RequestEvent) -> Result<(RequestResponse), ()> + Sync + Send + 'static,
         ) -> &mut Self {
             self.body_cb = Some(Box::new(body_cb));
             self
         }
+        pub fn set_route_config(&mut self, route_config: RouteConfig) -> &mut Self {
+            self.route_configuration = Some(route_config);
+            self
+        }
         ///
         ///Set the http method. H3Method::GET, ::POST, ::PUT, ::DELETE
         ///
         ///
-        pub fn set_method(&mut self, method: H3Method) -> &mut Self {
+        fn set_method(&mut self, method: H3Method) -> &mut Self {
             self.method = Some(method);
             self
         }
@@ -339,14 +381,14 @@ mod route_mngr {
         /// Set the request path as "/home"
         ///
         ///
-        pub fn set_path(&mut self, path: &'static str) -> &mut Self {
+        fn set_path(&mut self, path: &'static str) -> &mut Self {
             self.path = Some(path);
             self
         }
         ///
         /// Set the connexion type : https here
         ///
-        pub fn set_scheme(&mut self, scheme: &'static str) -> &mut Self {
+        fn set_scheme(&mut self, scheme: &'static str) -> &mut Self {
             self.scheme = Some(scheme);
             self
         }
