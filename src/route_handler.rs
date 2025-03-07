@@ -16,7 +16,7 @@ mod request_hndlr {
     };
 
     use crate::{
-        request_events::{self, RouteEvent},
+        route_events::{self, EventType, RouteEvent},
         route_manager::{DataManagement, RouteManagerInner},
         server_config,
         server_init::quiche_http3_server::{self, Client},
@@ -135,24 +135,30 @@ mod request_hndlr {
             client: &mut quiche_http3_server::QClient,
         ) {
             let guard = &*self.inner.lock().unwrap();
-            if let Ok(request_event) = guard
-                .routes_states()
-                .build_request_event(conn_id.to_owned(), stream_id)
-            {
-                let is_end = request_event.is_end();
-                if let Some((request_form, _)) = guard
-                    .get_routes_from_path_and_method(request_event.path(), request_event.method())
+            if let Ok(route_event) = guard.routes_states().build_route_event(
+                conn_id.to_owned(),
+                stream_id,
+                EventType::OnFinished,
+            ) {
+                let is_end = route_event.is_end();
+                if let Some((route_form, _)) =
+                    guard.get_routes_from_path_and_method(route_event.path(), route_event.method())
                 {
-                    match request_form.method() {
+                    match route_form.method() {
                         H3Method::GET => {
                             /*stream shutdown send response*/
+                            let response =
+                                if let Some(event_subscriber) = route_form.event_subscriber() {
+                                    event_subscriber.on_event(route_event)
+                                } else {
+                                    None
+                                };
 
                             client
                                 .conn()
                                 .stream_shutdown(stream_id, quiche::Shutdown::Read, 0)
                                 .unwrap();
-                            if let Ok((headers, body)) = request_form.build_response(request_event)
-                            {
+                            if let Ok((headers, body)) = route_form.build_response(response) {
                                 if let Err(_) = quiche_http3_server::send_response(
                                     client, stream_id, headers, body, is_end,
                                 ) {
@@ -161,8 +167,13 @@ mod request_hndlr {
                             }
                         }
                         H3Method::POST => {
-                            if let Ok((headers, body)) = request_form.build_response(request_event)
-                            {
+                            let response =
+                                if let Some(event_subscriber) = route_form.event_subscriber() {
+                                    event_subscriber.on_event(route_event)
+                                } else {
+                                    None
+                                };
+                            if let Ok((headers, body)) = route_form.build_response(response) {
                                 if let Err(_) = quiche_http3_server::send_response_when_finished(
                                     client, stream_id, headers, body, true,
                                 ) {
@@ -239,12 +250,10 @@ mod request_hndlr {
             }
 
             let guard = &*self.inner.lock().unwrap();
-            warn!("Ici");
 
             let mut data_management: Option<DataManagement> = None;
-            let mut event_subscriber: Option<
-                Arc<Box<dyn RouteEventListener + 'static + Send + Sync>>,
-            > = None;
+            let mut event_subscriber: Option<Arc<dyn RouteEventListener + 'static + Send + Sync>> =
+                None;
             if let Ok(method) = H3Method::parse(method.unwrap()) {
                 if let Some((route_form, _)) =
                     guard.get_routes_from_path_and_method(path.unwrap(), method)
@@ -273,24 +282,30 @@ mod request_hndlr {
                 return;
             }
 
-            if let Ok(request_event) = guard
-                .routes_states()
-                .build_request_event(conn_id, stream_id)
+            if let Ok(route_event) =
+                guard
+                    .routes_states()
+                    .build_route_event(conn_id, stream_id, EventType::OnHeader)
             {
-                let is_end = request_event.is_end();
-                if let Some((request_form, _)) = self
-                    .get_routes_from_path_and_method(request_event.path(), request_event.method())
+                let is_end = route_event.is_end();
+                if let Some((route_form, _)) =
+                    self.get_routes_from_path_and_method(route_event.path(), route_event.method())
                 {
-                    match request_form.method() {
+                    match route_form.method() {
                         H3Method::GET => {
                             /*stream shutdown send response*/
 
+                            let response =
+                                if let Some(event_subscriber) = route_form.event_subscriber() {
+                                    event_subscriber.on_finished(route_event)
+                                } else {
+                                    None
+                                };
                             client
                                 .conn()
                                 .stream_shutdown(stream_id, quiche::Shutdown::Read, 0)
                                 .unwrap();
-                            if let Ok((headers, body)) = request_form.build_response(request_event)
-                            {
+                            if let Ok((headers, body)) = route_form.build_response(response) {
                                 quiche_http3_server::send_response(
                                     client, stream_id, headers, body, is_end,
                                 );

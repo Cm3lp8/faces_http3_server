@@ -65,7 +65,7 @@ mod req_temp_table {
     use uuid::Uuid;
 
     use crate::{
-        request_events::{self, DataEvent, RouteEvent},
+        route_events::{self, DataEvent, EventType, FinishedEvent, HeaderEvent, RouteEvent},
         route_manager::DataManagement,
         server_config, BodyStorage, H3Method, RouteEventListener, ServerConfig,
     };
@@ -121,10 +121,11 @@ mod req_temp_table {
             None
         }
         /// Once all the data is received by the server, this takes infos from it, builds the request event  that trigger a reponse for the client.
-        pub fn build_request_event(
+        pub fn build_route_event(
             &self,
             conn_id: String,
             stream_id: u64,
+            event_type: EventType,
         ) -> Result<RouteEvent, ()> {
             let mut can_clean = false;
             let res = if let Some(partial_req) = self
@@ -133,7 +134,7 @@ mod req_temp_table {
                 .unwrap()
                 .get_mut(&(conn_id.clone(), stream_id))
             {
-                let request_event = partial_req.to_request_event();
+                let request_event = partial_req.to_route_event(event_type);
 
                 can_clean = true;
                 if let Some(req_event) = request_event {
@@ -164,7 +165,10 @@ mod req_temp_table {
                     match data_mngmt {
                         DataManagement::Stream => {
                             if let Some(suscriber) = entry.event_subscriber() {
-                                suscriber.on_data(DataEvent::new(packet.to_vec(), is_end));
+                                suscriber.on_data(RouteEvent::new_data(DataEvent::new(
+                                    packet.to_vec(),
+                                    is_end,
+                                )));
                             }
                         }
                         DataManagement::Storage(body_storage) => match body_storage {
@@ -174,7 +178,10 @@ mod req_temp_table {
                             }
                             BodyStorage::File => {
                                 if let Some(suscriber) = entry.event_subscriber() {
-                                    suscriber.on_data(DataEvent::new(packet.to_vec(), is_end));
+                                    suscriber.on_data(RouteEvent::new_data(DataEvent::new(
+                                        packet.to_vec(),
+                                        is_end,
+                                    )));
                                 }
                                 entry.write_file(packet, is_end);
                                 total_written = Ok(entry.written());
@@ -193,7 +200,7 @@ mod req_temp_table {
             stream_id: u64,
             method: H3Method,
             data_management_type: Option<DataManagement>,
-            event_subscriber: Option<Arc<Box<dyn RouteEventListener + 'static + Send + Sync>>>,
+            event_subscriber: Option<Arc<dyn RouteEventListener + 'static + Send + Sync>>,
             headers: &[h3::Header],
             path: &str,
             content_length: Option<usize>,
@@ -269,7 +276,7 @@ mod req_temp_table {
         headers: Option<Vec<h3::Header>>,
         method: H3Method,
         data_management_type: Option<DataManagement>,
-        event_subscriber: Option<Arc<Box<dyn RouteEventListener + 'static + Send + Sync>>>,
+        event_subscriber: Option<Arc<dyn RouteEventListener + 'static + Send + Sync>>,
         storage_path: Option<PathBuf>,
         file_opened: Option<BufWriter<File>>,
         path: String,
@@ -296,7 +303,7 @@ mod req_temp_table {
             stream_id: u64,
             method: H3Method,
             data_management_type: Option<DataManagement>,
-            event_subscriber: Option<Arc<Box<dyn RouteEventListener + Send + 'static + Sync>>>,
+            event_subscriber: Option<Arc<dyn RouteEventListener + Send + 'static + Sync>>,
             storage_path: Option<PathBuf>,
             file_opened: Option<BufWriter<File>>,
             headers: &[h3::Header],
@@ -364,22 +371,31 @@ mod req_temp_table {
         }
         pub fn event_subscriber(
             &mut self,
-        ) -> Option<&Arc<Box<dyn RouteEventListener + 'static + Send + Sync>>> {
+        ) -> Option<&Arc<dyn RouteEventListener + 'static + Send + Sync>> {
             self.event_subscriber.as_ref()
         }
-        pub fn to_request_event(&mut self) -> Option<RouteEvent> {
+        pub fn to_route_event(&mut self, event_type: EventType) -> Option<RouteEvent> {
             let file_path = self.close_file();
             if let Some(headers) = self.headers.as_ref() {
-                Some(RouteEvent::new(
-                    self.path.as_str(),
-                    self.method,
-                    headers.clone(),
-                    self.args.take(),
-                    file_path,
-                    self.body_written_size,
-                    Some(std::mem::replace(&mut self.body, vec![])),
-                    self.is_end,
-                ))
+                match event_type {
+                    EventType::OnHeader => Some(RouteEvent::new_header(HeaderEvent::new(
+                        self.path.as_str(),
+                        self.method,
+                        headers.clone(),
+                        self.args.take(),
+                    ))),
+                    EventType::OnFinished => Some(RouteEvent::new_finished(FinishedEvent::new(
+                        self.path.as_str(),
+                        self.method,
+                        headers.clone(),
+                        self.args.take(),
+                        file_path,
+                        self.body_written_size,
+                        Some(std::mem::replace(&mut self.body, vec![])),
+                        self.is_end,
+                    ))),
+                    _ => None,
+                }
             } else {
                 None
             }

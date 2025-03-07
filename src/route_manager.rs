@@ -59,7 +59,7 @@ mod route_mngr {
     use quiche::h3;
 
     use crate::{
-        event_listener, request_events::RouteEvent, request_response::RequestResponse,
+        event_listener, request_response::RequestResponse, route_events::RouteEvent,
         route_handler::RequestsTable, RouteEventListener,
     };
 
@@ -288,7 +288,7 @@ mod route_mngr {
 
     pub struct RouteForm {
         method: H3Method,
-        event_subscriber: Option<Arc<Box<dyn RouteEventListener + 'static + Send + Sync>>>,
+        event_subscriber: Option<Arc<dyn RouteEventListener + 'static + Send + Sync>>,
         path: &'static str,
         route_configuration: Option<RouteConfig>,
         scheme: &'static str,
@@ -332,7 +332,7 @@ mod route_mngr {
         }
         pub fn event_subscriber(
             &self,
-        ) -> Option<Arc<Box<dyn RouteEventListener + 'static + Send + Sync>>> {
+        ) -> Option<Arc<dyn RouteEventListener + 'static + Send + Sync>> {
             self.event_subscriber.clone()
         }
 
@@ -345,30 +345,29 @@ mod route_mngr {
         }
         pub fn build_response(
             &self,
-            route_event: RouteEvent,
+            response: Option<RequestResponse>,
         ) -> Result<(Vec<h3::Header>, Vec<u8>), ()> {
-            if let Some(request_cb) = &self.body_cb {
-                let body_size = route_event.body_size();
-                let bytes_written = route_event.bytes_written();
-                if let Ok(mut request_response) = request_cb(route_event) {
-                    let headers = request_response.get_headers(Some(|| {
-                        vec![h3::Header::new(
-                            b"x-received-data",
-                            bytes_written.to_string().as_bytes(),
-                        )]
-                    }));
-                    let body = request_response.take_body();
-                    return Ok((headers, body));
-                }
+            if let Some(mut request_response) = response {
+                let headers = request_response.with_custom_headers(Some(|| {
+                    vec![h3::Header::new(
+                        b"x-received-data",
+                        request_response.content_length().as_bytes(),
+                    )]
+                }));
+                let body = request_response.take_body();
+                warn!("jkjEEE [{:#?}]", headers);
+                return Ok((headers, body));
             }
-            //to do
-            Err(())
+            let default = RequestResponse::new_ok_200();
+            let headers = default.get_headers();
+            warn!("EEEE [{:#?}]", headers);
+            Ok((headers, vec![]))
         }
     }
 
     pub struct RouteFormBuilder {
         method: Option<H3Method>,
-        event_subscriber: Option<Arc<Box<dyn RouteEventListener + 'static + Send + Sync>>>,
+        event_subscriber: Option<Arc<dyn RouteEventListener + 'static + Send + Sync>>,
         route_configuration: Option<RouteConfig>,
         path: Option<&'static str>,
         scheme: Option<&'static str>,
@@ -401,7 +400,7 @@ mod route_mngr {
 
         pub fn subscribe_event(
             &mut self,
-            event_listener: Arc<Box<dyn RouteEventListener + 'static + Send + Sync>>,
+            event_listener: Arc<dyn RouteEventListener + 'static + Send + Sync>,
         ) -> &mut Self {
             self.event_subscriber = Some(event_listener);
             self

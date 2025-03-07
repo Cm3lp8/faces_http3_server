@@ -4,68 +4,49 @@ use std::sync::Arc;
 use std::thread;
 
 use faces_quic_server::{
-    BodyStorage, ContentType, DataEvent, DataManagement, H3Method, Http3Server, RequestResponse,
-    RouteConfig, RouteEventListener, RouteForm,
+    BodyStorage, ContentType, DataEvent, DataManagement, EventLoop, EventResponseChannel, H3Method,
+    Http3Server, RequestResponse, ResponseBuilderSender, RouteConfig, RouteEvent,
+    RouteEventListener, RouteForm,
 };
 use faces_quic_server::{RequestType, RouteManager, RouteManagerBuilder, ServerConfig};
-use log::info;
+use log::{info, warn};
 fn main() {
     env_logger::init();
     let addr = "192.168.1.22:3000";
 
     let mut router = RouteManager::new();
 
-    struct DataEventHandler {
-        data_cb: Box<dyn Fn(DataEvent) + 'static + Send + Sync>,
-    }
-    impl DataEventHandler {
-        pub fn new(
-            cb: impl Fn(DataEvent) + Send + Sync + 'static,
-        ) -> Arc<Box<dyn RouteEventListener + Send + Sync + 'static>> {
-            Arc::new(Box::new(Self {
-                data_cb: Box::new(cb),
-            }))
-        }
-    }
+    let event_loop = EventLoop::new();
 
-    impl RouteEventListener for DataEventHandler {
-        fn on_data(&self, event: DataEvent) {
-            (self.data_cb)(event);
+    event_loop.run(|event, response_builder| match event {
+        RouteEvent::OnFinished(event) => {
+            if let Some(file_path) = event.get_file_path() {
+                info!(" Le chemin : \n{:#?}", file_path);
+            }
+            if let Err(e) = response_builder.send_ok_200() {
+                log::error!("Failed to send response");
+            }
         }
-    }
-
-    let event_listener =
-        DataEventHandler::new(|data_event| info!("data received [{:?}]", data_event.packet_len()));
+        RouteEvent::OnData(data) => {
+            response_builder.send_ok_200();
+        }
+        _ => {
+            warn!("iciicicicic")
+        }
+    });
 
     router.route_post(
         "/large_data",
         RouteConfig::new(DataManagement::Storage(BodyStorage::File)),
         |route_builder| {
             route_builder
-                .subscribe_event(event_listener.clone())
-                .on_finished_callback(|req_event| {
-                    println!("Large data received len [{:?}]", req_event.as_body().len());
-
-                    if let Some(file_path) = req_event.get_file_path() {
-                        info!("{:#?}", file_path);
-                    }
-
-                    let response = RequestResponse::new()
-                        .set_status(faces_quic_server::Status::Ok(200))
-                        .set_body(vec![9; 30_000])
-                        .set_content_type(ContentType::Text)
-                        .build();
-                    response
-                })
+                .subscribe_event(event_loop.clone())
                 .set_request_type(RequestType::Ping);
         },
     );
     router.route_get("/test", RouteConfig::default(), |route_builder| {
         route_builder
-            .on_finished_callback(|req_event| {
-                println!("[{:#?}]", req_event.headers());
-                Err(())
-            })
+            .subscribe_event(event_loop.clone())
             .set_request_type(RequestType::Ping);
     });
 

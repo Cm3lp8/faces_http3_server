@@ -2,10 +2,13 @@ pub use request_reponse_builder::RequestResponse;
 pub use response_elements::ContentType;
 pub use response_elements::Status;
 mod request_reponse_builder {
-    use quiche::h3::{self, Header, HeaderRef};
+    use std::path::Path;
+
+    use quiche::h3::{self, Header, HeaderRef, NameValue};
 
     use super::*;
 
+    #[derive(Debug)]
     pub struct RequestResponse {
         status: h3::Header,
         content_length: Option<h3::Header>,
@@ -23,7 +26,33 @@ mod request_reponse_builder {
                 .build()
                 .unwrap()
         }
-        pub fn get_headers(
+        ///
+        /// Respond to client with a file from fs.
+        ///
+        pub fn new_200_with_file(path: impl AsRef<Path>) -> RequestResponse {
+            ResponseBuilder::new()
+                .set_status(Status::Ok(200))
+                .build()
+                .unwrap()
+        }
+        ///
+        /// Respond to client with in memory data
+        ///
+        pub fn new_200_with_data(data: Vec<u8>) -> RequestResponse {
+            ResponseBuilder::new()
+                .set_status(Status::Ok(200))
+                .set_body(data)
+                .build()
+                .unwrap()
+        }
+        pub fn content_length(&self) -> String {
+            if let Some(content_len) = &self.content_length {
+                String::from_utf8_lossy(content_len.value()).to_string()
+            } else {
+                "0".to_owned()
+            }
+        }
+        pub fn with_custom_headers(
             &self,
             custom_headers: Option<impl FnOnce() -> Vec<h3::Header>>,
         ) -> Vec<h3::Header> {
@@ -38,6 +67,18 @@ mod request_reponse_builder {
 
             if let Some(custom_hdr_cb) = custom_headers {
                 headers.extend(custom_hdr_cb());
+            }
+
+            headers
+        }
+        pub fn get_headers(&self) -> Vec<h3::Header> {
+            let mut headers: Vec<h3::Header> = vec![self.status.clone()];
+            if let Some(content_type) = &self.content_type {
+                headers.push(content_type.clone());
+            }
+
+            if let Some(content_length) = &self.content_length {
+                headers.push(content_length.clone());
             }
 
             headers
