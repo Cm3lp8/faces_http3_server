@@ -16,12 +16,14 @@ mod request_hndlr {
     };
 
     use crate::{
+        request_response::ResponseHead,
         route_events::{self, EventType, RouteEvent},
         route_manager::{DataManagement, RouteManagerInner},
         server_config,
         server_init::quiche_http3_server::{self, Client},
         BodyStorage, RouteEventListener, ServerConfig,
     };
+    use mio::Waker;
     use quiche::{
         h3::{self, NameValue},
         Connection,
@@ -133,6 +135,8 @@ mod request_hndlr {
             conn_id: &str,
             stream_id: u64,
             client: &mut quiche_http3_server::QClient,
+            response_head: &ResponseHead,
+            waker: &Arc<Waker>,
         ) {
             let guard = &*self.inner.lock().unwrap();
             if let Ok(route_event) =
@@ -162,7 +166,17 @@ mod request_hndlr {
                                 route_form.build_response(stream_id, conn_id, response)
                             {
                                 match body {
-                                    Some(body) => {}
+                                    Some(body) => {
+                                        if let Ok(n) = quiche_http3_server::send_header(
+                                            client, stream_id, headers, false,
+                                        ) {
+                                            warn!("reponse header send !");
+                                            response_head.send_response(body);
+                                            if let Err(e) = waker.wake() {
+                                                error!("Failed to wake poll [{:?}]", e);
+                                            };
+                                        }
+                                    }
                                     None => {
                                         if let Err(_) = quiche_http3_server::send_response(
                                             client,
@@ -189,6 +203,11 @@ mod request_hndlr {
                             {
                                 match body {
                                     Some(body) => {
+                                        response_head.send_response(body);
+                                        if let Err(e) = waker.wake() {
+                                            error!("Failed to wake poll [{:?}]", e);
+                                        };
+
                                         warn!("boyddddd")
                                     }
                                     None => {
@@ -243,6 +262,8 @@ mod request_hndlr {
             stream_id: u64,
             client: &mut quiche_http3_server::QClient,
             more_frames: bool,
+            response_head: &ResponseHead,
+            waker: &Arc<Waker>,
         ) {
             let conn_id = client.conn().trace_id().to_string();
             let mut method: Option<&[u8]> = None;
@@ -343,7 +364,20 @@ mod request_hndlr {
                                 route_form.build_response(stream_id, conn_id.as_str(), response)
                             {
                                 match body {
-                                    Some(body) => {}
+                                    Some(body) => {
+                                        if let Ok(n) = quiche_http3_server::send_header(
+                                            client, stream_id, headers, false,
+                                        ) {
+                                            if let Err(e) = waker.wake() {
+                                                error!("Failed to wake poll [{:?}]", e);
+                                            };
+                                            warn!("Header send is_end [{}] ", is_end);
+                                            response_head.send_response(body);
+                                            if let Err(e) = waker.wake() {
+                                                error!("Failed to wake poll [{:?}]", e);
+                                            };
+                                        }
+                                    }
                                     None => {
                                         quiche_http3_server::send_response(
                                             client,

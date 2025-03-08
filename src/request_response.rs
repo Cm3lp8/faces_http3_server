@@ -1,10 +1,194 @@
 pub use request_reponse_builder::{BodyType, RequestResponse};
 pub use response_elements::ContentType;
 pub use response_elements::Status;
+pub use response_queue::{ResponseHead, ResponseQueue};
+
+mod response_queue_implementation {
+    use std::{
+        io::{BufReader, Cursor, Read},
+        path::Path,
+        sync::Arc,
+    };
+
+    use mio::Waker;
+
+    use self::response_queue::BodyRequest;
+
+    use super::*;
+
+    pub fn send_data(
+        stream_id: u64,
+        conn_id: &str,
+        data: Vec<u8>,
+        chunk_size: usize,
+        sender: &crossbeam_channel::Sender<BodyRequest>,
+        waker: &Arc<Waker>,
+    ) {
+        let sender = sender.clone();
+
+        let data_len = data.len();
+        let mut reader = BufReader::new(Cursor::new(data));
+        let conn_id = conn_id.to_owned();
+        let waker = waker.clone();
+
+        std::thread::Builder::new()
+            .stack_size(1024 * 128)
+            .spawn(move || {
+                let mut buf = vec![0; chunk_size].into_boxed_slice();
+                let mut bytes_written = 0;
+                let mut packet_send = 0;
+                let mut is_end = false;
+                while let Ok(n) = reader.read(&mut buf) {
+                    bytes_written += n;
+                    if bytes_written == data_len {
+                        is_end = true;
+                    }
+                    if let Err(_e) = sender.send(BodyRequest::new(
+                        stream_id,
+                        conn_id.as_str(),
+                        packet_send,
+                        buf[..n].to_vec(),
+                        is_end,
+                    )) {
+                        error!("Failed to send packet [{packet_send}] ");
+                    } else {
+                        warn!("body send is end [{is_end}]");
+                        packet_send += 1;
+                    }
+                    if bytes_written == data_len {
+                        warn!("in [{bytes_written}] bytes");
+                        waker.wake();
+                        break;
+                    }
+                    waker.wake();
+                }
+            })
+            .unwrap();
+    }
+    pub fn send_file(
+        file_path: &Path,
+        chunk_size: usize,
+        sender: &crossbeam_channel::Sender<BodyRequest>,
+    ) {
+    }
+}
+mod response_queue {
+    use std::sync::Arc;
+
+    use mio::Waker;
+
+    use super::{
+        response_queue_implementation::{send_data, send_file},
+        BodyType,
+    };
+
+    const CHUNK_SIZE: usize = 1350;
+
+    pub struct ResponseHead {
+        sender: crossbeam_channel::Sender<BodyRequest>,
+        waker: Arc<Waker>,
+    }
+    impl ResponseHead {
+        pub fn send_response(&self, msg: BodyType) {
+            match msg {
+                BodyType::Data {
+                    stream_id,
+                    conn_id,
+                    data,
+                } => send_data(
+                    stream_id,
+                    conn_id.as_str(),
+                    data,
+                    CHUNK_SIZE,
+                    &self.sender,
+                    &self.waker,
+                ),
+                BodyType::FilePath {
+                    stream_id,
+                    conn_id,
+                    file_path,
+                } => send_file(file_path.as_path(), CHUNK_SIZE, &self.sender),
+                BodyType::None => {}
+            }
+        }
+    }
+    pub struct ResponseQueue {
+        channel: (
+            crossbeam_channel::Sender<BodyRequest>,
+            crossbeam_channel::Receiver<BodyRequest>,
+        ),
+        waker: Arc<Waker>,
+    }
+    impl Clone for ResponseQueue {
+        fn clone(&self) -> Self {
+            Self {
+                channel: self.channel.clone(),
+                waker: self.waker.clone(),
+            }
+        }
+    }
+
+    impl ResponseQueue {
+        pub fn new(waker: Arc<Waker>) -> Self {
+            let channel = crossbeam_channel::unbounded::<BodyRequest>();
+            Self { channel, waker }
+        }
+
+        pub fn get_head(&self) -> ResponseHead {
+            ResponseHead {
+                sender: self.channel.0.clone(),
+                waker: self.waker.clone(),
+            }
+        }
+
+        pub fn pop_request(&self) -> Result<BodyRequest, crossbeam_channel::TryRecvError> {
+            self.channel.1.try_recv()
+        }
+    }
+
+    #[derive(Debug)]
+    pub struct BodyRequest {
+        packet_id: usize,
+        stream_id: u64,
+        conn_id: String,
+        packet: Vec<u8>,
+        is_end: bool,
+    }
+
+    impl BodyRequest {
+        pub fn new(
+            stream_id: u64,
+            conn_id: &str,
+            packet_id: usize,
+            packet: Vec<u8>,
+            is_end: bool,
+        ) -> Self {
+            Self {
+                stream_id,
+                conn_id: conn_id.to_string(),
+                packet_id,
+                packet,
+                is_end,
+            }
+        }
+        pub fn stream_id(&self) -> u64 {
+            self.stream_id
+        }
+        pub fn conn_id(&self) -> &str {
+            self.conn_id.as_str()
+        }
+        pub fn take_data(&mut self) -> Vec<u8> {
+            std::mem::replace(&mut self.packet, vec![])
+        }
+        pub fn is_end(&self) -> bool {
+            self.is_end
+        }
+    }
+}
 mod request_reponse_builder {
     use std::path::{Path, PathBuf};
 
-    use quiche::h3::{self, Header, HeaderRef, NameValue};
+    use quiche::h3::{self, Header, NameValue};
 
     use super::*;
 

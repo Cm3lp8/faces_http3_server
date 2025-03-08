@@ -1,6 +1,7 @@
 pub use self::quiche_implementation::{
     send_body, send_header, send_response, send_response_when_finished,
 };
+use mio::Token;
 use quiche::h3::{self, NameValue};
 use quiche::Connection;
 use ring::rand::*;
@@ -8,6 +9,7 @@ use std::collections::HashMap;
 use std::net;
 pub use Client as QClient;
 const MAX_DATAGRAM_SIZE: usize = 1350;
+const WAKER_TOKEN: Token = Token(1);
 struct PartialResponse {
     headers: Option<Vec<quiche::h3::Header>>,
     body: Vec<u8>,
@@ -36,9 +38,11 @@ mod quiche_implementation {
         time::{Duration, Instant},
     };
 
+    use mio::Waker;
     use quiche::h3::Priority;
 
     use crate::{
+        request_response::ResponseQueue,
         server_config::{self, RouteHandler},
         RouteManager, ServerConfig,
     };
@@ -62,6 +66,14 @@ mod quiche_implementation {
                 mio::Interest::READABLE | mio::Interest::WRITABLE,
             )
             .unwrap();
+
+        let waker = Arc::new(Waker::new(poll.registry(), WAKER_TOKEN).unwrap());
+        let waker_clone = waker.clone();
+        // init the request Response queue with mio waker
+
+        let response_queue = ResponseQueue::new(waker);
+
+        let response_head = response_queue.get_head();
         // Create the configuration for the QUIC connections.
         let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
         config
@@ -258,6 +270,15 @@ mod quiche_implementation {
                     client.http3_conn = Some(h3_conn);
                 }
                 if client.http3_conn.is_some() {
+                    if let Ok(mut response_body) = response_queue.pop_request() {
+                        warn!("Response popped [{:?}]", response_body);
+                        send_body_response(
+                            client,
+                            response_body.stream_id(),
+                            response_body.take_data(),
+                            response_body.is_end(),
+                        );
+                    };
                     // Handle writable streams.
                     for stream_id in client.conn.writable() {
                         handle_writable(client, stream_id);
@@ -275,6 +296,8 @@ mod quiche_implementation {
                                     stream_id,
                                     client,
                                     more_frames,
+                                    &response_head,
+                                    &waker_clone,
                                 );
                                 req_recvd += 1;
                                 /*
@@ -321,6 +344,8 @@ mod quiche_implementation {
                                     trace_id.as_str(),
                                     stream_id,
                                     client,
+                                    &response_head,
+                                    &waker_clone,
                                 );
                                 ()
                             }
@@ -354,7 +379,10 @@ mod quiche_implementation {
                 let mut packet_send = 0;
                 loop {
                     let (write, send_info) = match client.conn.send(&mut out) {
-                        Ok(v) => v,
+                        Ok(v) => {
+                            warn!("Sending [{:?}] bytes ", v.0);
+                            v
+                        }
                         Err(quiche::Error::Done) => {
                             //debug!("{} done writing", client.conn.trace_id());
                             // error!("{} done writing", client.conn.trace_id());
@@ -629,6 +657,41 @@ mod quiche_implementation {
             let response = PartialResponse {
                 headers: None,
                 body,
+                written,
+            };
+            client.partial_responses.insert(stream_id, response);
+        }
+        /*
+         *
+         * Send reponse to the client
+         *
+         * */
+        Ok(written)
+    }
+    fn send_body_response(
+        client: &mut Client,
+        stream_id: u64,
+        data: Vec<u8>,
+        is_end: bool,
+    ) -> Result<usize, ()> {
+        debug!("sending body [{}] bytes", data.len());
+        let http3_conn = &mut client.http3_conn.as_mut().unwrap();
+        let conn = &mut client.conn;
+        let written = match http3_conn.send_body(conn, stream_id, &data, true) {
+            Ok(v) => {
+                warn!("sended [{}] on stream_id [{}]", v, stream_id);
+                v
+            }
+            Err(quiche::h3::Error::Done) => 0,
+            Err(e) => {
+                error!("{} [{}] Esend failed {:?}", conn.trace_id(), stream_id, e);
+                return Err(());
+            }
+        };
+        if written < data.len() {
+            let response = PartialResponse {
+                headers: None,
+                body: data,
                 written,
             };
             client.partial_responses.insert(stream_id, response);
