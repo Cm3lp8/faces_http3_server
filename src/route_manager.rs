@@ -59,8 +59,11 @@ mod route_mngr {
     use quiche::h3;
 
     use crate::{
-        event_listener, request_response::RequestResponse, route_events::RouteEvent,
-        route_handler::RequestsTable, RouteEventListener,
+        event_listener,
+        request_response::{BodyType, RequestResponse},
+        route_events::RouteEvent,
+        route_handler::RequestsTable,
+        RouteEventListener,
     };
 
     use self::route_config::DataManagement;
@@ -99,7 +102,7 @@ mod route_mngr {
         ) {
             let guard = &*self.inner.lock().unwrap();
 
-            cb(guard.get_routes_from_path_and_method_and_request_type(path, methode, request_type));
+            cb(guard.get_routes_from_path_and_method_b(path, methode));
         }
         pub fn routes_handler(&self) -> RouteHandler {
             RouteHandler::new(self.inner.clone())
@@ -135,16 +138,14 @@ mod route_mngr {
         pub fn get_routes_from_path(&self, path: &str) -> Option<&Vec<RouteForm>> {
             self.routes_formats.get(path)
         }
-        pub fn get_routes_from_path_and_method_and_request_type(
+        pub fn get_routes_from_path_and_method_b(
             &self,
             path: &str,
             methode: H3Method,
-            request_type: RequestType,
         ) -> Option<&RouteForm> {
             if let Some(request_coll) = self.get_routes_from_path(path) {
-                if let Some(found_route) = request_coll
-                    .iter()
-                    .find(|item| item.method() == &methode && item.request_type() == &request_type)
+                if let Some(found_route) =
+                    request_coll.iter().find(|item| item.method() == &methode)
                 {
                     return Some(found_route);
                 }
@@ -295,7 +296,6 @@ mod route_mngr {
         authority: Option<&'static str>,
         body_cb:
             Option<Box<dyn Fn(RouteEvent) -> Result<RequestResponse, ()> + Send + Sync + 'static>>,
-        request_type: RequestType,
     }
 
     impl PartialEq for RouteForm {
@@ -304,7 +304,6 @@ mod route_mngr {
                 && self.path() == self.path()
                 && self.scheme == self.scheme
                 && self.authority == other.authority
-                && self.request_type() == other.request_type()
         }
     }
 
@@ -327,9 +326,6 @@ mod route_mngr {
         pub fn method(&self) -> &H3Method {
             &self.method
         }
-        pub fn request_type(&self) -> &RequestType {
-            &self.request_type
-        }
         pub fn event_subscriber(
             &self,
         ) -> Option<Arc<dyn RouteEventListener + 'static + Send + Sync>> {
@@ -345,23 +341,21 @@ mod route_mngr {
         }
         pub fn build_response(
             &self,
+            stream_id: u64,
+            conn_id: &str,
             response: Option<RequestResponse>,
-        ) -> Result<(Vec<h3::Header>, Vec<u8>), ()> {
+        ) -> Result<(Vec<h3::Header>, Option<BodyType>), ()> {
             if let Some(mut request_response) = response {
-                let headers = request_response.with_custom_headers(Some(|| {
-                    vec![h3::Header::new(
-                        b"x-received-data",
-                        request_response.content_length().as_bytes(),
-                    )]
-                }));
+                let headers = request_response.get_headers();
                 let body = request_response.take_body();
-                warn!("jkjEEE [{:#?}]", headers);
-                return Ok((headers, body));
+                if let BodyType::None = body {
+                    return Ok((headers, None));
+                };
+                return Ok((headers, Some(body)));
             }
-            let default = RequestResponse::new_ok_200();
+            let default = RequestResponse::new_ok_200(stream_id, conn_id);
             let headers = default.get_headers();
-            warn!("EEEE [{:#?}]", headers);
-            Ok((headers, vec![]))
+            Ok((headers, None))
         }
     }
 
@@ -381,7 +375,6 @@ mod route_mngr {
                     + 'static,
             >,
         >,
-        request_type: Option<RequestType>,
     }
 
     impl RouteFormBuilder {
@@ -394,7 +387,6 @@ mod route_mngr {
                 scheme: None,
                 authority: None,
                 body_cb: None,
-                request_type: None,
             }
         }
 
@@ -414,7 +406,6 @@ mod route_mngr {
                 scheme: self.scheme.take().expect("expected scheme"),
                 authority: self.authority.clone(),
                 body_cb: self.body_cb.take(),
-                request_type: self.request_type.take().unwrap(),
             }
         }
 
@@ -456,13 +447,6 @@ mod route_mngr {
         ///
         fn set_scheme(&mut self, scheme: &'static str) -> &mut Self {
             self.scheme = Some(scheme);
-            self
-        }
-        ///
-        ///set the request type, in the context of the faces app
-        ///
-        pub fn set_request_type(&mut self, request_type: RequestType) -> &mut Self {
-            self.request_type = Some(request_type);
             self
         }
     }

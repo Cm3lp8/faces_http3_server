@@ -123,7 +123,7 @@ mod req_temp_table {
         /// Once all the data is received by the server, this takes infos from it, builds the request event  that trigger a reponse for the client.
         pub fn build_route_event(
             &self,
-            conn_id: String,
+            conn_id: &str,
             stream_id: u64,
             event_type: EventType,
         ) -> Result<RouteEvent, ()> {
@@ -132,9 +132,9 @@ mod req_temp_table {
                 .table
                 .lock()
                 .unwrap()
-                .get_mut(&(conn_id.clone(), stream_id))
+                .get_mut(&(conn_id.to_string(), stream_id))
             {
-                let request_event = partial_req.to_route_event(event_type);
+                let request_event = partial_req.to_route_event(stream_id, conn_id, event_type);
 
                 can_clean = true;
                 if let Some(req_event) = request_event {
@@ -147,11 +147,15 @@ mod req_temp_table {
             };
 
             if can_clean {
-                self.table.lock().unwrap().remove(&(conn_id, stream_id));
+                self.table
+                    .lock()
+                    .unwrap()
+                    .remove(&(conn_id.to_string(), stream_id));
             }
 
             res
         }
+
         pub fn write_body_packet(
             &self,
             conn_id: String,
@@ -160,12 +164,19 @@ mod req_temp_table {
             is_end: bool,
         ) -> Result<usize, ()> {
             let mut total_written: Result<usize, ()> = Err(());
-            if let Some(entry) = self.table.lock().unwrap().get_mut(&(conn_id, stream_id)) {
+            if let Some(entry) = self
+                .table
+                .lock()
+                .unwrap()
+                .get_mut(&(conn_id.clone(), stream_id))
+            {
                 if let Some(data_mngmt) = entry.data_management_type() {
                     match data_mngmt {
                         DataManagement::Stream => {
                             if let Some(suscriber) = entry.event_subscriber() {
                                 suscriber.on_data(RouteEvent::new_data(DataEvent::new(
+                                    stream_id,
+                                    conn_id.as_str(),
                                     packet.to_vec(),
                                     is_end,
                                 )));
@@ -179,6 +190,8 @@ mod req_temp_table {
                             BodyStorage::File => {
                                 if let Some(suscriber) = entry.event_subscriber() {
                                     suscriber.on_data(RouteEvent::new_data(DataEvent::new(
+                                        stream_id,
+                                        conn_id.as_str(),
                                         packet.to_vec(),
                                         is_end,
                                     )));
@@ -374,17 +387,26 @@ mod req_temp_table {
         ) -> Option<&Arc<dyn RouteEventListener + 'static + Send + Sync>> {
             self.event_subscriber.as_ref()
         }
-        pub fn to_route_event(&mut self, event_type: EventType) -> Option<RouteEvent> {
+        pub fn to_route_event(
+            &mut self,
+            stream_id: u64,
+            conn_id: &str,
+            event_type: EventType,
+        ) -> Option<RouteEvent> {
             let file_path = self.close_file();
             if let Some(headers) = self.headers.as_ref() {
                 match event_type {
                     EventType::OnHeader => Some(RouteEvent::new_header(HeaderEvent::new(
+                        stream_id,
+                        conn_id,
                         self.path.as_str(),
                         self.method,
                         headers.clone(),
                         self.args.take(),
                     ))),
                     EventType::OnFinished => Some(RouteEvent::new_finished(FinishedEvent::new(
+                        stream_id,
+                        conn_id,
                         self.path.as_str(),
                         self.method,
                         headers.clone(),

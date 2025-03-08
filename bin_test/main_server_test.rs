@@ -1,3 +1,4 @@
+#![allow(warnings)]
 use std::io::{BufRead, BufReader, Cursor};
 use std::ops::Add;
 use std::sync::Arc;
@@ -30,24 +31,18 @@ fn main() {
         RouteEvent::OnData(data) => {
             response_builder.send_ok_200();
         }
-        _ => {
-            warn!("iciicicicic")
-        }
+        _ => {}
     });
 
     router.route_post(
         "/large_data",
         RouteConfig::new(DataManagement::Storage(BodyStorage::File)),
         |route_builder| {
-            route_builder
-                .subscribe_event(event_loop.clone())
-                .set_request_type(RequestType::Ping);
+            route_builder.subscribe_event(event_loop.clone());
         },
     );
     router.route_get("/test", RouteConfig::default(), |route_builder| {
-        route_builder
-            .subscribe_event(event_loop.clone())
-            .set_request_type(RequestType::Ping);
+        route_builder.subscribe_event(event_loop.clone());
     });
 
     let _server = Http3Server::new(addr)

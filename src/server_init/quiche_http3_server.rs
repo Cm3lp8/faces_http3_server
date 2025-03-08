@@ -369,7 +369,7 @@ mod quiche_implementation {
                     };
                     if let Err(e) = socket.send_to(&out[..write], send_info.to) {
                         if e.kind() == std::io::ErrorKind::WouldBlock {
-                            error!("send() would block, [{:?}]", e);
+                            debug!("send() would block, [{:?}]", e);
                             break;
                         }
                         panic!("send() failed: {:?}", e);
@@ -519,8 +519,17 @@ mod quiche_implementation {
     ) -> Result<usize, ()> {
         let http3_conn = &mut client.http3_conn.as_mut().unwrap();
         let conn = &mut client.conn;
-        match http3_conn.send_additional_headers(conn, stream_id, &headers, false, false) {
-            Ok(v) => v,
+        match http3_conn.send_additional_headers(
+            conn,
+            stream_id,
+            &headers,
+            false,
+            if body.len() == 0 { true } else { false },
+        ) {
+            Ok(v) => {
+                warn!("header response send");
+                v
+            }
             Err(quiche::h3::Error::StreamBlocked) => {
                 let response = PartialResponse {
                     headers: Some(headers),
@@ -528,34 +537,12 @@ mod quiche_implementation {
                     written: 0,
                 };
                 client.partial_responses.insert(stream_id, response);
-                debug!("streamblocked [{stream_id}]");
-                return Err(());
+                warn!("streamblocked [{stream_id}]");
+                return Ok(0);
             }
             Err(e) => {
                 error!(
                     "{}, headers [{:#?}] Estream send failed {:?}",
-                    conn.trace_id(),
-                    headers,
-                    e
-                );
-                return Err(());
-            }
-        }
-        match http3_conn.send_additional_headers(conn, stream_id, &headers, false, false) {
-            Ok(v) => v,
-            Err(quiche::h3::Error::StreamBlocked) => {
-                debug!("streamblocked  send_additional_headers[{stream_id}]");
-                let response = PartialResponse {
-                    headers: Some(headers),
-                    body,
-                    written: 0,
-                };
-                client.partial_responses.insert(stream_id, response);
-                return Err(());
-            }
-            Err(e) => {
-                error!(
-                    "{}, headers [{:#?}] Astream send failed {:?}",
                     conn.trace_id(),
                     headers,
                     e
@@ -685,7 +672,7 @@ mod quiche_implementation {
                 return;
             }
             Err(e) => {
-                error!("{} stream send failed {:?}", conn.trace_id(), e);
+                error!("ici stream send failed {:?}", e);
                 return;
             }
         }
@@ -693,7 +680,7 @@ mod quiche_implementation {
             Ok(v) => v,
             Err(quiche::h3::Error::Done) => 0,
             Err(e) => {
-                error!("{} stream send failed {:?}", conn.trace_id(), e);
+                error!("{}aa stream send failed {:?}", conn.trace_id(), e);
                 return;
             }
         };
@@ -761,7 +748,11 @@ mod quiche_implementation {
                     return;
                 }
                 Err(e) => {
-                    error!("{} stream send failed {:?}", conn.trace_id(), e);
+                    error!(
+                        "{} handle writabel stream send failed {:?}",
+                        conn.trace_id(),
+                        e
+                    );
                     return;
                 }
             }

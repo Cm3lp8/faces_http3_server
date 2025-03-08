@@ -49,7 +49,7 @@ mod event_loop {
     }
     impl RouteEventListener for EventLoop {
         fn on_event(&self, event: RouteEvent) -> Option<RequestResponse> {
-            let (sender, receiver) = EventResponseChannel::new();
+            let (sender, receiver) = EventResponseChannel::new(&event);
             if let Err(e) = self.channel.0.try_send((event, sender)) {
                 log::error!("Failed to send event to event loop");
             }

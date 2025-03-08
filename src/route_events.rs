@@ -3,17 +3,26 @@ pub use event_response_channel::{
 };
 pub use request_event::{DataEvent, EventType, FinishedEvent, HeaderEvent, RouteEvent};
 mod event_response_channel {
-    use crossbeam_channel::Sender;
+    use std::path::Path;
 
-    use crate::RequestResponse;
+    use crossbeam_channel::Sender;
+    use mio::event;
+    use quiche::h3;
+
+    use crate::{RequestResponse, RouteEvent};
 
     pub struct EventResponseChannel;
     impl EventResponseChannel {
-        pub fn new() -> (ResponseBuilderSender, EventResponseWaiter) {
+        pub fn new(event: &RouteEvent) -> (ResponseBuilderSender, EventResponseWaiter) {
             let channel = crossbeam_channel::bounded(1);
 
             (
-                ResponseBuilderSender { sender: channel.0 },
+                ResponseBuilderSender {
+                    bytes_written: event.bytes_written(),
+                    stream_id: event.stream_id() as u64,
+                    conn_id: event.conn_id().to_owned(),
+                    sender: channel.0,
+                },
                 EventResponseWaiter {
                     receiver: channel.1,
                 },
@@ -21,12 +30,37 @@ mod event_response_channel {
         }
     }
     pub struct ResponseBuilderSender {
+        bytes_written: usize,
+        stream_id: u64,
+        conn_id: String,
         sender: crossbeam_channel::Sender<RequestResponse>,
     }
     impl ResponseBuilderSender {
         pub fn send_ok_200(&self) -> Result<(), crossbeam_channel::SendError<RequestResponse>> {
+            let stream_id = self.stream_id;
+            let conn_id = &self.conn_id;
+            self.sender.send(
+                RequestResponse::new_ok_200(stream_id, conn_id)
+                    .header("x-received-data", self.bytes_written.to_string().as_str()),
+            )
+        }
+        pub fn send_ok_200_with_data(
+            &self,
+            data: Vec<u8>,
+        ) -> Result<(), crossbeam_channel::SendError<RequestResponse>> {
+            let stream_id = self.stream_id;
+            let conn_id = &self.conn_id;
             self.sender
-                .send(RequestResponse::new_200_with_data(vec![0; 2]))
+                .send(RequestResponse::new_200_with_data(stream_id, conn_id, data))
+        }
+        pub fn send_ok_200_with_file(
+            &self,
+            path: impl AsRef<Path>,
+        ) -> Result<(), crossbeam_channel::SendError<RequestResponse>> {
+            let stream_id = self.stream_id;
+            let conn_id = &self.conn_id;
+            self.sender
+                .send(RequestResponse::new_200_with_file(stream_id, conn_id, path))
         }
     }
     pub struct EventResponseWaiter {
@@ -57,6 +91,8 @@ mod request_event {
 
     #[derive(Debug)]
     pub struct HeaderEvent {
+        stream_id: u64,
+        conn_id: String,
         path: String,
         headers: Vec<h3::Header>,
         method: H3Method,
@@ -64,12 +100,16 @@ mod request_event {
     }
     impl HeaderEvent {
         pub fn new(
+            stream_id: u64,
+            conn_id: &str,
             path: &str,
             method: H3Method,
             headers: Vec<h3::Header>,
             args: Option<Vec<ReqArgs>>,
         ) -> HeaderEvent {
             HeaderEvent {
+                stream_id,
+                conn_id: conn_id.to_owned(),
                 path: path.to_owned(),
                 headers,
                 method,
@@ -89,6 +129,8 @@ mod request_event {
 
     #[derive(Debug)]
     pub struct FinishedEvent {
+        stream_id: u64,
+        conn_id: String,
         path: String,
         headers: Vec<h3::Header>,
         method: H3Method,
@@ -101,6 +143,8 @@ mod request_event {
 
     impl FinishedEvent {
         pub fn new(
+            stream_id: u64,
+            conn_id: &str,
             path: &str,
             method: H3Method,
             headers: Vec<h3::Header>,
@@ -111,6 +155,8 @@ mod request_event {
             is_end: bool,
         ) -> Self {
             Self {
+                stream_id,
+                conn_id: conn_id.to_owned(),
                 path: path.to_owned(),
                 method,
                 headers,
@@ -158,12 +204,19 @@ mod request_event {
 
     #[derive(Debug)]
     pub struct DataEvent {
+        stream_id: u64,
+        conn_id: String,
         packet: Vec<u8>,
         is_end: bool,
     }
     impl DataEvent {
-        pub fn new(packet: Vec<u8>, is_end: bool) -> Self {
-            Self { packet, is_end }
+        pub fn new(stream_id: u64, conn_id: &str, packet: Vec<u8>, is_end: bool) -> Self {
+            Self {
+                stream_id,
+                conn_id: conn_id.to_owned(),
+                packet,
+                is_end,
+            }
         }
         pub fn packet_len(&self) -> usize {
             self.packet.len()
@@ -185,6 +238,13 @@ mod request_event {
         pub fn new_header(header_event: HeaderEvent) -> RouteEvent {
             Self::OnHeader(header_event)
         }
+        pub fn headers(&self) -> Option<Vec<h3::Header>> {
+            match self {
+                Self::OnData(_event) => None,
+                Self::OnFinished(event) => Some(event.headers.clone()),
+                Self::OnHeader(event) => Some(event.headers.clone()),
+            }
+        }
         pub fn get_file_path(&self) -> Option<&PathBuf> {
             match self {
                 Self::OnFinished(event) => event.get_file_path(),
@@ -202,6 +262,20 @@ mod request_event {
                 Self::OnData(event) => event.packet_len(),
                 Self::OnFinished(event) => event.body_size(),
                 Self::OnHeader(_) => 0,
+            }
+        }
+        pub fn stream_id(&self) -> u64 {
+            match self {
+                Self::OnData(event) => event.stream_id,
+                Self::OnFinished(event) => event.stream_id,
+                Self::OnHeader(event) => event.stream_id,
+            }
+        }
+        pub fn conn_id(&self) -> &str {
+            match self {
+                Self::OnData(event) => event.conn_id.as_str(),
+                Self::OnFinished(event) => event.conn_id.as_str(),
+                Self::OnHeader(event) => event.conn_id.as_str(),
             }
         }
         pub fn bytes_written(&self) -> usize {

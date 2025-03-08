@@ -135,11 +135,11 @@ mod request_hndlr {
             client: &mut quiche_http3_server::QClient,
         ) {
             let guard = &*self.inner.lock().unwrap();
-            if let Ok(route_event) = guard.routes_states().build_route_event(
-                conn_id.to_owned(),
-                stream_id,
-                EventType::OnFinished,
-            ) {
+            if let Ok(route_event) =
+                guard
+                    .routes_states()
+                    .build_route_event(conn_id, stream_id, EventType::OnFinished)
+            {
                 let is_end = route_event.is_end();
                 if let Some((route_form, _)) =
                     guard.get_routes_from_path_and_method(route_event.path(), route_event.method())
@@ -158,11 +158,22 @@ mod request_hndlr {
                                 .conn()
                                 .stream_shutdown(stream_id, quiche::Shutdown::Read, 0)
                                 .unwrap();
-                            if let Ok((headers, body)) = route_form.build_response(response) {
-                                if let Err(_) = quiche_http3_server::send_response(
-                                    client, stream_id, headers, body, is_end,
-                                ) {
-                                    error!("Failed sending h3 response after GET request")
+                            if let Ok((headers, body)) =
+                                route_form.build_response(stream_id, conn_id, response)
+                            {
+                                match body {
+                                    Some(body) => {}
+                                    None => {
+                                        if let Err(_) = quiche_http3_server::send_response(
+                                            client,
+                                            stream_id,
+                                            headers,
+                                            vec![],
+                                            is_end,
+                                        ) {
+                                            error!("Failed sending h3 response after GET request")
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -173,23 +184,46 @@ mod request_hndlr {
                                 } else {
                                     None
                                 };
-                            if let Ok((headers, body)) = route_form.build_response(response) {
-                                if let Err(_) = quiche_http3_server::send_response_when_finished(
-                                    client, stream_id, headers, body, true,
-                                ) {
-                                    error!("Failed to send response after a post request")
-                                } else {
-                                    match client.conn().stream_shutdown(
-                                        stream_id,
-                                        quiche::Shutdown::Read,
-                                        0,
-                                    ) {
-                                        Ok(_v) => {}
-                                        Err(e) => {
+                            if let Ok((headers, body)) =
+                                route_form.build_response(stream_id, conn_id, response)
+                            {
+                                match body {
+                                    Some(body) => {
+                                        warn!("boyddddd")
+                                    }
+                                    None => {
+                                        if let Err(_) =
+                                            quiche_http3_server::send_response_when_finished(
+                                                client,
+                                                stream_id,
+                                                headers,
+                                                vec![],
+                                                true,
+                                            )
+                                        {
                                             error!(
+                                        "Failed to send response after a post request [{:?}]",
+                                        stream_id
+                                    )
+                                        } else {
+                                            match client.conn().stream_shutdown(
+                                                stream_id,
+                                                quiche::Shutdown::Read,
+                                                0,
+                                            ) {
+                                                Ok(_v) => {
+                                                    warn!(
+                                                        "success sending response stream_id[{:?}]",
+                                                        stream_id
+                                                    )
+                                                }
+                                                Err(e) => {
+                                                    error!(
                                         "error stream_shutdown stream_id [{stream_id}] [{:?}]",
                                         e
                                     )
+                                                }
+                                            }
                                         }
                                     }
                                 }
@@ -282,11 +316,11 @@ mod request_hndlr {
                 return;
             }
 
-            if let Ok(route_event) =
-                guard
-                    .routes_states()
-                    .build_route_event(conn_id, stream_id, EventType::OnHeader)
-            {
+            if let Ok(route_event) = guard.routes_states().build_route_event(
+                conn_id.as_str(),
+                stream_id,
+                EventType::OnHeader,
+            ) {
                 let is_end = route_event.is_end();
                 if let Some((route_form, _)) =
                     self.get_routes_from_path_and_method(route_event.path(), route_event.method())
@@ -305,10 +339,21 @@ mod request_hndlr {
                                 .conn()
                                 .stream_shutdown(stream_id, quiche::Shutdown::Read, 0)
                                 .unwrap();
-                            if let Ok((headers, body)) = route_form.build_response(response) {
-                                quiche_http3_server::send_response(
-                                    client, stream_id, headers, body, is_end,
-                                );
+                            if let Ok((headers, body)) =
+                                route_form.build_response(stream_id, conn_id.as_str(), response)
+                            {
+                                match body {
+                                    Some(body) => {}
+                                    None => {
+                                        quiche_http3_server::send_response(
+                                            client,
+                                            stream_id,
+                                            headers,
+                                            vec![],
+                                            is_end,
+                                        );
+                                    }
+                                }
                             }
                         }
                         H3Method::POST => { /*create entry in handler state*/ }
@@ -329,9 +374,8 @@ mod request_hndlr {
                     cb(None)
                 } else {
                     let coll: &Vec<RouteForm> = request_coll.unwrap();
-                    if let Some(found_request) = coll.iter().find(|item| {
-                        item.method() == &methode && *item.request_type() == request_type
-                    }) {
+                    if let Some(found_request) = coll.iter().find(|item| item.method() == &methode)
+                    {
                         cb(Some(found_request));
                     } else {
                         cb(None)
