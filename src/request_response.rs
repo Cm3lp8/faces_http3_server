@@ -52,15 +52,17 @@ mod response_queue_implementation {
                     )) {
                         error!("Failed to send packet [{packet_send}] ");
                     } else {
-                        warn!("body send is end [{is_end}]");
                         packet_send += 1;
                     }
                     if bytes_written == data_len {
-                        warn!("in [{bytes_written}] bytes");
                         waker.wake();
                         break;
                     }
+
                     waker.wake();
+                    if n == 0 {
+                        break;
+                    }
                 }
             })
             .unwrap();
@@ -82,13 +84,21 @@ mod response_queue {
         BodyType,
     };
 
-    const CHUNK_SIZE: usize = 1350;
+    const CHUNK_SIZE: usize = 4096;
 
     pub struct ResponseHead {
         sender: crossbeam_channel::Sender<BodyRequest>,
         waker: Arc<Waker>,
     }
     impl ResponseHead {
+        ///____________________________________________________________________
+        ///Repoll in the queue the data  that connexion can't handle right now.
+        pub fn re_send(
+            &self,
+            body: BodyRequest,
+        ) -> Result<(), crossbeam_channel::SendError<BodyRequest>> {
+            self.sender.send(body)
+        }
         pub fn send_response(&self, msg: BodyType) {
             match msg {
                 BodyType::Data {
@@ -183,6 +193,12 @@ mod response_queue {
         pub fn is_end(&self) -> bool {
             self.is_end
         }
+        pub fn packet_id(&self) -> usize {
+            self.packet_id
+        }
+        pub fn len(&self) -> usize {
+            self.packet.len()
+        }
     }
 }
 mod request_reponse_builder {
@@ -220,6 +236,21 @@ mod request_reponse_builder {
                 stream_id,
                 conn_id,
                 file_path: file_path.as_ref().to_path_buf(),
+            }
+        }
+        pub fn bytes_len(&self) -> usize {
+            match self {
+                Self::Data {
+                    stream_id,
+                    conn_id,
+                    data,
+                } => data.len(),
+                Self::FilePath {
+                    stream_id,
+                    conn_id,
+                    file_path,
+                } => 0,
+                Self::None => 0,
             }
         }
     }

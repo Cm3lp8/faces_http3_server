@@ -167,10 +167,21 @@ mod request_hndlr {
                             {
                                 match body {
                                     Some(body) => {
-                                        if let Ok(n) = quiche_http3_server::send_header(
-                                            client, stream_id, headers, false,
-                                        ) {
-                                            warn!("reponse header send !");
+                                        if !client.headers_send(stream_id) {
+                                            info!("header sendttt stream ([{stream_id}])");
+                                            if let Ok(n) = quiche_http3_server::send_more_header(
+                                                client,
+                                                stream_id,
+                                                headers.clone(),
+                                                false,
+                                            ) {
+                                                client.set_body_size_to_body_sending_tracker(
+                                                    stream_id,
+                                                    body.bytes_len(),
+                                                );
+                                                client.set_headers_send(stream_id, true);
+                                            }
+                                        } else {
                                             response_head.send_response(body);
                                             if let Err(e) = waker.wake() {
                                                 error!("Failed to wake poll [{:?}]", e);
@@ -203,12 +214,29 @@ mod request_hndlr {
                             {
                                 match body {
                                     Some(body) => {
-                                        response_head.send_response(body);
-                                        if let Err(e) = waker.wake() {
-                                            error!("Failed to wake poll [{:?}]", e);
-                                        };
-
-                                        warn!("boyddddd")
+                                        if !client.headers_send(stream_id) {
+                                            if let Ok(n) = quiche_http3_server::send_more_header(
+                                                client,
+                                                stream_id,
+                                                headers.clone(),
+                                                false,
+                                            ) {
+                                                client.set_body_size_to_body_sending_tracker(
+                                                    stream_id,
+                                                    body.bytes_len(),
+                                                );
+                                                client.set_headers_send(stream_id, true);
+                                                response_head.send_response(body);
+                                                if let Err(e) = waker.wake() {
+                                                    error!("Failed to wake poll [{:?}]", e);
+                                                };
+                                            }
+                                        } else {
+                                            response_head.send_response(body);
+                                            if let Err(e) = waker.wake() {
+                                                error!("Failed to wake poll [{:?}]", e);
+                                            };
+                                        }
                                     }
                                     None => {
                                         if let Err(_) =
@@ -225,17 +253,13 @@ mod request_hndlr {
                                         stream_id
                                     )
                                         } else {
+                                            info!("shutdown");
                                             match client.conn().stream_shutdown(
                                                 stream_id,
                                                 quiche::Shutdown::Read,
                                                 0,
                                             ) {
-                                                Ok(_v) => {
-                                                    warn!(
-                                                        "success sending response stream_id[{:?}]",
-                                                        stream_id
-                                                    )
-                                                }
+                                                Ok(_v) => {}
                                                 Err(e) => {
                                                     error!(
                                         "error stream_shutdown stream_id [{stream_id}] [{:?}]",
@@ -365,13 +389,12 @@ mod request_hndlr {
                             {
                                 match body {
                                     Some(body) => {
-                                        if let Ok(n) = quiche_http3_server::send_header(
+                                        if let Ok(n) = quiche_http3_server::send_more_header(
                                             client, stream_id, headers, false,
                                         ) {
                                             if let Err(e) = waker.wake() {
                                                 error!("Failed to wake poll [{:?}]", e);
                                             };
-                                            warn!("Header send is_end [{}] ", is_end);
                                             response_head.send_response(body);
                                             if let Err(e) = waker.wake() {
                                                 error!("Failed to wake poll [{:?}]", e);
