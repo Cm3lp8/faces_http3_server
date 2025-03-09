@@ -89,7 +89,7 @@ pub use quiche_implementation::run;
 mod quiche_implementation {
     use core::error;
     use std::{
-        sync::Arc,
+        sync::{Arc, Mutex},
         time::{Duration, Instant},
     };
 
@@ -158,6 +158,8 @@ mod quiche_implementation {
         let mut clients = ClientMap::new();
         let local_addr = socket.local_addr().unwrap();
         let mut total = 0;
+        let mut send_packet_time = Instant::now();
+        let mut last_time_spend = Arc::new(Mutex::new(Duration::from_micros(100)));
         loop {
             // Find the shorter timeout from all the active connections.
             //
@@ -342,7 +344,7 @@ mod quiche_implementation {
                                 .stream_capacity(response_body.stream_id())
                                 .unwrap()
                         {
-                            warn!(
+                            debug!(
                                 "pool stream_{} packet [{}]",
                                 response_body.stream_id(),
                                 response_body.packet_id()
@@ -383,6 +385,7 @@ mod quiche_implementation {
                                     more_frames,
                                     &response_head,
                                     &waker_clone,
+                                    &last_time_spend,
                                 );
                                 req_recvd += 1;
                                 /*
@@ -432,6 +435,7 @@ mod quiche_implementation {
                                     client,
                                     &response_head,
                                     &waker_clone,
+                                    &last_time_spend,
                                 );
                                 ()
                             }
@@ -497,6 +501,8 @@ mod quiche_implementation {
                 }
                 //std::thread::sleep(Duration::from_micros(500));
             }
+            *last_time_spend.lock().unwrap() = send_packet_time.elapsed();
+            send_packet_time = Instant::now();
             // Garbage collect closed connections.
             clients.retain(|_, ref mut c| {
                 debug!("Collecting garbage");

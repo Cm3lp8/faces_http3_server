@@ -7,7 +7,8 @@ mod response_queue_implementation {
     use std::{
         io::{BufReader, Cursor, Read},
         path::Path,
-        sync::Arc,
+        sync::{Arc, Mutex},
+        time::{Duration, Instant},
     };
 
     use mio::Waker;
@@ -23,6 +24,7 @@ mod response_queue_implementation {
         chunk_size: usize,
         sender: &crossbeam_channel::Sender<BodyRequest>,
         waker: &Arc<Waker>,
+        last_time_spend: &Arc<Mutex<Duration>>,
     ) {
         let sender = sender.clone();
 
@@ -30,6 +32,7 @@ mod response_queue_implementation {
         let mut reader = BufReader::new(Cursor::new(data));
         let conn_id = conn_id.to_owned();
         let waker = waker.clone();
+        let last_time_spend = last_time_spend.clone();
 
         std::thread::Builder::new()
             .stack_size(1024 * 128)
@@ -38,11 +41,15 @@ mod response_queue_implementation {
                 let mut bytes_written = 0;
                 let mut packet_send = 0;
                 let mut is_end = false;
+
                 while let Ok(n) = reader.read(&mut buf) {
                     bytes_written += n;
                     if bytes_written == data_len {
                         is_end = true;
                     }
+
+                    std::thread::sleep(Duration::from_micros(3000));
+
                     if let Err(_e) = sender.send(BodyRequest::new(
                         stream_id,
                         conn_id.as_str(),
@@ -75,7 +82,10 @@ mod response_queue_implementation {
     }
 }
 mod response_queue {
-    use std::sync::Arc;
+    use std::{
+        sync::{Arc, Mutex},
+        time::Duration,
+    };
 
     use mio::Waker;
 
@@ -99,7 +109,7 @@ mod response_queue {
         ) -> Result<(), crossbeam_channel::SendError<BodyRequest>> {
             self.sender.send(body)
         }
-        pub fn send_response(&self, msg: BodyType) {
+        pub fn send_response(&self, msg: BodyType, last_time_spend: &Arc<Mutex<Duration>>) {
             match msg {
                 BodyType::Data {
                     stream_id,
@@ -112,6 +122,7 @@ mod response_queue {
                     CHUNK_SIZE,
                     &self.sender,
                     &self.waker,
+                    last_time_spend,
                 ),
                 BodyType::FilePath {
                     stream_id,

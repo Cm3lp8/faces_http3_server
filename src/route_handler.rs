@@ -13,6 +13,7 @@ mod request_hndlr {
         env::args,
         fmt::Pointer,
         sync::{Arc, Mutex},
+        time::Duration,
     };
 
     use crate::{
@@ -137,6 +138,7 @@ mod request_hndlr {
             client: &mut quiche_http3_server::QClient,
             response_head: &ResponseHead,
             waker: &Arc<Waker>,
+            last_time: &Arc<Mutex<Duration>>,
         ) {
             let guard = &*self.inner.lock().unwrap();
             if let Ok(route_event) =
@@ -182,7 +184,7 @@ mod request_hndlr {
                                                 client.set_headers_send(stream_id, true);
                                             }
                                         } else {
-                                            response_head.send_response(body);
+                                            response_head.send_response(body, last_time);
                                             if let Err(e) = waker.wake() {
                                                 error!("Failed to wake poll [{:?}]", e);
                                             };
@@ -226,13 +228,13 @@ mod request_hndlr {
                                                     body.bytes_len(),
                                                 );
                                                 client.set_headers_send(stream_id, true);
-                                                response_head.send_response(body);
+                                                response_head.send_response(body, last_time);
                                                 if let Err(e) = waker.wake() {
                                                     error!("Failed to wake poll [{:?}]", e);
                                                 };
                                             }
                                         } else {
-                                            response_head.send_response(body);
+                                            response_head.send_response(body, last_time);
                                             if let Err(e) = waker.wake() {
                                                 error!("Failed to wake poll [{:?}]", e);
                                             };
@@ -288,6 +290,7 @@ mod request_hndlr {
             more_frames: bool,
             response_head: &ResponseHead,
             waker: &Arc<Waker>,
+            last_time: &Arc<Mutex<Duration>>,
         ) {
             let conn_id = client.conn().trace_id().to_string();
             let mut method: Option<&[u8]> = None;
@@ -395,7 +398,7 @@ mod request_hndlr {
                                             if let Err(e) = waker.wake() {
                                                 error!("Failed to wake poll [{:?}]", e);
                                             };
-                                            response_head.send_response(body);
+                                            response_head.send_response(body, last_time);
                                             if let Err(e) = waker.wake() {
                                                 error!("Failed to wake poll [{:?}]", e);
                                             };
