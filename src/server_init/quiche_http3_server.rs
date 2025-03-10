@@ -87,8 +87,9 @@ impl Client {
 type ClientMap = HashMap<quiche::ConnectionId<'static>, Client>;
 pub use quiche_implementation::run;
 mod quiche_implementation {
-    use core::error;
+    use core::{error, panic};
     use std::{
+        borrow::Borrow,
         sync::{Arc, Mutex},
         time::{Duration, Instant},
     };
@@ -97,7 +98,7 @@ mod quiche_implementation {
     use quiche::h3::Priority;
 
     use crate::{
-        request_response::ResponseQueue,
+        request_response::{BodyRequest, ResponseQueue},
         server_config::{self, RouteHandler},
         RouteManager, ServerConfig,
     };
@@ -127,6 +128,7 @@ mod quiche_implementation {
         // init the request Response queue with mio waker
 
         let response_queue = ResponseQueue::new(waker);
+        let mut pending_response_body: HashMap<(u64, String), Vec<BodyRequest>> = HashMap::new();
 
         let response_head = response_queue.get_head();
         // Create the configuration for the QUIC connections.
@@ -329,12 +331,65 @@ mod quiche_implementation {
                     client.http3_conn = Some(h3_conn);
                 }
                 if client.http3_conn.is_some() {
+                    let conn_id = client.conn.trace_id().to_string();
+                    for stream_id in client.conn.writable() {
+                        if let Some(mut pending_coll) =
+                            pending_response_body.remove(&(stream_id, conn_id.clone()))
+                        {
+                            let mut resp = if let Some(popped) = pending_coll.pop() {
+                                warn!("popped");
+                                popped
+                            } else {
+                                waker_clone.wake();
+                                break 'read;
+                            };
+                            if resp.len() > client.conn.stream_capacity(resp.stream_id()).unwrap() {
+                                let stream_id = resp.stream_id();
+                                let conn_id = resp.conn_id().to_string();
+                                let mut popped = vec![resp];
+                                popped.extend(pending_coll);
+                                pending_response_body.insert((stream_id, conn_id), popped);
+                                waker_clone.wake();
+                                break 'read;
+                            }
+                            send_body_response(client, resp.stream_id(), resp.take_data(), false)
+                                .unwrap();
+                            warn!("pen len [{:?}]", pending_coll.len());
+                            pending_response_body.insert(
+                                (resp.stream_id(), resp.conn_id().to_string()),
+                                pending_coll,
+                            );
+                            // Handle writable streams.
+                            for stream_id in client.conn.writable() {
+                                handle_writable(client, stream_id);
+                            }
+                            let is_end = client.is_body_totally_written(resp.stream_id());
+                            send_body_response(client, resp.stream_id(), vec![], is_end).unwrap();
+                        }
+                    }
+
+                    if !pending_response_body.is_empty() {
+                        waker_clone.wake();
+                        // Handle writable streams.
+                        for stream_id in client.conn.writable() {
+                            handle_writable(client, stream_id);
+                        }
+                        break 'read;
+                    }
                     if let Ok(mut response_body) = response_queue.pop_request() {
                         if response_body.is_end() {
                             error!(
-                                "body packet [{}] strid [{}]is end",
+                                "body packet [{}] strid [{}]is end len [{:#?}]",
                                 response_body.packet_id(),
-                                response_body.stream_id()
+                                response_body.stream_id(),
+                                if let Some(entry) = pending_response_body.get(&(
+                                    response_body.stream_id(),
+                                    response_body.conn_id().to_string()
+                                )) {
+                                    entry.len() as isize
+                                } else {
+                                    -1
+                                }
                             );
                         }
 
@@ -349,21 +404,41 @@ mod quiche_implementation {
                                 response_body.stream_id(),
                                 response_body.packet_id()
                             );
-                            response_head.re_send(response_body);
-                            // Handle writable streams.
-                            for stream_id in client.conn.writable() {
-                                handle_writable(client, stream_id);
-                            }
-                            break 'read;
+                            if let Some(entry) = pending_response_body.get_mut(&(
+                                response_body.stream_id(),
+                                response_body.conn_id().to_string(),
+                            )) {
+                                entry.push(response_body);
+                            } else {
+                                pending_response_body.insert(
+                                    (
+                                        response_body.stream_id(),
+                                        response_body.conn_id().to_string(),
+                                    ),
+                                    vec![response_body],
+                                );
+                            };
+                            waker_clone.wake();
                         } else {
                             send_body_response(
                                 client,
                                 response_body.stream_id(),
                                 response_body.take_data(),
                                 false,
-                            );
+                            )
+                            .unwrap();
+                            // Handle writable streams.
+                            for stream_id in client.conn.writable() {
+                                handle_writable(client, stream_id);
+                            }
                             let is_end = client.is_body_totally_written(response_body.stream_id());
-                            send_body_response(client, response_body.stream_id(), vec![], is_end);
+                            send_body_response(client, response_body.stream_id(), vec![], is_end)
+                                .unwrap();
+                            warn!(
+                                "writtnt for {:?} [{:?}]",
+                                client.get_written(response_body.stream_id()),
+                                response_body.stream_id()
+                            );
                         }
                     };
                     // Handle writable streams.

@@ -1,11 +1,13 @@
 pub use request_reponse_builder::{BodyType, RequestResponse};
 pub use response_elements::ContentType;
 pub use response_elements::Status;
+pub use response_queue::BodyRequest;
 pub use response_queue::{ResponseHead, ResponseQueue};
 
 mod response_queue_implementation {
     use std::{
         io::{BufReader, Cursor, Read},
+        ops::Deref,
         path::Path,
         sync::{Arc, Mutex},
         time::{Duration, Instant},
@@ -33,6 +35,7 @@ mod response_queue_implementation {
         let conn_id = conn_id.to_owned();
         let waker = waker.clone();
         let last_time_spend = last_time_spend.clone();
+        let default_pacing = Duration::from_micros(500);
 
         std::thread::Builder::new()
             .stack_size(1024 * 128)
@@ -42,13 +45,23 @@ mod response_queue_implementation {
                 let mut packet_send = 0;
                 let mut is_end = false;
 
+                let mut start = Instant::now();
                 while let Ok(n) = reader.read(&mut buf) {
                     bytes_written += n;
                     if bytes_written == data_len {
                         is_end = true;
                     }
 
-                    std::thread::sleep(Duration::from_micros(3000));
+                    let last_duration = *last_time_spend.lock().unwrap();
+
+                    let duration = if last_duration < default_pacing {
+                        default_pacing
+                    } else {
+                        last_duration
+                    };
+                    while start.elapsed() < duration {
+                        std::thread::yield_now();
+                    }
 
                     if let Err(_e) = sender.send(BodyRequest::new(
                         stream_id,
@@ -59,6 +72,7 @@ mod response_queue_implementation {
                     )) {
                         error!("Failed to send packet [{packet_send}] ");
                     } else {
+                        warn!("written stream_id [{stream_id}]");
                         packet_send += 1;
                     }
                     if bytes_written == data_len {
@@ -70,6 +84,7 @@ mod response_queue_implementation {
                     if n == 0 {
                         break;
                     }
+                    start = Instant::now();
                 }
             })
             .unwrap();

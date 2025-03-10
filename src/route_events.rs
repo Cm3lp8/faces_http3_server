@@ -50,8 +50,10 @@ mod event_response_channel {
         ) -> Result<(), crossbeam_channel::SendError<RequestResponse>> {
             let stream_id = self.stream_id;
             let conn_id = &self.conn_id;
-            self.sender
-                .send(RequestResponse::new_200_with_data(stream_id, conn_id, data))
+            self.sender.send(
+                RequestResponse::new_200_with_data(stream_id, conn_id, data)
+                    .header("x-received-data", self.bytes_written.to_string().as_str()),
+            )
         }
         pub fn send_ok_200_with_file(
             &self,
