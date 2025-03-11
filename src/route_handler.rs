@@ -17,12 +17,12 @@ mod request_hndlr {
     };
 
     use crate::{
-        request_response::ResponseHead,
+        request_response::{BodyRequest, ChunkingStation},
         route_events::{self, EventType, RouteEvent},
         route_manager::{DataManagement, RouteManagerInner},
         server_config,
         server_init::quiche_http3_server::{self, Client},
-        BodyStorage, RouteEventListener, ServerConfig,
+        BodyStorage, RequestResponse, RouteEventListener, ServerConfig,
     };
     use mio::Waker;
     use quiche::{
@@ -136,7 +136,7 @@ mod request_hndlr {
             conn_id: &str,
             stream_id: u64,
             client: &mut quiche_http3_server::QClient,
-            response_head: &ResponseHead,
+            chunking_station: &ChunkingStation,
             waker: &Arc<Waker>,
             last_time: &Arc<Mutex<Duration>>,
         ) {
@@ -153,12 +153,16 @@ mod request_hndlr {
                     match route_form.method() {
                         H3Method::GET => {
                             /*stream shutdown send response*/
-                            let response =
+                            let mut response =
                                 if let Some(event_subscriber) = route_form.event_subscriber() {
                                     event_subscriber.on_event(route_event)
                                 } else {
                                     None
                                 };
+
+                            if let Some(resp) = &mut response {
+                                resp.attach_chunk_sender(client.get_response_sender())
+                            }
 
                             client
                                 .conn()
@@ -184,13 +188,15 @@ mod request_hndlr {
                                                 client.set_headers_send(stream_id, true);
                                             }
                                         } else {
-                                            response_head.send_response(body, last_time);
+                                            warn!("body [{:#?}]", body);
+                                            chunking_station.send_response(body, last_time);
                                             if let Err(e) = waker.wake() {
                                                 error!("Failed to wake poll [{:?}]", e);
                                             };
                                         }
                                     }
                                     None => {
+                                        warn!("okpok");
                                         if let Err(_) = quiche_http3_server::send_response(
                                             client,
                                             stream_id,
@@ -205,12 +211,15 @@ mod request_hndlr {
                             }
                         }
                         H3Method::POST => {
-                            let response =
+                            let mut response =
                                 if let Some(event_subscriber) = route_form.event_subscriber() {
                                     event_subscriber.on_event(route_event)
                                 } else {
                                     None
                                 };
+                            if let Some(resp) = &mut response {
+                                resp.attach_chunk_sender(client.get_response_sender())
+                            }
                             if let Ok((headers, body)) =
                                 route_form.build_response(stream_id, conn_id, response)
                             {
@@ -228,13 +237,13 @@ mod request_hndlr {
                                                     body.bytes_len(),
                                                 );
                                                 client.set_headers_send(stream_id, true);
-                                                response_head.send_response(body, last_time);
+                                                chunking_station.send_response(body, last_time);
                                                 if let Err(e) = waker.wake() {
                                                     error!("Failed to wake poll [{:?}]", e);
                                                 };
                                             }
                                         } else {
-                                            response_head.send_response(body, last_time);
+                                            chunking_station.send_response(body, last_time);
                                             if let Err(e) = waker.wake() {
                                                 error!("Failed to wake poll [{:?}]", e);
                                             };
@@ -288,7 +297,7 @@ mod request_hndlr {
             stream_id: u64,
             client: &mut quiche_http3_server::QClient,
             more_frames: bool,
-            response_head: &ResponseHead,
+            response_head: &ChunkingStation,
             waker: &Arc<Waker>,
             last_time: &Arc<Mutex<Duration>>,
         ) {
@@ -475,6 +484,33 @@ mod request_hndlr {
                         }
             */
             None
+        }
+    }
+    impl RequestResponse {
+        ///________________________________________
+        ///Attach a channel sender to the body that corresponds to the associated client.
+        ///Sender can be build with :
+        ///client.get_response_sender()
+        fn attach_chunk_sender(&mut self, sndr: crossbeam_channel::Sender<BodyRequest>) {
+            match self.body_as_mut() {
+                crate::request_response::BodyType::Data {
+                    stream_id,
+                    conn_id,
+                    data,
+                    sender,
+                } => {
+                    *sender = Some(sndr);
+                }
+                crate::request_response::BodyType::FilePath {
+                    stream_id,
+                    conn_id,
+                    file_path,
+                    sender,
+                } => {
+                    *sender = Some(sndr);
+                }
+                crate::request_response::BodyType::None => {}
+            }
         }
     }
 }

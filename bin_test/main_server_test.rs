@@ -24,7 +24,8 @@ fn main() {
             if let Some(file_path) = event.get_file_path() {
                 info!(" Le chemin : \n{:#?}", file_path);
             }
-            if let Err(e) = response_builder.send_ok_200_with_data(vec![9; 9_000_055]) {
+            if let Err(e) = response_builder.send_ok_200_with_file("/home/camille/Vidéos/vid2.mp4")
+            {
                 log::error!("Failed to send response");
             }
         }

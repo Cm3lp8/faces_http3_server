@@ -2,10 +2,12 @@ pub use request_reponse_builder::{BodyType, RequestResponse};
 pub use response_elements::ContentType;
 pub use response_elements::Status;
 pub use response_queue::BodyRequest;
-pub use response_queue::{ResponseHead, ResponseQueue};
+pub use response_queue::{ChunkingStation, ResponseQueue};
 
 mod response_queue_implementation {
     use std::{
+        error::Error,
+        fs,
         io::{BufReader, Cursor, Read},
         ops::Deref,
         path::Path,
@@ -23,7 +25,6 @@ mod response_queue_implementation {
         stream_id: u64,
         conn_id: &str,
         data: Vec<u8>,
-        chunk_size: usize,
         sender: &crossbeam_channel::Sender<BodyRequest>,
         waker: &Arc<Waker>,
         last_time_spend: &Arc<Mutex<Duration>>,
@@ -40,13 +41,13 @@ mod response_queue_implementation {
         std::thread::Builder::new()
             .stack_size(1024 * 128)
             .spawn(move || {
-                let mut buf = vec![0; chunk_size].into_boxed_slice();
+                let mut buf = vec![0; 1].into_boxed_slice();
                 let mut bytes_written = 0;
                 let mut packet_send = 0;
                 let mut is_end = false;
 
-                let mut start = Instant::now();
                 while let Ok(n) = reader.read(&mut buf) {
+                    let mut start = Instant::now();
                     bytes_written += n;
                     if bytes_written == data_len {
                         is_end = true;
@@ -59,28 +60,32 @@ mod response_queue_implementation {
                     } else {
                         last_duration
                     };
-                    while start.elapsed() < duration {
+                    while start.elapsed() < default_pacing {
                         std::thread::yield_now();
                     }
 
-                    if let Err(_e) = sender.send(BodyRequest::new(
+                    if let Err(e) = sender.try_send(BodyRequest::new(
                         stream_id,
                         conn_id.as_str(),
                         packet_send,
                         buf[..n].to_vec(),
                         is_end,
                     )) {
-                        error!("Failed to send packet [{packet_send}] ");
+                        error!("Failed to send packet [{packet_send}] [{:?}] ", e);
                     } else {
                         warn!("written stream_id [{stream_id}]");
                         packet_send += 1;
                     }
                     if bytes_written == data_len {
-                        waker.wake();
+                        if let Err(e) = waker.wake() {
+                            panic!("error a waking [{:?}]", e)
+                        }
                         break;
                     }
 
-                    waker.wake();
+                    if let Err(e) = waker.wake() {
+                        panic!("error b waking [{:?}]", e)
+                    }
                     if n == 0 {
                         break;
                     }
@@ -90,10 +95,215 @@ mod response_queue_implementation {
             .unwrap();
     }
     pub fn send_file(
+        stream_id: u64,
+        conn_id: &str,
         file_path: &Path,
-        chunk_size: usize,
         sender: &crossbeam_channel::Sender<BodyRequest>,
+        waker: &Arc<Waker>,
+        last_time_spend: &Arc<Mutex<Duration>>,
     ) {
+        let conn_id = conn_id.to_owned();
+        let waker = waker.clone();
+        let last_time_spend = last_time_spend.clone();
+        let default_pacing = Duration::from_micros(900);
+        let sender = sender.clone();
+        let file_path = file_path.to_path_buf();
+
+        std::thread::Builder::new()
+            .stack_size(128 * 1024)
+            .spawn(move || {
+                let mut buf = vec![0; 0].into_boxed_slice();
+                let mut bytes_written = 0;
+                let mut packet_send = 0;
+                let mut is_end = false;
+
+                let mut start = Instant::now();
+                if let Ok(file) = fs::File::open(file_path) {
+                    let data_len = file.metadata().expect("failed to get file len").len() as usize;
+                    let mut reader = BufReader::new(file);
+                    let mut start = Instant::now();
+                    while let Ok(n) = reader.read(&mut buf) {
+                        bytes_written += n;
+                        if bytes_written == data_len {
+                            is_end = true;
+                        }
+
+                        let last_duration = *last_time_spend.lock().unwrap();
+
+                        let duration = if last_duration < default_pacing {
+                            default_pacing
+                        } else {
+                            last_duration
+                        };
+                        while start.elapsed() < duration {
+                            std::thread::yield_now();
+                        }
+
+                        if let Err(e) = sender.send(BodyRequest::new(
+                            stream_id,
+                            conn_id.as_str(),
+                            packet_send,
+                            buf[..n].to_vec(),
+                            is_end,
+                        )) {
+                            error!("Failed to send packet [{packet_send}] [{:?}] ", e);
+                            error!("[{:?}]", e.source());
+                            panic!("");
+                        } else {
+                            packet_send += 1;
+                        }
+                        if bytes_written == data_len {
+                            if let Err(e) = waker.wake() {
+                                panic!("error z waking [{:?}]", e)
+                            }
+                            break;
+                        }
+                        if let Err(e) = waker.wake() {
+                            panic!("error t waking [{:?}]", e)
+                        }
+
+                        if n == 0 {
+                            warn!("written stream_id [{stream_id}] [{bytes_written}]");
+                            break;
+                        }
+                        start = Instant::now();
+                    }
+                    warn!("out loop [{bytes_written}]");
+                }
+            })
+            .unwrap();
+    }
+}
+mod chunking_implementation {
+    use std::{
+        fs::{self, metadata, Metadata},
+        io::{BufRead, BufReader, Cursor},
+        path::Path,
+        sync::{Arc, Mutex},
+        time::{Duration, Instant},
+        usize,
+    };
+
+    use mio::Waker;
+    use ring::test::File;
+
+    use super::*;
+
+    pub struct ChunkableBody {
+        stream_id: u64,
+        conn_id: String,
+        reader: Box<dyn BufRead + Send + Sync + 'static>,
+        sender: crossbeam_channel::Sender<BodyRequest>,
+        body_len: usize,
+        packet_id: usize,
+        bytes_written: usize,
+    }
+
+    impl ChunkableBody {
+        pub fn new_data(
+            sender: crossbeam_channel::Sender<BodyRequest>,
+            stream_id: u64,
+            conn_id: String,
+            data: Vec<u8>,
+        ) -> Result<Self, ()> {
+            let body_len = data.len();
+            Ok(Self {
+                stream_id,
+                conn_id,
+                reader: Box::new(BufReader::new(Cursor::new(data))),
+                sender,
+                body_len,
+                packet_id: 0,
+                bytes_written: 0,
+            })
+        }
+        pub fn new_file(
+            sender: crossbeam_channel::Sender<BodyRequest>,
+            stream_id: u64,
+            conn_id: String,
+            path: impl AsRef<Path>,
+        ) -> Result<Self, ()> {
+            if let Ok(file) = std::fs::File::open(path) {
+                let body_len = if let Ok(metadata) = file.metadata() {
+                    metadata.len() as usize
+                } else {
+                    0
+                };
+                Ok(Self {
+                    stream_id,
+                    conn_id,
+                    reader: Box::new(BufReader::new(file)),
+                    sender,
+                    body_len,
+                    packet_id: 0,
+                    bytes_written: 0,
+                })
+            } else {
+                Err(())
+            }
+        }
+    }
+
+    const CHUNK_SIZE: usize = 4096;
+
+    pub fn run_worker(
+        last_time_spend: &Arc<Mutex<Duration>>,
+        waker: &Arc<Waker>,
+        receiver: crossbeam_channel::Receiver<ChunkableBody>,
+        resender: crossbeam_channel::Sender<ChunkableBody>,
+    ) {
+        let waker = waker.clone();
+        let last_time_spend = last_time_spend.clone();
+        std::thread::spawn(move || {
+            let default_pacing = Duration::from_micros(900);
+            let mut buf_read = [0; CHUNK_SIZE];
+            while let Ok(mut chunkable) = receiver.recv() {
+                let start = Instant::now();
+                let last_duration = *last_time_spend.lock().unwrap();
+
+                let duration = if last_duration < default_pacing {
+                    default_pacing
+                } else {
+                    last_duration
+                };
+                while start.elapsed() < duration {
+                    std::thread::yield_now();
+                }
+
+                if let Ok(n) = chunkable.reader.read(&mut buf_read) {
+                    let is_end = if n + chunkable.bytes_written == chunkable.body_len {
+                        true
+                    } else {
+                        false
+                    };
+                    if let Err(e) = chunkable.sender.send(BodyRequest::new(
+                        chunkable.stream_id,
+                        chunkable.conn_id.as_str(),
+                        chunkable.packet_id,
+                        buf_read[..n].to_vec(),
+                        is_end,
+                    )) {
+                        error!(
+                            "Failed sending body request to conn [{}] at packet [{}]",
+                            chunkable.conn_id, chunkable.packet_id
+                        );
+                        panic!("e[{:?}]", e);
+                    }
+                    chunkable.packet_id += 1;
+                    chunkable.bytes_written += n;
+                    if let Err(e) = waker.wake() {
+                        panic!("error f waking [{:?}]", e)
+                    }
+
+                    //repush the unfinished read in the channel
+                    if !is_end {
+                        if let Err(_) = resender.send(chunkable) {
+                            error!("Failed to resend chunkable body")
+                        }
+                    }
+                }
+            }
+        });
     }
 }
 mod response_queue {
@@ -105,45 +315,67 @@ mod response_queue {
     use mio::Waker;
 
     use super::{
+        chunking_implementation::{self, ChunkableBody},
         response_queue_implementation::{send_data, send_file},
         BodyType,
     };
 
-    const CHUNK_SIZE: usize = 4096;
-
-    pub struct ResponseHead {
-        sender: crossbeam_channel::Sender<BodyRequest>,
+    pub struct ChunkingStation {
+        station_channel: (
+            crossbeam_channel::Sender<ChunkableBody>,
+            crossbeam_channel::Receiver<ChunkableBody>,
+        ),
         waker: Arc<Waker>,
     }
-    impl ResponseHead {
-        ///____________________________________________________________________
-        ///Repoll in the queue the data  that connexion can't handle right now.
-        pub fn re_send(
-            &self,
-            body: BodyRequest,
-        ) -> Result<(), crossbeam_channel::SendError<BodyRequest>> {
-            self.sender.send(body)
+    impl ChunkingStation {
+        pub fn new(waker: Arc<Waker>, last_time_spend: Arc<Mutex<Duration>>) -> Self {
+            let chunking_station = Self {
+                station_channel: crossbeam_channel::unbounded(),
+                waker,
+            };
+
+            chunking_implementation::run_worker(
+                &last_time_spend,
+                &chunking_station.waker,
+                chunking_station.station_channel.1.clone(),
+                chunking_station.station_channel.0.clone(),
+            );
+
+            chunking_station
         }
+
         pub fn send_response(&self, msg: BodyType, last_time_spend: &Arc<Mutex<Duration>>) {
             match msg {
                 BodyType::Data {
                     stream_id,
                     conn_id,
                     data,
-                } => send_data(
-                    stream_id,
-                    conn_id.as_str(),
-                    data,
-                    CHUNK_SIZE,
-                    &self.sender,
-                    &self.waker,
-                    last_time_spend,
-                ),
+                    sender,
+                } => {
+                    if let Ok(c_b) = ChunkableBody::new_data(
+                        sender.expect("No sender attached"),
+                        stream_id,
+                        conn_id,
+                        data,
+                    ) {
+                        self.station_channel.0.send(c_b);
+                    };
+                }
                 BodyType::FilePath {
                     stream_id,
                     conn_id,
                     file_path,
-                } => send_file(file_path.as_path(), CHUNK_SIZE, &self.sender),
+                    sender,
+                } => {
+                    if let Ok(c_b) = ChunkableBody::new_file(
+                        sender.expect("no sender attached"),
+                        stream_id,
+                        conn_id,
+                        file_path,
+                    ) {
+                        self.station_channel.0.send(c_b);
+                    };
+                }
                 BodyType::None => {}
             }
         }
@@ -170,11 +402,8 @@ mod response_queue {
             Self { channel, waker }
         }
 
-        pub fn get_head(&self) -> ResponseHead {
-            ResponseHead {
-                sender: self.channel.0.clone(),
-                waker: self.waker.clone(),
-            }
+        pub fn get_sender(&self) -> crossbeam_channel::Sender<BodyRequest> {
+            self.channel.0.clone()
         }
 
         pub fn pop_request(&self) -> Result<BodyRequest, crossbeam_channel::TryRecvError> {
@@ -228,11 +457,20 @@ mod response_queue {
     }
 }
 mod request_reponse_builder {
-    use std::path::{Path, PathBuf};
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+    };
 
     use quiche::h3::{self, Header, NameValue};
 
     use super::*;
+    #[derive(Debug)]
+    pub enum BodyTypeBuilder {
+        Data,
+        FilePath,
+        None,
+    }
 
     #[derive(Debug)]
     pub enum BodyType {
@@ -240,11 +478,13 @@ mod request_reponse_builder {
             stream_id: u64,
             conn_id: String,
             data: Vec<u8>,
+            sender: Option<crossbeam_channel::Sender<BodyRequest>>,
         },
         FilePath {
             stream_id: u64,
             conn_id: String,
             file_path: PathBuf,
+            sender: Option<crossbeam_channel::Sender<BodyRequest>>,
         },
         None,
     }
@@ -255,13 +495,15 @@ mod request_reponse_builder {
                 stream_id,
                 conn_id,
                 data,
+                sender: None,
             }
         }
-        pub fn new_file(stream_id: u64, conn_id: String, file_path: impl AsRef<PathBuf>) -> Self {
+        pub fn new_file(stream_id: u64, conn_id: String, file_path: impl AsRef<Path>) -> Self {
             Self::FilePath {
                 stream_id,
                 conn_id,
                 file_path: file_path.as_ref().to_path_buf(),
+                sender: None,
             }
         }
         pub fn bytes_len(&self) -> usize {
@@ -270,12 +512,18 @@ mod request_reponse_builder {
                     stream_id,
                     conn_id,
                     data,
+                    sender,
                 } => data.len(),
                 Self::FilePath {
                     stream_id,
                     conn_id,
                     file_path,
-                } => 0,
+                    sender,
+                } => std::fs::File::open(file_path)
+                    .unwrap()
+                    .metadata()
+                    .unwrap()
+                    .len() as usize,
                 Self::None => 0,
             }
         }
@@ -293,6 +541,9 @@ mod request_reponse_builder {
         pub fn new() -> ResponseBuilder {
             ResponseBuilder::new()
         }
+        pub fn body_as_mut(&mut self) -> &mut BodyType {
+            &mut self.body
+        }
         pub fn new_ok_200(stream_id: u64, conn_id: &str) -> RequestResponse {
             ResponseBuilder::new()
                 .set_stream_id(stream_id)
@@ -306,6 +557,7 @@ mod request_reponse_builder {
                 .push(h3::Header::new(name.as_bytes(), value.as_bytes()));
             self
         }
+
         ///
         /// Respond to client with a file from fs.
         ///
@@ -412,7 +664,7 @@ mod request_reponse_builder {
         custom: Vec<h3::Header>,
         body: Option<Vec<u8>>,
         path: Option<PathBuf>,
-        body_type: Option<BodyType>,
+        body_type: BodyTypeBuilder,
     }
     impl ResponseBuilder {
         pub fn new() -> Self {
@@ -425,7 +677,7 @@ mod request_reponse_builder {
                 custom: vec![],
                 body: None,
                 path: None,
-                body_type: None,
+                body_type: BodyTypeBuilder::None,
             }
         }
         pub fn extends_headers(&mut self, headers: Vec<h3::Header>) -> &mut Self {
@@ -457,12 +709,14 @@ mod request_reponse_builder {
 
         pub fn set_path(&mut self, path: impl AsRef<Path>) -> &mut Self {
             self.path = Some(path.as_ref().to_path_buf());
+            self.body_type = BodyTypeBuilder::FilePath;
             self
         }
 
         pub fn set_body(&mut self, body: Vec<u8>) -> &mut Self {
             self.content_length = Some(body.len());
             self.body = Some(body);
+            self.body_type = BodyTypeBuilder::Data;
             self
         }
         pub fn set_content_type(&mut self, content_type: ContentType) -> &mut Self {
@@ -475,64 +729,77 @@ mod request_reponse_builder {
                 return Err(());
             }
 
-            let request_response = match self.body.as_mut() {
-                Some(body) => {
-                    let status = h3::Header::new(
-                        b"status",
-                        self.status
-                            .take()
-                            .unwrap()
-                            .get_status_to_string()
-                            .as_bytes(),
-                    );
+            let status = h3::Header::new(
+                b"status",
+                self.status
+                    .take()
+                    .unwrap()
+                    .get_status_to_string()
+                    .as_bytes(),
+            );
 
-                    let body: Vec<u8> = std::mem::replace(body, vec![]);
-
-                    let content_length = Some(h3::Header::new(
-                        b"content-length",
-                        body.len().to_string().as_bytes(),
-                    ));
-
-                    let content_type = if let Some(content_type) = &self.content_type {
-                        let content_type =
-                            h3::Header::new(b"content-type", content_type.to_string().as_bytes());
-                        Some(content_type)
-                    } else {
-                        None
-                    };
-                    if let Some(stream_id) = self.stream_id {
-                        if let Some(conn_id) = self.conn_id.take() {
-                            Ok(RequestResponse {
-                                status,
-                                content_type,
-                                content_length,
-                                custom: std::mem::replace(&mut self.custom, vec![]),
-                                body: BodyType::new_data(stream_id, conn_id, body),
-                            })
-                        } else {
-                            Err(())
-                        }
-                    } else {
-                        Err(())
-                    }
-                }
-                None => Ok(RequestResponse {
-                    status: h3::Header::new(
-                        b"status",
-                        self.status
-                            .take()
-                            .unwrap()
-                            .get_status_to_string()
-                            .as_bytes(),
-                    ),
-                    content_type: None,
-                    content_length: None,
-                    custom: vec![],
-                    body: BodyType::None,
-                }),
+            let content_type = if let Some(content_type) = &self.content_type {
+                let content_type =
+                    h3::Header::new(b"content-type", content_type.to_string().as_bytes());
+                Some(content_type)
+            } else {
+                None
             };
+            let mut content_length: Option<h3::Header> = None;
+            if let Some(stream_id) = self.stream_id {
+                if let Some(conn_id) = self.conn_id.take() {
+                    let body = match self.body_type {
+                        BodyTypeBuilder::Data => {
+                            let body: Vec<u8> = if let Some(mut data) = self.body.as_mut() {
+                                std::mem::replace(&mut data, vec![])
+                            } else {
+                                vec![]
+                            };
+                            content_length = Some(h3::Header::new(
+                                b"content-length",
+                                body.len().to_string().as_bytes(),
+                            ));
+                            BodyType::new_data(stream_id, conn_id, body)
+                        }
+                        BodyTypeBuilder::FilePath => {
+                            let file_path: PathBuf = if let Some(file_path) = &mut self.path {
+                                std::mem::replace(file_path, PathBuf::new())
+                            } else {
+                                PathBuf::new()
+                            };
+                            let file_len = if let Ok(meta_data) = fs::metadata(file_path.as_path())
+                            {
+                                if meta_data.is_file() {
+                                    meta_data.len()
+                                } else {
+                                    error!("Not a file ");
+                                    0
+                                }
+                            } else {
+                                0
+                            };
 
-            request_response
+                            content_length = Some(h3::Header::new(
+                                b"content-length",
+                                file_len.to_string().as_bytes(),
+                            ));
+                            BodyType::new_file(stream_id, conn_id, file_path.as_path())
+                        }
+                        BodyTypeBuilder::None => BodyType::None,
+                    };
+                    Ok(RequestResponse {
+                        status,
+                        content_type,
+                        content_length,
+                        custom: std::mem::replace(&mut self.custom, vec![]),
+                        body,
+                    })
+                } else {
+                    Err(())
+                }
+            } else {
+                Err(())
+            }
         }
     }
 }

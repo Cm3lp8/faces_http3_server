@@ -1,3 +1,5 @@
+use crate::request_response::{BodyRequest, ResponseQueue};
+
 pub use self::quiche_implementation::{
     send_body, send_header, send_more_header, send_response, send_response_when_finished,
 };
@@ -23,6 +25,8 @@ pub struct Client {
     progress_status_requests: HashMap<u64, u64>,
     headers_sending_tracker: HashMap<u64, bool>,
     body_sending_tracker: HashMap<u64, (usize, usize)>,
+    pending_response_body: HashMap<(u64, String), Vec<BodyRequest>>,
+    response_queue: ResponseQueue,
 }
 impl Client {
     pub fn conn(&mut self) -> &mut Connection {
@@ -35,6 +39,9 @@ impl Client {
         self.headers_sending_tracker
             .entry(stream_id)
             .insert_entry(value);
+    }
+    pub fn get_response_sender(&self) -> crossbeam_channel::Sender<BodyRequest> {
+        self.response_queue.get_sender()
     }
     pub fn headers_send(&self, stream_id: u64) -> bool {
         if let Some(entry) = self.headers_sending_tracker.get(&stream_id) {
@@ -98,7 +105,7 @@ mod quiche_implementation {
     use quiche::h3::Priority;
 
     use crate::{
-        request_response::{BodyRequest, ResponseQueue},
+        request_response::{BodyRequest, ChunkingStation, ResponseQueue},
         server_config::{self, RouteHandler},
         RouteManager, ServerConfig,
     };
@@ -111,7 +118,7 @@ mod quiche_implementation {
 
         // Setup the event loop.
         let mut poll = mio::Poll::new().unwrap();
-        let mut events = mio::Events::with_capacity(8192);
+        let mut events = mio::Events::with_capacity(8192 * 8);
         // Create the UDP listening socket, and register it with the event loop.
         let mut socket = mio::net::UdpSocket::bind(*server_config.server_address()).unwrap();
         println!("socket [{:?}]", socket);
@@ -127,10 +134,9 @@ mod quiche_implementation {
         let waker_clone = waker.clone();
         // init the request Response queue with mio waker
 
-        let response_queue = ResponseQueue::new(waker);
-        let mut pending_response_body: HashMap<(u64, String), Vec<BodyRequest>> = HashMap::new();
-
-        let response_head = response_queue.get_head();
+        let mut last_time_spend = Arc::new(Mutex::new(Duration::from_micros(100)));
+        let mut socket_time = Duration::from_micros(33);
+        let chunking_station = ChunkingStation::new(waker_clone.clone(), last_time_spend.clone());
         // Create the configuration for the QUIC connections.
         let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
         config
@@ -142,12 +148,12 @@ mod quiche_implementation {
         config
             .set_application_protos(quiche::h3::APPLICATION_PROTOCOL)
             .unwrap();
-        config.set_max_idle_timeout(10_000);
+        config.set_max_idle_timeout(20_000);
         config.set_max_recv_udp_payload_size(MAX_DATAGRAM_SIZE);
         config.set_max_send_udp_payload_size(MAX_DATAGRAM_SIZE);
-        config.set_initial_max_data(200_000_000);
-        config.set_initial_max_stream_data_bidi_local(200_000_000);
-        config.set_initial_max_stream_data_bidi_remote(200_000_000);
+        config.set_initial_max_data(300_000_000);
+        config.set_initial_max_stream_data_bidi_local(300_000_000);
+        config.set_initial_max_stream_data_bidi_remote(300_000_000);
         config.set_initial_max_stream_data_uni(10_000_000);
         config.set_initial_max_streams_bidi(100);
         config.set_initial_max_streams_uni(100);
@@ -161,7 +167,6 @@ mod quiche_implementation {
         let local_addr = socket.local_addr().unwrap();
         let mut total = 0;
         let mut send_packet_time = Instant::now();
-        let mut last_time_spend = Arc::new(Mutex::new(Duration::from_micros(100)));
         loop {
             // Find the shorter timeout from all the active connections.
             //
@@ -175,7 +180,6 @@ mod quiche_implementation {
                 // has expired, so handle it without attempting to read packets. We
                 // will then proceed with the send loop.
                 if events.is_empty() {
-                    debug!("timed out");
                     clients.values_mut().for_each(|c| c.conn.on_timeout());
                     break 'read;
                 }
@@ -270,7 +274,7 @@ mod quiche_implementation {
                     // instead of changing it again.
                     let scid = hdr.dcid.clone();
                     //debug!("New connection: dcid={:?} scid={:?}", hdr.dcid, scid);
-                    debug!("New connection: dcid={:?} scid={:?}", hdr.dcid, scid);
+                    warn!("New connection: dcid={:?} scid={:?}", hdr.dcid, scid);
                     let conn = quiche::accept(&scid, odcid.as_ref(), local_addr, from, &mut config)
                         .unwrap();
                     let client = Client {
@@ -280,6 +284,8 @@ mod quiche_implementation {
                         progress_status_requests: HashMap::new(),
                         headers_sending_tracker: HashMap::new(),
                         body_sending_tracker: HashMap::new(),
+                        pending_response_body: HashMap::new(),
+                        response_queue: ResponseQueue::new(waker_clone.clone()),
                     };
                     clients.insert(scid.clone(), client);
                     clients.get_mut(&scid).unwrap()
@@ -307,12 +313,11 @@ mod quiche_implementation {
                 if (client.conn.is_in_early_data() || client.conn.is_established())
                     && client.http3_conn.is_none()
                 {
-                    /*
-                                        debug!(
-                                            "{} QUIC handshake completed, now trying HTTP/3",
-                                            client.conn.trace_id()
-                                        );
-                    */
+                    debug!(
+                        "{} QUIC handshake completed, now trying HTTP/3",
+                        client.conn.trace_id()
+                    );
+
                     info!(
                         "{} QUIC handshake completed, now trying HTTP/3",
                         client.conn.trace_id()
@@ -333,56 +338,74 @@ mod quiche_implementation {
                 if client.http3_conn.is_some() {
                     let conn_id = client.conn.trace_id().to_string();
                     for stream_id in client.conn.writable() {
-                        if let Some(mut pending_coll) =
-                            pending_response_body.remove(&(stream_id, conn_id.clone()))
+                        if let Some(mut pending_coll) = client
+                            .pending_response_body
+                            .remove(&(stream_id, conn_id.clone()))
                         {
                             let mut resp = if let Some(popped) = pending_coll.pop() {
-                                warn!("popped");
                                 popped
                             } else {
-                                waker_clone.wake();
-                                break 'read;
+                                if let Err(e) = waker_clone.wake() {
+                                    panic!("error waking [{:?}]", e)
+                                }
+                                break;
                             };
                             if resp.len() > client.conn.stream_capacity(resp.stream_id()).unwrap() {
                                 let stream_id = resp.stream_id();
                                 let conn_id = resp.conn_id().to_string();
                                 let mut popped = vec![resp];
-                                popped.extend(pending_coll);
-                                pending_response_body.insert((stream_id, conn_id), popped);
-                                waker_clone.wake();
+                                if pending_coll.len() > 0 {
+                                    popped.extend(pending_coll);
+                                }
+                                client
+                                    .pending_response_body
+                                    .insert((stream_id, conn_id), popped);
+                                if let Err(e) = waker_clone.wake() {
+                                    panic!("error waking [{:?}]", e)
+                                }
                                 break 'read;
                             }
                             send_body_response(client, resp.stream_id(), resp.take_data(), false)
                                 .unwrap();
-                            warn!("pen len [{:?}]", pending_coll.len());
-                            pending_response_body.insert(
-                                (resp.stream_id(), resp.conn_id().to_string()),
-                                pending_coll,
-                            );
+                            if pending_coll.len() > 0 {
+                                client.pending_response_body.insert(
+                                    (resp.stream_id(), resp.conn_id().to_string()),
+                                    pending_coll,
+                                );
+                            }
                             // Handle writable streams.
                             for stream_id in client.conn.writable() {
                                 handle_writable(client, stream_id);
                             }
                             let is_end = client.is_body_totally_written(resp.stream_id());
                             send_body_response(client, resp.stream_id(), vec![], is_end).unwrap();
+                            if let Err(e) = waker_clone.wake() {
+                                panic!("error waking [{:?}]", e)
+                            }
                         }
                     }
 
-                    if !pending_response_body.is_empty() {
-                        waker_clone.wake();
+                    if !client.pending_response_body.is_empty() {
+                        if let Err(e) = waker_clone.wake() {
+                            panic!("error waking [{:?}]", e)
+                        }
                         // Handle writable streams.
                         for stream_id in client.conn.writable() {
                             handle_writable(client, stream_id);
                         }
                         break 'read;
                     }
-                    if let Ok(mut response_body) = response_queue.pop_request() {
+                    if let Ok(mut response_body) = client.response_queue.pop_request() {
+                        //std::thread::sleep(socket_time);
+                        if response_body.packet_id() % 200 == 0 {
+                            debug!("scoket time [{:?}]", socket_time);
+                        }
                         if response_body.is_end() {
                             error!(
                                 "body packet [{}] strid [{}]is end len [{:#?}]",
                                 response_body.packet_id(),
                                 response_body.stream_id(),
-                                if let Some(entry) = pending_response_body.get(&(
+                                if let Some(entry) = client.pending_response_body.get(&(
                                     response_body.stream_id(),
                                     response_body.conn_id().to_string()
                                 )) {
@@ -404,13 +427,13 @@ mod quiche_implementation {
                                 response_body.stream_id(),
                                 response_body.packet_id()
                             );
-                            if let Some(entry) = pending_response_body.get_mut(&(
+                            if let Some(entry) = client.pending_response_body.get_mut(&(
                                 response_body.stream_id(),
                                 response_body.conn_id().to_string(),
                             )) {
                                 entry.push(response_body);
                             } else {
-                                pending_response_body.insert(
+                                client.pending_response_body.insert(
                                     (
                                         response_body.stream_id(),
                                         response_body.conn_id().to_string(),
@@ -418,7 +441,9 @@ mod quiche_implementation {
                                     vec![response_body],
                                 );
                             };
-                            waker_clone.wake();
+                            if let Err(e) = waker_clone.wake() {
+                                panic!("error waking [{:?}]", e)
+                            }
                         } else {
                             send_body_response(
                                 client,
@@ -428,17 +453,22 @@ mod quiche_implementation {
                             )
                             .unwrap();
                             // Handle writable streams.
+
                             for stream_id in client.conn.writable() {
                                 handle_writable(client, stream_id);
                             }
+
                             let is_end = client.is_body_totally_written(response_body.stream_id());
-                            send_body_response(client, response_body.stream_id(), vec![], is_end)
+
+                            if is_end {
+                                send_body_response(
+                                    client,
+                                    response_body.stream_id(),
+                                    vec![],
+                                    is_end,
+                                )
                                 .unwrap();
-                            warn!(
-                                "writtnt for {:?} [{:?}]",
-                                client.get_written(response_body.stream_id()),
-                                response_body.stream_id()
-                            );
+                            }
                         }
                     };
                     // Handle writable streams.
@@ -447,99 +477,97 @@ mod quiche_implementation {
                     }
                     // Process HTTP/3 events.
                     let mut req_recvd = 0;
-                    while req_recvd < 100 {
-                        let http3_conn = client.http3_conn.as_mut().unwrap();
-                        match http3_conn.poll(&mut client.conn) {
-                            Ok((stream_id, quiche::h3::Event::Headers { list, more_frames })) => {
-                                info!("new req [{:?}]", list);
-                                route_manager.routes_handler().parse_headers(
-                                    &server_config,
-                                    &list,
+                    //while req_recvd < 10 {
+                    let http3_conn = client.http3_conn.as_mut().unwrap();
+                    match http3_conn.poll(&mut client.conn) {
+                        Ok((stream_id, quiche::h3::Event::Headers { list, more_frames })) => {
+                            info!("new req [{:?}]", list);
+                            route_manager.routes_handler().parse_headers(
+                                &server_config,
+                                &list,
+                                stream_id,
+                                client,
+                                more_frames,
+                                &chunking_station,
+                                &waker_clone,
+                                &last_time_spend,
+                            );
+                            req_recvd += 1;
+                            /*
+                            handle_request(
+                                client,
+                                stream_id,
+                                &list,
+                                &server_config.request_handler(),
+                            );
+                            */
+                        }
+                        Ok((stream_id, quiche::h3::Event::Data)) => {
+                            while let Ok(read) =
+                                http3_conn.recv_body(&mut client.conn, stream_id, &mut out)
+                            {
+                                if let Err(_) = route_manager.routes_handler().write_body_packet(
                                     stream_id,
-                                    client,
-                                    more_frames,
-                                    &response_head,
-                                    &waker_clone,
-                                    &last_time_spend,
-                                );
+                                    client.conn.trace_id(),
+                                    &out[..read],
+                                    false,
+                                ) {
+                                    error!("Failed writing body packet on stream_id [{stream_id}]");
+                                }
+                                total += read;
                                 req_recvd += 1;
-                                /*
-                                handle_request(
-                                    client,
-                                    stream_id,
-                                    &list,
-                                    &server_config.request_handler(),
-                                );
-                                */
                             }
-                            Ok((stream_id, quiche::h3::Event::Data)) => {
-                                while let Ok(read) =
-                                    http3_conn.recv_body(&mut client.conn, stream_id, &mut out)
-                                {
-                                    if let Err(_) =
-                                        route_manager.routes_handler().write_body_packet(
-                                            stream_id,
-                                            client.conn.trace_id(),
-                                            &out[..read],
-                                            false,
-                                        )
-                                    {
-                                        error!(
-                                            "Failed writing body packet on stream_id [{stream_id}]"
-                                        );
-                                    }
-                                    total += read;
-                                    req_recvd += 1;
-                                }
-                                let trace_id = client.conn.trace_id().to_string();
+                            let trace_id = client.conn.trace_id().to_string();
 
-                                if let Err(_) = route_manager
-                                    .routes_handler()
-                                    .send_reception_status(client, stream_id, trace_id.as_str())
-                                {
-                                    error!("Failed to send progress response status")
-                                }
-                            }
-                            Ok((stream_id, quiche::h3::Event::Finished)) => {
-                                debug!("finished ! stream [{}]", stream_id);
-                                let trace_id = client.conn.trace_id().to_owned();
-
-                                route_manager.routes_handler().handle_finished_stream(
-                                    trace_id.as_str(),
-                                    stream_id,
-                                    client,
-                                    &response_head,
-                                    &waker_clone,
-                                    &last_time_spend,
-                                );
-                                ()
-                            }
-                            Ok((_stream_id, quiche::h3::Event::Reset { .. })) => (),
-                            Ok((_prioritized_element_id, quiche::h3::Event::PriorityUpdate)) => {
-                                debug!("prioritytupdate");
-                                ()
-                            }
-                            Ok((_goaway_id, quiche::h3::Event::GoAway)) => {
-                                debug!("GoAway");
-                                ()
-                            }
-                            Err(quiche::h3::Error::Done) => {
-                                break;
-                            }
-                            Err(e) => {
-                                error!("{} HTTP/3 error {:?}", client.conn.trace_id(), e);
-                                break;
+                            if let Err(_) = route_manager.routes_handler().send_reception_status(
+                                client,
+                                stream_id,
+                                trace_id.as_str(),
+                            ) {
+                                error!("Failed to send progress response status")
                             }
                         }
+                        Ok((stream_id, quiche::h3::Event::Finished)) => {
+                            debug!("finished ! stream [{}]", stream_id);
+                            let trace_id = client.conn.trace_id().to_owned();
+
+                            route_manager.routes_handler().handle_finished_stream(
+                                trace_id.as_str(),
+                                stream_id,
+                                client,
+                                &chunking_station,
+                                &waker_clone,
+                                &last_time_spend,
+                            );
+                            ()
+                        }
+                        Ok((_stream_id, quiche::h3::Event::Reset { .. })) => (),
+                        Ok((_prioritized_element_id, quiche::h3::Event::PriorityUpdate)) => {
+                            debug!("prioritytupdate");
+                            ()
+                        }
+                        Ok((_goaway_id, quiche::h3::Event::GoAway)) => {
+                            debug!("GoAway");
+                            ()
+                        }
+                        Err(quiche::h3::Error::Done) => {
+                            break;
+                        }
+                        Err(e) => {
+                            error!("{} HTTP/3 error {:?}", client.conn.trace_id(), e);
+                            break;
+                        }
                     }
+                    //}
                 }
             }
             // Generate outgoing QUIC packets for all active connections and send
             // them on the UDP socket, until quiche reports that there are no more
             // packets to be sent.
 
-            let pacing_delay = Duration::from_micros(16);
+            let pacing_delay = Duration::from_micros(940);
             let mut send_duration = Instant::now();
+            let mut has_blocked = false;
             for client in clients.values_mut() {
                 let mut packet_send = 0;
                 loop {
@@ -558,6 +586,7 @@ mod quiche_implementation {
                     if let Err(e) = socket.send_to(&out[..write], send_info.to) {
                         if e.kind() == std::io::ErrorKind::WouldBlock {
                             debug!("send() would block, [{:?}]", e);
+                            has_blocked = true;
                             break;
                         }
                         panic!("send() failed: {:?}", e);
@@ -572,17 +601,20 @@ mod quiche_implementation {
                     while send_duration.elapsed() < pacing_delay {
                         std::thread::yield_now();
                     }
-                    send_duration = Instant::now();
                 }
                 //std::thread::sleep(Duration::from_micros(500));
             }
+            socket_time = if has_blocked {
+                send_duration.elapsed()
+            } else {
+                socket_time
+            };
             *last_time_spend.lock().unwrap() = send_packet_time.elapsed();
             send_packet_time = Instant::now();
             // Garbage collect closed connections.
             clients.retain(|_, ref mut c| {
-                debug!("Collecting garbage");
                 if c.conn.is_closed() {
-                    debug!(
+                    warn!(
                         "{} connection collected {:?}",
                         c.conn.trace_id(),
                         c.conn.stats()
@@ -1001,7 +1033,7 @@ mod quiche_implementation {
         }
         resp.headers = None;
 
-        let body = if is_end {
+        let body = if !is_end {
             &resp.body[resp.written..]
         } else {
             &[]
