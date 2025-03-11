@@ -22,7 +22,11 @@ fn main() {
     event_loop.run(|event, response_builder| match event {
         RouteEvent::OnFinished(event) => {
             if let Some(file_path) = event.get_file_path() {
-                info!(" Le chemin : \n{:#?}", file_path);
+                info!(
+                    "[{}] bytes writtent on Le chemin : \n{:#?}",
+                    event.bytes_written(),
+                    file_path
+                );
             }
             if let Err(e) = response_builder.send_ok_200_with_file("/home/camille/Vidéos/vid2.mp4")
             {

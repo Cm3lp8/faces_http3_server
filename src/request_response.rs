@@ -255,7 +255,7 @@ mod chunking_implementation {
         let waker = waker.clone();
         let last_time_spend = last_time_spend.clone();
         std::thread::spawn(move || {
-            let default_pacing = Duration::from_micros(900);
+            let default_pacing = Duration::from_micros(15);
             let mut buf_read = [0; CHUNK_SIZE];
             while let Ok(mut chunkable) = receiver.recv() {
                 let start = Instant::now();
@@ -264,7 +264,7 @@ mod chunking_implementation {
                 let duration = if last_duration < default_pacing {
                     default_pacing
                 } else {
-                    last_duration
+                    default_pacing
                 };
                 while start.elapsed() < duration {
                     std::thread::yield_now();
@@ -276,7 +276,7 @@ mod chunking_implementation {
                     } else {
                         false
                     };
-                    if let Err(e) = chunkable.sender.send(BodyRequest::new(
+                    if let Err(e) = chunkable.sender.try_send(BodyRequest::new(
                         chunkable.stream_id,
                         chunkable.conn_id.as_str(),
                         chunkable.packet_id,
@@ -287,7 +287,6 @@ mod chunking_implementation {
                             "Failed sending body request to conn [{}] at packet [{}]",
                             chunkable.conn_id, chunkable.packet_id
                         );
-                        panic!("e[{:?}]", e);
                     }
                     chunkable.packet_id += 1;
                     chunkable.bytes_written += n;
