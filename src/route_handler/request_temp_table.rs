@@ -124,6 +124,7 @@ mod req_temp_table {
         pub fn build_route_event(
             &self,
             conn_id: &str,
+            scid: &[u8],
             stream_id: u64,
             event_type: EventType,
         ) -> Result<RouteEvent, ()> {
@@ -134,7 +135,8 @@ mod req_temp_table {
                 .unwrap()
                 .get_mut(&(conn_id.to_string(), stream_id))
             {
-                let request_event = partial_req.to_route_event(stream_id, conn_id, event_type);
+                let request_event =
+                    partial_req.to_route_event(stream_id, scid, conn_id, event_type);
 
                 can_clean = true;
                 if let Some(req_event) = request_event {
@@ -159,6 +161,7 @@ mod req_temp_table {
         pub fn write_body_packet(
             &self,
             conn_id: String,
+            scid: &[u8],
             stream_id: u64,
             packet: &[u8],
             is_end: bool,
@@ -176,6 +179,7 @@ mod req_temp_table {
                             if let Some(suscriber) = entry.event_subscriber() {
                                 suscriber.on_data(RouteEvent::new_data(DataEvent::new(
                                     stream_id,
+                                    scid,
                                     conn_id.as_str(),
                                     packet.to_vec(),
                                     is_end,
@@ -191,6 +195,7 @@ mod req_temp_table {
                                 if let Some(suscriber) = entry.event_subscriber() {
                                     suscriber.on_data(RouteEvent::new_data(DataEvent::new(
                                         stream_id,
+                                        scid,
                                         conn_id.as_str(),
                                         packet.to_vec(),
                                         is_end,
@@ -390,6 +395,7 @@ mod req_temp_table {
         pub fn to_route_event(
             &mut self,
             stream_id: u64,
+            scid: &[u8],
             conn_id: &str,
             event_type: EventType,
         ) -> Option<RouteEvent> {
@@ -399,6 +405,7 @@ mod req_temp_table {
                     EventType::OnHeader => Some(RouteEvent::new_header(HeaderEvent::new(
                         stream_id,
                         conn_id,
+                        scid,
                         self.path.as_str(),
                         self.method,
                         headers.clone(),
@@ -407,6 +414,7 @@ mod req_temp_table {
                     EventType::OnFinished => Some(RouteEvent::new_finished(FinishedEvent::new(
                         stream_id,
                         conn_id,
+                        scid,
                         self.path.as_str(),
                         self.method,
                         headers.clone(),

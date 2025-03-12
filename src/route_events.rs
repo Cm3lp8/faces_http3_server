@@ -20,6 +20,7 @@ mod event_response_channel {
                 ResponseBuilderSender {
                     bytes_written: event.bytes_written(),
                     stream_id: event.stream_id() as u64,
+                    scid: event.scid().to_vec(),
                     conn_id: event.conn_id().to_owned(),
                     sender: channel.0,
                 },
@@ -33,14 +34,16 @@ mod event_response_channel {
         bytes_written: usize,
         stream_id: u64,
         conn_id: String,
+        scid: Vec<u8>,
         sender: crossbeam_channel::Sender<RequestResponse>,
     }
     impl ResponseBuilderSender {
         pub fn send_ok_200(&self) -> Result<(), crossbeam_channel::SendError<RequestResponse>> {
             let stream_id = self.stream_id;
             let conn_id = &self.conn_id;
+            let scid = &self.scid;
             self.sender.send(
-                RequestResponse::new_ok_200(stream_id, conn_id)
+                RequestResponse::new_ok_200(stream_id, scid, conn_id)
                     .header("x-received-data", self.bytes_written.to_string().as_str()),
             )
         }
@@ -50,8 +53,9 @@ mod event_response_channel {
         ) -> Result<(), crossbeam_channel::SendError<RequestResponse>> {
             let stream_id = self.stream_id;
             let conn_id = &self.conn_id;
+            let scid = &self.scid;
             self.sender.send(
-                RequestResponse::new_200_with_data(stream_id, conn_id, data)
+                RequestResponse::new_200_with_data(stream_id, scid, conn_id, data)
                     .header("x-received-data", self.bytes_written.to_string().as_str()),
             )
         }
@@ -61,8 +65,9 @@ mod event_response_channel {
         ) -> Result<(), crossbeam_channel::SendError<RequestResponse>> {
             let stream_id = self.stream_id;
             let conn_id = &self.conn_id;
+            let scid = &self.scid;
             self.sender.send(
-                RequestResponse::new_200_with_file(stream_id, conn_id, path)
+                RequestResponse::new_200_with_file(stream_id, scid, conn_id, path)
                     .header("x-received-data", self.bytes_written.to_string().as_str()),
             )
         }
@@ -97,6 +102,7 @@ mod request_event {
     pub struct HeaderEvent {
         stream_id: u64,
         conn_id: String,
+        scid: Vec<u8>,
         path: String,
         headers: Vec<h3::Header>,
         method: H3Method,
@@ -106,6 +112,7 @@ mod request_event {
         pub fn new(
             stream_id: u64,
             conn_id: &str,
+            scid: &[u8],
             path: &str,
             method: H3Method,
             headers: Vec<h3::Header>,
@@ -114,6 +121,7 @@ mod request_event {
             HeaderEvent {
                 stream_id,
                 conn_id: conn_id.to_owned(),
+                scid: scid.to_vec(),
                 path: path.to_owned(),
                 headers,
                 method,
@@ -135,6 +143,7 @@ mod request_event {
     pub struct FinishedEvent {
         stream_id: u64,
         conn_id: String,
+        scid: Vec<u8>,
         path: String,
         headers: Vec<h3::Header>,
         method: H3Method,
@@ -149,6 +158,7 @@ mod request_event {
         pub fn new(
             stream_id: u64,
             conn_id: &str,
+            scid: &[u8],
             path: &str,
             method: H3Method,
             headers: Vec<h3::Header>,
@@ -161,6 +171,7 @@ mod request_event {
             Self {
                 stream_id,
                 conn_id: conn_id.to_owned(),
+                scid: scid.to_vec(),
                 path: path.to_owned(),
                 method,
                 headers,
@@ -210,14 +221,22 @@ mod request_event {
     pub struct DataEvent {
         stream_id: u64,
         conn_id: String,
+        scid: Vec<u8>,
         packet: Vec<u8>,
         is_end: bool,
     }
     impl DataEvent {
-        pub fn new(stream_id: u64, conn_id: &str, packet: Vec<u8>, is_end: bool) -> Self {
+        pub fn new(
+            stream_id: u64,
+            scid: &[u8],
+            conn_id: &str,
+            packet: Vec<u8>,
+            is_end: bool,
+        ) -> Self {
             Self {
                 stream_id,
                 conn_id: conn_id.to_owned(),
+                scid: scid.to_vec(),
                 packet,
                 is_end,
             }
@@ -247,6 +266,13 @@ mod request_event {
                 Self::OnData(_event) => None,
                 Self::OnFinished(event) => Some(event.headers.clone()),
                 Self::OnHeader(event) => Some(event.headers.clone()),
+            }
+        }
+        pub fn scid(&self) -> &[u8] {
+            match self {
+                Self::OnData(event) => &event.scid,
+                Self::OnFinished(event) => &event.scid,
+                Self::OnHeader(event) => &event.scid,
             }
         }
         pub fn get_file_path(&self) -> Option<&PathBuf> {

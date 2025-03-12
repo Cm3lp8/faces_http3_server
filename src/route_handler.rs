@@ -103,15 +103,19 @@ mod request_hndlr {
         pub fn write_body_packet(
             &self,
             stream_id: u64,
+            scid: &[u8],
             conn_id: &str,
             packet: &[u8],
             end: bool,
         ) -> Result<usize, ()> {
             let guard = &*self.inner.lock().unwrap();
-            let written_data =
-                guard
-                    .routes_states()
-                    .write_body_packet(conn_id.to_owned(), stream_id, packet, end);
+            let written_data = guard.routes_states().write_body_packet(
+                conn_id.to_owned(),
+                scid,
+                stream_id,
+                packet,
+                end,
+            );
             written_data
         }
         pub fn print_entries(&self) {
@@ -134,18 +138,21 @@ mod request_hndlr {
         pub fn handle_finished_stream(
             &self,
             conn_id: &str,
+            scid: &[u8],
             stream_id: u64,
             client: &mut quiche_http3_server::QClient,
+            global_response_sender: crossbeam_channel::Sender<BodyRequest>,
             chunking_station: &ChunkingStation,
             waker: &Arc<Waker>,
             last_time: &Arc<Mutex<Duration>>,
         ) {
             let guard = &*self.inner.lock().unwrap();
-            if let Ok(route_event) =
-                guard
-                    .routes_states()
-                    .build_route_event(conn_id, stream_id, EventType::OnFinished)
-            {
+            if let Ok(route_event) = guard.routes_states().build_route_event(
+                conn_id,
+                scid,
+                stream_id,
+                EventType::OnFinished,
+            ) {
                 let is_end = route_event.is_end();
                 if let Some((route_form, _)) =
                     guard.get_routes_from_path_and_method(route_event.path(), route_event.method())
@@ -161,7 +168,7 @@ mod request_hndlr {
                                 };
 
                             if let Some(resp) = &mut response {
-                                resp.attach_chunk_sender(client.get_response_sender())
+                                resp.attach_chunk_sender(global_response_sender);
                             }
 
                             client
@@ -169,7 +176,7 @@ mod request_hndlr {
                                 .stream_shutdown(stream_id, quiche::Shutdown::Read, 0)
                                 .unwrap();
                             if let Ok((headers, body)) =
-                                route_form.build_response(stream_id, conn_id, response)
+                                route_form.build_response(stream_id, scid, conn_id, response)
                             {
                                 match body {
                                     Some(body) => {
@@ -221,7 +228,7 @@ mod request_hndlr {
                                 resp.attach_chunk_sender(client.get_response_sender())
                             }
                             if let Ok((headers, body)) =
-                                route_form.build_response(stream_id, conn_id, response)
+                                route_form.build_response(stream_id, scid, conn_id, response)
                             {
                                 match body {
                                     Some(body) => {
@@ -302,6 +309,7 @@ mod request_hndlr {
             last_time: &Arc<Mutex<Duration>>,
         ) {
             let conn_id = client.conn().trace_id().to_string();
+            let scid = client.conn().source_id().as_ref().to_vec();
             let mut method: Option<&[u8]> = None;
             let mut path: Option<&str> = None;
             let mut content_length: Option<usize> = None;
@@ -375,6 +383,7 @@ mod request_hndlr {
 
             if let Ok(route_event) = guard.routes_states().build_route_event(
                 conn_id.as_str(),
+                &scid,
                 stream_id,
                 EventType::OnHeader,
             ) {
@@ -396,9 +405,12 @@ mod request_hndlr {
                                 .conn()
                                 .stream_shutdown(stream_id, quiche::Shutdown::Read, 0)
                                 .unwrap();
-                            if let Ok((headers, body)) =
-                                route_form.build_response(stream_id, conn_id.as_str(), response)
-                            {
+                            if let Ok((headers, body)) = route_form.build_response(
+                                stream_id,
+                                &scid,
+                                conn_id.as_str(),
+                                response,
+                            ) {
                                 match body {
                                     Some(body) => {
                                         if let Ok(n) = quiche_http3_server::send_more_header(
@@ -495,6 +507,7 @@ mod request_hndlr {
             match self.body_as_mut() {
                 crate::request_response::BodyType::Data {
                     stream_id,
+                    scid,
                     conn_id,
                     data,
                     sender,
@@ -503,6 +516,7 @@ mod request_hndlr {
                 }
                 crate::request_response::BodyType::FilePath {
                     stream_id,
+                    scid,
                     conn_id,
                     file_path,
                     sender,

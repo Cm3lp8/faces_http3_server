@@ -342,6 +342,7 @@ mod route_mngr {
         pub fn build_response(
             &self,
             stream_id: u64,
+            scid: &[u8],
             conn_id: &str,
             response: Option<RequestResponse>,
         ) -> Result<(Vec<h3::Header>, Option<BodyType>), ()> {
@@ -353,7 +354,7 @@ mod route_mngr {
                 };
                 return Ok((headers, Some(body)));
             }
-            let default = RequestResponse::new_ok_200(stream_id, conn_id);
+            let default = RequestResponse::new_ok_200(stream_id, scid, conn_id);
             let headers = default.get_headers();
             Ok((headers, None))
         }
