@@ -31,13 +31,14 @@ mod queue_implementation {
         ///Insert a new element in the fifo in the corresponding stream queue
         ///if stream is new, stream Vedeque is updated to keep track of futures iterations.
         pub fn push_item(&mut self, item: T) {
-            let item_index = item.item_index();
             let stream_id = item.stream_id();
 
             if let Some(entry) = self.queue.get_mut(&stream_id) {
                 entry.push_back(item);
             } else {
-                self.streams.push_back(stream_id);
+                if !self.streams.contains(&stream_id) {
+                    self.streams.push_back(stream_id);
+                }
                 let mut queue = VecDeque::new();
                 queue.push_back(item);
                 self.queue.insert(stream_id, queue);
@@ -67,6 +68,7 @@ mod queue_implementation {
         pub fn remove(&mut self, stream_id: u64) {
             if let Some(pos) = self.streams.iter().position(|it| *it == stream_id) {
                 self.streams.remove(pos);
+                self.current_stream_index = 0;
             }
             self.queue.remove(&stream_id);
         }
@@ -75,9 +77,12 @@ mod queue_implementation {
             if let Some(entry) = self.queue.get_mut(&stream_id) {
                 entry.push_back(item);
             } else {
-                self.streams.push_back(stream_id);
+                if !self.streams.contains(&stream_id) {
+                    self.streams.push_back(stream_id);
+                }
                 let mut queue = VecDeque::new();
                 queue.push_back(item);
+                self.queue.insert(stream_id, queue);
             }
         }
 
