@@ -141,7 +141,7 @@ mod request_hndlr {
             scid: &[u8],
             stream_id: u64,
             client: &mut quiche_http3_server::QClient,
-            global_response_sender: crossbeam_channel::Sender<BodyRequest>,
+            response_sender: crossbeam_channel::Sender<BodyRequest>,
             chunking_station: &ChunkingStation,
             waker: &Arc<Waker>,
             last_time: &Arc<Mutex<Duration>>,
@@ -168,7 +168,7 @@ mod request_hndlr {
                                 };
 
                             if let Some(resp) = &mut response {
-                                resp.attach_chunk_sender(global_response_sender);
+                                resp.attach_chunk_sender(response_sender);
                             }
 
                             client
