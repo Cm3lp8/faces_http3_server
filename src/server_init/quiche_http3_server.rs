@@ -497,42 +497,47 @@ mod quiche_implementation {
                     }
 
                     for client in clients.values_mut() {
-                        let mut pending_queue = client.pending_body_queue.clone();
-                        for (stream_id, queue) in
-                            pending_queue.try_borrow_mut().unwrap().iter_mut_streams()
+                        let pending_queue = client.pending_body_queue.clone();
+                        while let Some((stream_id, queue)) =
+                            pending_queue.try_borrow_mut().unwrap().next_stream()
                         {
-                            if queue.len() == 0 {
-                                continue;
-                            }
-                            let mut item = queue.pop_front().unwrap();
-                            if item.len() > client.conn.stream_capacity(*stream_id).unwrap() {
-                                queue.push_front(item);
-                                continue;
-                            }
+                            if let Some(queue) = queue {
+                                if queue.len() == 0 {
+                                    continue;
+                                }
+                                let mut item = queue.pop_front().unwrap();
+                                if item.len() > client.conn.stream_capacity(stream_id).unwrap() {
+                                    queue.push_front(item);
+                                    continue;
+                                }
 
-                            if let Err(e) = send_body_response(
-                                client,
-                                item.stream_id(),
-                                item.take_data(),
-                                false,
-                            ) {
-                                queue.push_front(item);
-                                continue;
-                            };
-                            let is_end = client.is_body_totally_written(item.stream_id());
+                                if let Err(_e) = send_body_response(
+                                    client,
+                                    item.stream_id(),
+                                    item.take_data(),
+                                    false,
+                                ) {
+                                    queue.push_front(item);
+                                    continue;
+                                };
 
-                            if is_end {
-                                send_body_response(client, item.stream_id(), vec![], is_end)
-                                    .unwrap();
-                            }
-                            // Handle writable streams.
-                            for stream_id in client.conn.writable() {
-                                handle_writable(client, stream_id);
+                                if queue.len() == 0 {
+                                    pending_queue.try_borrow_mut().unwrap().remove(stream_id);
+                                }
+                                let is_end = client.is_body_totally_written(item.stream_id());
+
+                                if is_end {
+                                    send_body_response(client, item.stream_id(), vec![], is_end)
+                                        .unwrap();
+                                }
+                                // Handle writable streams.
+                                for stream_id in client.conn.writable() {
+                                    handle_writable(client, stream_id);
+                                }
                             }
                         }
                     }
                 };
-                // Handle writable streams.
             }
 
             let pacing_delay = Duration::from_micros(34);
