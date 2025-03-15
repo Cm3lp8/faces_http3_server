@@ -3,7 +3,10 @@
 pub use queue_implementation::{BodyReqQueue, QueueTrackableItem};
 
 mod queue_implementation {
-    use std::collections::{HashMap, VecDeque};
+    use std::collections::{
+        hash_map::{Iter, Values},
+        HashMap, VecDeque,
+    };
 
     use crate::request_response::BodyRequest;
 
@@ -25,6 +28,13 @@ mod queue_implementation {
                 streams: VecDeque::new(),
                 current_stream_index: 0,
                 queue: HashMap::new(),
+            }
+        }
+        pub fn max_pending_queue(&self) -> Option<(u64, usize)> {
+            if let Some(item) = self.queue.iter().max_by_key(|item| item.1.len()) {
+                Some((*item.0, item.1.len()))
+            } else {
+                None
             }
         }
         ///_______________________________
@@ -80,6 +90,16 @@ mod queue_implementation {
                 self.current_stream_index = 0;
                 None
             }
+        }
+        pub fn stream_vec(&self) -> &VecDeque<u64> {
+            &self.streams
+        }
+        pub fn for_stream(&self) -> Option<Iter<'_, u64, VecDeque<T>>> {
+            if self.streams.is_empty() {
+                return None;
+            };
+
+            Some(self.queue.iter())
         }
         pub fn remove(&mut self, stream_id: u64) {
             if let Some(pos) = self.streams.iter().position(|it| *it == stream_id) {

@@ -10,13 +10,16 @@ use quiche::Connection;
 use ring::rand::*;
 use std::borrow::BorrowMut;
 use std::cell::RefCell;
+use std::cmp::Reverse;
+use std::collections::hash_map::ValuesMut;
+use std::collections::vec_deque::Iter;
 use std::collections::{HashMap, VecDeque};
 use std::net;
 use std::rc::Rc;
 mod fifo_body;
 
 pub use Client as QClient;
-const MAX_DATAGRAM_SIZE: usize = 1350;
+const MAX_DATAGRAM_SIZE: usize = 4096;
 const WAKER_TOKEN: Token = Token(1);
 struct PartialResponse {
     headers: Option<Vec<quiche::h3::Header>>,
@@ -36,6 +39,7 @@ impl Client {
     pub fn conn(&mut self) -> &mut Connection {
         &mut self.conn
     }
+
     pub fn h3_conn(&mut self) -> &mut h3::Connection {
         self.http3_conn.as_mut().unwrap()
     }
@@ -75,6 +79,7 @@ impl Client {
             (0, 0)
         }
     }
+
     pub fn is_body_totally_written(&self, stream_id: u64) -> bool {
         if let Some(entry) = self.body_sending_tracker.get(&stream_id) {
             if entry.0 == entry.1 {
@@ -86,6 +91,9 @@ impl Client {
             false
         }
     }
+    pub fn get_max_pending_queue_size(&self) -> Option<(u64, usize)> {
+        self.pending_body_queue.max_pending_queue()
+    }
     pub fn clean_client(&mut self, stream_id: u64) {
         self.headers_sending_tracker.remove(&stream_id);
         self.partial_responses.remove(&stream_id);
@@ -93,6 +101,48 @@ impl Client {
     }
 }
 type ClientMap = HashMap<quiche::ConnectionId<'static>, Client>;
+
+trait PriorityUpdate {
+    fn priority_value_mut(&mut self, round: usize) -> Vec<&mut Client> {
+        let vec = Vec::new();
+        vec
+    }
+    fn has_too_much_pending(&self, thres: usize) -> bool {
+        true
+    }
+}
+
+impl PriorityUpdate for ClientMap {
+    fn has_too_much_pending(&self, thres: usize) -> bool {
+        for (id, client) in self.iter() {
+            if let Some((stream_id, queue_size)) = client.get_max_pending_queue_size() {
+                if queue_size >= thres {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+    fn priority_value_mut(&mut self, round: usize) -> Vec<&mut Client> {
+        let mut priority_queue: VecDeque<&mut Client> = VecDeque::new();
+
+        let mut size_track: Vec<(&[u8], usize, &mut Client)> = vec![]; //conn_id, queue_size,
+                                                                       //index in vec
+
+        for (id, client) in self.iter_mut() {
+            if let Some((stream_id, queue_size)) = client.get_max_pending_queue_size() {
+                size_track.push((id, queue_size, client))
+            }
+        }
+
+        size_track.sort_by_key(|it| Reverse(it.1));
+
+        let v = size_track.into_iter().map(|it| it.2).collect();
+
+        v
+    }
+}
+
 pub use quiche_implementation::run;
 mod quiche_implementation {
     use core::{error, panic};
@@ -155,9 +205,9 @@ mod quiche_implementation {
         config.set_max_idle_timeout(20_000);
         config.set_max_recv_udp_payload_size(MAX_DATAGRAM_SIZE);
         config.set_max_send_udp_payload_size(MAX_DATAGRAM_SIZE);
-        config.set_initial_max_data(300_000_000);
-        config.set_initial_max_stream_data_bidi_local(300_000_000);
-        config.set_initial_max_stream_data_bidi_remote(300_000_000);
+        config.set_initial_max_data(1_000_000_000);
+        config.set_initial_max_stream_data_bidi_local(1_500_000_000);
+        config.set_initial_max_stream_data_bidi_remote(1_500_000_000);
         config.set_initial_max_stream_data_uni(10_000_000);
         config.set_initial_max_streams_bidi(100);
         config.set_initial_max_streams_uni(100);
@@ -171,7 +221,9 @@ mod quiche_implementation {
         let local_addr = socket.local_addr().unwrap();
         let mut total = 0;
         let mut send_packet_time = Instant::now();
+        let mut round = 0;
         loop {
+            round += 1;
             // Find the shorter timeout from all the active connections.
             //
             // TODO: use event loop that properly supports timers
@@ -473,12 +525,8 @@ mod quiche_implementation {
                             }
                         }
                     }
-                } else {
-                    if let Err(_e) = waker_clone.wake() {
-                        error!("failed to wake poll");
-                    }
-                };
-                for client in clients.values_mut() {
+                }
+                for client in clients.priority_value_mut(round) {
                     // Handle writable streams.
                     let mut to_repush_in_front: Vec<BodyRequest> = vec![];
                     while let Some((stream_id, queue)) = client.pending_body_queue.next_stream() {
@@ -552,7 +600,25 @@ mod quiche_implementation {
                 }
             }
 
-            let pacing_delay = Duration::from_micros(104);
+            /*
+                        if round % 2000 == 0 {
+                            for client in clients.priority_value_mut(round) {
+                                let str_v = client.pending_body_queue.stream_vec();
+                                if let Some(it) = client.pending_body_queue.for_stream() {
+                                    for (stream_id, queue) in it {
+                                        info!("bytes written [{:?}] in queue -> [{}] for stream [{stream_id}] conn [{:?}] str_t{:?}", client.get_written(*stream_id), queue.len(), client.conn.trace_id(), str_v);
+                                    }
+                                }
+                                println!("------------------------------------------------------------------");
+                            }
+                            if !clients.is_empty() {
+                                println!("");
+                                println!("------------------------------------------------------------------");
+                                println!("");
+                            }
+                        }
+            */
+            let pacing_delay = Duration::from_micros(124);
             let mut send_duration = Instant::now();
             let mut has_blocked = false;
             for client in clients.values_mut() {
@@ -1077,7 +1143,6 @@ mod quiche_implementation {
         }
 
         let o = if resp.written + amount_written.0 == amount_written.1 {
-            warn!("ici ");
             let _ = match http3_conn.send_body(conn, stream_id, &[], true) {
                 Ok(v) => v,
                 Err(quiche::h3::Error::Done) => 0,

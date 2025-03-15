@@ -139,7 +139,7 @@ mod chunking_implementation {
         }
     }
 
-    const CHUNK_SIZE: usize = 4096;
+    const CHUNK_SIZE: usize = 1350;
 
     pub fn run_worker(
         last_time_spend: &Arc<Mutex<Duration>>,
@@ -150,7 +150,7 @@ mod chunking_implementation {
         let waker = waker.clone();
         let last_time_spend = last_time_spend.clone();
         std::thread::spawn(move || {
-            let default_pacing = Duration::from_micros(515);
+            let default_pacing = Duration::from_micros(315);
             let mut buf_read = [0; CHUNK_SIZE];
             while let Ok(mut chunkable) = receiver.recv() {
                 let start = Instant::now();
