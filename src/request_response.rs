@@ -150,7 +150,7 @@ mod chunking_implementation {
         let waker = waker.clone();
         let last_time_spend = last_time_spend.clone();
         std::thread::spawn(move || {
-            let default_pacing = Duration::from_micros(15);
+            let default_pacing = Duration::from_micros(515);
             let mut buf_read = [0; CHUNK_SIZE];
             while let Ok(mut chunkable) = receiver.recv() {
                 let start = Instant::now();
@@ -171,7 +171,7 @@ mod chunking_implementation {
                     } else {
                         false
                     };
-                    if let Err(e) = chunkable.sender.try_send(BodyRequest::new(
+                    if let Err(e) = chunkable.sender.send(BodyRequest::new(
                         chunkable.stream_id,
                         chunkable.conn_id.as_str(),
                         &chunkable.scid,
@@ -299,7 +299,8 @@ mod response_queue {
 
     impl ResponseQueue {
         pub fn new(waker: Arc<Waker>) -> Self {
-            let channel = crossbeam_channel::unbounded::<BodyRequest>();
+            let channel = crossbeam_channel::bounded::<BodyRequest>(10);
+            warn!("New Response queue ");
             Self { channel, waker }
         }
 

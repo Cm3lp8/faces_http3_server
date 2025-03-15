@@ -44,11 +44,27 @@ mod queue_implementation {
                 self.queue.insert(stream_id, queue);
             }
         }
+        ///_______________________________
+        ///Push front the element in the fifo in the corresponding stream queue
+        ///if stream is none, stream Vedeque is updated to keep track of futures iterations.
+        pub fn push_item_on_front(&mut self, item: T) {
+            let stream_id = item.stream_id();
+
+            if let Some(entry) = self.queue.get_mut(&stream_id) {
+                entry.push_front(item);
+            } else {
+                if !self.streams.contains(&stream_id) {
+                    self.streams.push_back(stream_id);
+                }
+                let mut queue = VecDeque::new();
+                queue.push_front(item);
+                self.queue.insert(stream_id, queue);
+            }
+        }
 
         ///___________________________________________________
-        ///This iterates on registered streams that have pending bodies waiting in the queue.
-        ///It calls the callback only if collection is > 0, and pop the next item. If item is not
-        ///correctly send in the callback, it has to be repushed in front for next try.
+        ///This iterates on registered streams that have pending bodies. Returns None when all
+        ///streams have been visited.
         pub fn next_stream(&mut self) -> Option<(u64, Option<&mut VecDeque<T>>)> {
             if self.streams.is_empty() {
                 return None;

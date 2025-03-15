@@ -225,7 +225,7 @@ mod request_hndlr {
                                     None
                                 };
                             if let Some(resp) = &mut response {
-                                resp.attach_chunk_sender(client.get_response_sender())
+                                resp.attach_chunk_sender(response_sender)
                             }
                             if let Ok((headers, body)) =
                                 route_form.build_response(stream_id, scid, conn_id, response)
