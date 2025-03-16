@@ -1,5 +1,6 @@
 pub use request_hndlr::RouteHandler;
 
+use crate::request_response::QueuedRequest;
 pub use crate::route_manager::{
     H3Method, RequestType, RouteForm, RouteFormBuilder, RouteManager, RouteManagerBuilder,
 };
@@ -17,14 +18,15 @@ mod request_hndlr {
     };
 
     use crate::{
-        request_response::{BodyRequest, ChunkingStation},
+        file_writer::{FileWritable, FileWriterChannel},
+        request_response::{BodyRequest, ChunkingStation, HeaderRequest},
         route_events::{self, EventType, RouteEvent},
         route_manager::{DataManagement, RouteManagerInner},
         server_config,
         server_init::quiche_http3_server::{self, Client},
         BodyStorage, RequestResponse, RouteEventListener, ServerConfig,
     };
-    use mio::Waker;
+    use mio::{net::UdpSocket, Waker};
     use quiche::{
         h3::{self, NameValue},
         Connection,
@@ -44,6 +46,13 @@ mod request_hndlr {
                 inner: route_mngr_inner,
             }
         }
+        pub fn set_intermediate_headers_send(&self, stream_id: u64, client: &Client) {
+            let guard = &*self.inner.lock().unwrap();
+            let conn_id = client.conn_ref().trace_id();
+            guard
+                .routes_states()
+                .set_intermediate_headers_send(stream_id, conn_id.to_string());
+        }
         ///
         /// Send a reception status to the client, only if something can be updated.
         ///
@@ -51,10 +60,12 @@ mod request_hndlr {
         pub fn send_reception_status(
             &self,
             client: &mut quiche_http3_server::QClient,
+            response_sender: crossbeam_channel::Sender<QueuedRequest>,
             stream_id: u64,
             conn_id: &str,
         ) -> Result<usize, ()> {
             let guard = &*self.inner.lock().unwrap();
+            let scid = client.conn().source_id().as_ref().to_vec();
             let reception_status = guard
                 .routes_states()
                 .get_reception_status_infos(stream_id, conn_id.to_owned());
@@ -71,19 +82,34 @@ mod request_hndlr {
                         ];
 
                         if !header_send {
-                            guard
-                                .routes_states()
-                                .set_intermediate_headers_send(stream_id, conn_id.to_string());
-                            return quiche_http3_server::send_header(
-                                client, stream_id, headers, false,
+                            /*
+                                                        guard
+                                                            .routes_states()
+                                                            .set_intermediate_headers_send(stream_id, conn_id.to_string());
+                            */
+                            let (_recv_send_confirmation, header_req) = HeaderRequest::new(
+                                stream_id,
+                                &scid,
+                                headers.clone(),
+                                false,
+                                None,
+                                crate::request_response::HeaderPriority::SendHeader100,
                             );
+                            if let Err(_) =
+                                response_sender.send(QueuedRequest::new_header(header_req))
+                            {
+                                error!("Failed to send header_req")
+                            }
+                            /*
+                                                        return quiche_http3_server::send_header(
+                                                            client, stream_id, headers, false,
+                                                        );
+                            */
                         }
                         {
                             if let Some(body) = reception_status.body() {
-                                if let Ok(stream_writable) =
-                                    client.conn().stream_writable(stream_id, 1350)
-                                {
-                                    if stream_writable {
+                                if let Ok(stream_cap) = client.conn().stream_capacity(stream_id) {
+                                    if stream_cap >= body.len() {
                                         if let Err(()) = quiche_http3_server::send_body(
                                             client, stream_id, body, false,
                                         ) {
@@ -141,7 +167,7 @@ mod request_hndlr {
             scid: &[u8],
             stream_id: u64,
             client: &mut quiche_http3_server::QClient,
-            response_sender: crossbeam_channel::Sender<BodyRequest>,
+            response_sender: crossbeam_channel::Sender<QueuedRequest>,
             chunking_station: &ChunkingStation,
             waker: &Arc<Waker>,
             last_time: &Arc<Mutex<Duration>>,
@@ -158,66 +184,7 @@ mod request_hndlr {
                     guard.get_routes_from_path_and_method(route_event.path(), route_event.method())
                 {
                     match route_form.method() {
-                        H3Method::GET => {
-                            /*stream shutdown send response*/
-                            error!("coucou");
-                            let mut response =
-                                if let Some(event_subscriber) = route_form.event_subscriber() {
-                                    event_subscriber.on_event(route_event)
-                                } else {
-                                    None
-                                };
-
-                            if let Some(resp) = &mut response {
-                                resp.attach_chunk_sender(response_sender);
-                            }
-
-                            client
-                                .conn()
-                                .stream_shutdown(stream_id, quiche::Shutdown::Read, 0)
-                                .unwrap();
-                            if let Ok((headers, body)) =
-                                route_form.build_response(stream_id, scid, conn_id, response)
-                            {
-                                match body {
-                                    Some(body) => {
-                                        if !client.headers_send(stream_id) {
-                                            info!("header sendttt stream ([{stream_id}])");
-                                            if let Ok(n) = quiche_http3_server::send_more_header(
-                                                client,
-                                                stream_id,
-                                                headers.clone(),
-                                                false,
-                                            ) {
-                                                client.set_body_size_to_body_sending_tracker(
-                                                    stream_id,
-                                                    body.bytes_len(),
-                                                );
-                                                client.set_headers_send(stream_id, true);
-                                            }
-                                        } else {
-                                            warn!("body [{:#?}]", body);
-                                            chunking_station.send_response(body, last_time);
-                                            if let Err(e) = waker.wake() {
-                                                error!("Failed to wake poll [{:?}]", e);
-                                            };
-                                        }
-                                    }
-                                    None => {
-                                        warn!("okpok");
-                                        if let Err(_) = quiche_http3_server::send_response(
-                                            client,
-                                            stream_id,
-                                            headers,
-                                            vec![],
-                                            is_end,
-                                        ) {
-                                            error!("Failed sending h3 response after GET request")
-                                        }
-                                    }
-                                }
-                            }
-                        }
+                        H3Method::GET => {}
                         H3Method::POST => {
                             let mut response =
                                 if let Some(event_subscriber) = route_form.event_subscriber() {
@@ -226,7 +193,7 @@ mod request_hndlr {
                                     None
                                 };
                             if let Some(resp) = &mut response {
-                                resp.attach_chunk_sender(response_sender)
+                                resp.attach_chunk_sender(response_sender.clone())
                             }
                             if let Ok((headers, body)) =
                                 route_form.build_response(stream_id, scid, conn_id, response)
@@ -234,6 +201,22 @@ mod request_hndlr {
                                 match body {
                                     Some(body) => {
                                         if !client.headers_send(stream_id) {
+                                            let (_recv_send_confirmation, header_req) = HeaderRequest::new(
+                                                  stream_id,
+                                                   &scid,
+                                                 headers.clone(),
+                                               false,
+                                                Some(body),
+                                                   crate::request_response::HeaderPriority::SendAdditionnalHeader,
+                                                 );
+
+                                            if let Err(_) = response_sender
+                                                .send(QueuedRequest::new_header(header_req))
+                                            {
+                                                error!("Failed to send header_req")
+                                            }
+
+                                            /*
                                             if let Ok(n) = quiche_http3_server::send_more_header(
                                                 client,
                                                 stream_id,
@@ -244,12 +227,14 @@ mod request_hndlr {
                                                     stream_id,
                                                     body.bytes_len(),
                                                 );
+                                                info!("Send headers [{:?}]", headers);
                                                 client.set_headers_send(stream_id, true);
                                                 chunking_station.send_response(body, last_time);
+
                                                 if let Err(e) = waker.wake() {
                                                     error!("Failed to wake poll [{:?}]", e);
                                                 };
-                                            }
+                                            }*/
                                         } else {
                                             chunking_station.send_response(body, last_time);
                                             if let Err(e) = waker.wake() {
@@ -303,11 +288,13 @@ mod request_hndlr {
             headers: &[h3::Header],
             stream_id: u64,
             client: &mut quiche_http3_server::QClient,
-            response_sender: crossbeam_channel::Sender<BodyRequest>,
+            socket: &mut UdpSocket,
+            response_sender: crossbeam_channel::Sender<QueuedRequest>,
             more_frames: bool,
             response_head: &ChunkingStation,
             waker: &Arc<Waker>,
             last_time: &Arc<Mutex<Duration>>,
+            file_writer_channel: FileWriterChannel,
         ) {
             let conn_id = client.conn().trace_id().to_string();
             let scid = client.conn().source_id().as_ref().to_vec();
@@ -372,6 +359,7 @@ mod request_hndlr {
                     path.unwrap(),
                     content_length,
                     !more_frames,
+                    file_writer_channel,
                 );
             } else {
                 return;
@@ -410,7 +398,7 @@ mod request_hndlr {
                                 };
 
                             if let Some(resp) = &mut response {
-                                resp.attach_chunk_sender(response_sender);
+                                resp.attach_chunk_sender(response_sender.clone());
                             }
                             warn!("reponse [{:#?}]", response);
                             client
@@ -425,28 +413,62 @@ mod request_hndlr {
                             ) {
                                 match body {
                                     Some(body) => {
-                                        if let Ok(n) = quiche_http3_server::send_header(
-                                            client, stream_id, headers, false,
-                                        ) {
-                                            client.set_body_size_to_body_sending_tracker(
+                                        let (recv_send_confirmation, header_req) =
+                                            HeaderRequest::new(
                                                 stream_id,
-                                                body.bytes_len(),
+                                                &scid,
+                                                headers.clone(),
+                                                false,
+                                                Some(body.clone()),
+                                                crate::request_response::HeaderPriority::SendHeader,
                                             );
-                                            client.set_headers_send(stream_id, true);
-                                            response_head.send_response(body, last_time);
-                                            if let Err(e) = waker.wake() {
-                                                error!("Failed to wake poll [{:?}]", e);
-                                            };
+                                        if let Err(_) = response_sender
+                                            .send(QueuedRequest::new_header(header_req))
+                                        {
+                                            error!("Failed to send header_req")
                                         }
+
+                                        /*
+                                                                                if let Ok(n) = quiche_http3_server::send_header(
+                                                                                    client, socket, stream_id, headers, false,
+                                                                                ) {
+                                                                                    client.set_body_size_to_body_sending_tracker(
+                                                                                        stream_id,
+                                                                                        body.bytes_len(),
+                                                                                    );
+                                                                                    client.set_headers_send(stream_id, true);
+                                                                                    response_head.send_response(body, last_time);
+                                                                                    if let Err(e) = waker.wake() {
+                                                                                        error!("Failed to wake poll [{:?}]", e);
+                                                                                    };
+                                                                                }
+                                        */
                                     }
                                     None => {
-                                        quiche_http3_server::send_response(
-                                            client,
-                                            stream_id,
-                                            headers,
-                                            vec![],
-                                            is_end,
-                                        );
+                                        let (recv_send_confirmation, header_req) =
+                                            HeaderRequest::new(
+                                                stream_id,
+                                                &scid,
+                                                headers.clone(),
+                                                is_end,
+                                                None,
+                                                crate::request_response::HeaderPriority::SendHeader,
+                                            );
+                                        if let Err(_) = response_sender
+                                            .send(QueuedRequest::new_header(header_req))
+                                        {
+                                            error!("Failed to send header_req")
+                                        }
+
+                                        /*
+                                                                                quiche_http3_server::send_response(
+                                                                                    client,
+                                                                                    stream_id,
+                                                                                    headers,
+                                                                                    vec![],
+                                                                                    is_end,
+                                                                                );
+                                        */
                                     }
                                 }
                             }
@@ -517,7 +539,7 @@ mod request_hndlr {
         ///Attach a channel sender to the body that corresponds to the associated client.
         ///Sender can be build with :
         ///client.get_response_sender()
-        fn attach_chunk_sender(&mut self, sndr: crossbeam_channel::Sender<BodyRequest>) {
+        fn attach_chunk_sender(&mut self, sndr: crossbeam_channel::Sender<QueuedRequest>) {
             match self.body_as_mut() {
                 crate::request_response::BodyType::Data {
                     stream_id,

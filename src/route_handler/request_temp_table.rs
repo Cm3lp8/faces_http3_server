@@ -65,6 +65,7 @@ mod req_temp_table {
     use uuid::Uuid;
 
     use crate::{
+        file_writer::{FileWritable, FileWriterChannel, WritableItem},
         route_events::{self, DataEvent, EventType, FinishedEvent, HeaderEvent, RouteEvent},
         route_manager::DataManagement,
         server_config, BodyStorage, H3Method, RouteEventListener, ServerConfig,
@@ -201,7 +202,7 @@ mod req_temp_table {
                                         is_end,
                                     )));
                                 }
-                                entry.write_file(packet, is_end);
+                                entry.write_file(packet, 0, is_end);
                                 total_written = Ok(entry.written());
                             }
                         },
@@ -223,8 +224,9 @@ mod req_temp_table {
             path: &str,
             content_length: Option<usize>,
             is_end: bool,
+            file_writer_channel: FileWriterChannel,
         ) {
-            let mut file_opened: Option<BufWriter<File>> = None;
+            let mut file_opened: Option<Arc<Mutex<BufWriter<File>>>> = None;
             let storage_path = if let Some(data_management_type) = data_management_type.as_ref() {
                 if let Some(body_storage) = data_management_type.is_body_storage() {
                     if let BodyStorage::File = body_storage {
@@ -253,7 +255,7 @@ mod req_temp_table {
                         path.push(uuid);
 
                         if let Ok(file) = File::create(path.clone()) {
-                            file_opened = Some(BufWriter::new(file));
+                            file_opened = Some(Arc::new(Mutex::new(BufWriter::new(file))));
                         } else {
                             error!("Failed creating [{:?}] file", path);
                         }
@@ -277,6 +279,7 @@ mod req_temp_table {
                 event_subscriber,
                 storage_path,
                 file_opened,
+                file_writer_channel,
                 headers,
                 path,
                 content_length,
@@ -296,12 +299,13 @@ mod req_temp_table {
         data_management_type: Option<DataManagement>,
         event_subscriber: Option<Arc<dyn RouteEventListener + 'static + Send + Sync>>,
         storage_path: Option<PathBuf>,
-        file_opened: Option<BufWriter<File>>,
+        file_opened: Option<Arc<Mutex<BufWriter<File>>>>,
         path: String,
         args: Option<Vec<ReqArgs>>,
         body_written_size: usize,
         content_length: Option<usize>,
         precedent_percentage_written: Option<usize>,
+        file_writer_channel: FileWriterChannel,
         progress_header_sent: bool,
         body: Vec<u8>,
         is_end: bool,
@@ -323,7 +327,8 @@ mod req_temp_table {
             data_management_type: Option<DataManagement>,
             event_subscriber: Option<Arc<dyn RouteEventListener + Send + 'static + Sync>>,
             storage_path: Option<PathBuf>,
-            file_opened: Option<BufWriter<File>>,
+            file_opened: Option<Arc<Mutex<BufWriter<File>>>>,
+            file_writer_channel: FileWriterChannel,
             headers: &[h3::Header],
             path: &str,
             content_length: Option<usize>,
@@ -347,22 +352,22 @@ mod req_temp_table {
                 precedent_percentage_written: None,
                 progress_header_sent: false,
                 body: vec![],
+                file_writer_channel,
                 is_end,
             }
         }
-        pub fn write_file(&mut self, packet: &[u8], is_end: bool) {
+        pub fn write_file(&mut self, packet: &[u8], packet_id: usize, is_end: bool) {
             self.is_end = is_end;
 
-            if let Some(file) = &mut self.file_opened {
-                let mut write = packet.len();
-                while let Ok(n) = file.write(&packet[..write]) {
-                    self.body_written_size += n;
-                    if n == write {
-                        break;
-                    }
-                    write = write - n;
-                }
-                file.flush().unwrap();
+            if let Some(file_writer) = &self.file_opened {
+                if let Err(_) = self.file_writer_channel.send(WritableItem::new(
+                    packet.to_vec(),
+                    packet_id,
+                    file_writer.clone(),
+                )) {
+                    error!("failed to send writable item to file worker thread");
+                };
+                self.body_written_size += packet.len();
             }
         }
         pub fn extend_data(&mut self, packet: &[u8], is_end: bool) {

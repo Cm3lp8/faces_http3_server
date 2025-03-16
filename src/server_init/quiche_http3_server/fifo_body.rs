@@ -136,9 +136,9 @@ mod queue_implementation {
     }
 
     pub trait QueueTrackableItem {
-        fn item_index(&self) -> usize;
-        fn conn_id(&self) -> String;
         fn stream_id(&self) -> u64;
         fn is_last_item(&self) -> bool;
+        fn scid(&self) -> Vec<u8>;
+        fn len(&self) -> usize;
     }
 }

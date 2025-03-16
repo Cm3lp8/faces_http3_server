@@ -1,7 +1,7 @@
 pub use request_reponse_builder::{BodyType, RequestResponse};
 pub use response_elements::ContentType;
 pub use response_elements::Status;
-pub use response_queue::BodyRequest;
+pub use response_queue::{BodyRequest, HeaderPriority, HeaderRequest, QueuedRequest};
 pub use response_queue::{ChunkingStation, ResponseQueue};
 
 mod response_queue_implementation {
@@ -65,6 +65,7 @@ mod response_queue_implementation {
     }
 }
 mod chunking_implementation {
+    use core::panic;
     use std::{
         fs::{self, metadata, Metadata},
         io::{BufRead, BufReader, Cursor},
@@ -84,7 +85,7 @@ mod chunking_implementation {
         scid: Vec<u8>,
         conn_id: String,
         reader: Box<dyn BufRead + Send + Sync + 'static>,
-        sender: crossbeam_channel::Sender<BodyRequest>,
+        sender: crossbeam_channel::Sender<QueuedRequest>,
         body_len: usize,
         packet_id: usize,
         bytes_written: usize,
@@ -92,7 +93,7 @@ mod chunking_implementation {
 
     impl ChunkableBody {
         pub fn new_data(
-            sender: crossbeam_channel::Sender<BodyRequest>,
+            sender: crossbeam_channel::Sender<QueuedRequest>,
             stream_id: u64,
             scid: &[u8],
             conn_id: String,
@@ -111,7 +112,7 @@ mod chunking_implementation {
             })
         }
         pub fn new_file(
-            sender: crossbeam_channel::Sender<BodyRequest>,
+            sender: crossbeam_channel::Sender<QueuedRequest>,
             scid: &[u8],
             stream_id: u64,
             conn_id: String,
@@ -150,7 +151,7 @@ mod chunking_implementation {
         let waker = waker.clone();
         let last_time_spend = last_time_spend.clone();
         std::thread::spawn(move || {
-            let default_pacing = Duration::from_micros(315);
+            let default_pacing = Duration::from_micros(415);
             let mut buf_read = [0; CHUNK_SIZE];
             while let Ok(mut chunkable) = receiver.recv() {
                 let start = Instant::now();
@@ -171,18 +172,23 @@ mod chunking_implementation {
                     } else {
                         false
                     };
-                    if let Err(e) = chunkable.sender.send(BodyRequest::new(
-                        chunkable.stream_id,
-                        chunkable.conn_id.as_str(),
-                        &chunkable.scid,
-                        chunkable.packet_id,
-                        buf_read[..n].to_vec(),
-                        is_end,
-                    )) {
+                    if let Err(e) =
+                        chunkable
+                            .sender
+                            .send(QueuedRequest::new_body(BodyRequest::new(
+                                chunkable.stream_id,
+                                chunkable.conn_id.as_str(),
+                                &chunkable.scid,
+                                chunkable.packet_id,
+                                buf_read[..n].to_vec(),
+                                is_end,
+                            )))
+                    {
                         error!(
-                            "Failed sending body request to conn [{}] at packet [{}]",
-                            chunkable.conn_id, chunkable.packet_id
+                            "Failed sending body request to conn [{}] at packet [{}] [{:?}]",
+                            chunkable.conn_id, chunkable.packet_id, e
                         );
+                        panic!("");
                     }
                     chunkable.packet_id += 1;
                     chunkable.bytes_written += n;
@@ -208,6 +214,7 @@ mod response_queue {
     };
 
     use mio::Waker;
+    use quiche::h3;
 
     use crate::server_init::quiche_http3_server::QueueTrackableItem;
 
@@ -217,6 +224,8 @@ mod response_queue {
         BodyType,
     };
 
+    ///____________________________________
+    ///Channel to send a body to be chunked before sending to peer.
     pub struct ChunkingStation {
         station_channel: (
             crossbeam_channel::Sender<ChunkableBody>,
@@ -281,14 +290,11 @@ mod response_queue {
             }
         }
     }
-    pub struct ResponseQueue {
-        channel: (
-            crossbeam_channel::Sender<BodyRequest>,
-            crossbeam_channel::Receiver<BodyRequest>,
-        ),
+    pub struct ResponseQueue<T: QueueTrackableItem> {
+        channel: (crossbeam_channel::Sender<T>, crossbeam_channel::Receiver<T>),
         waker: Arc<Waker>,
     }
-    impl Clone for ResponseQueue {
+    impl<T: QueueTrackableItem> Clone for ResponseQueue<T> {
         fn clone(&self) -> Self {
             Self {
                 channel: self.channel.clone(),
@@ -297,22 +303,144 @@ mod response_queue {
         }
     }
 
-    impl ResponseQueue {
+    impl<T: QueueTrackableItem> ResponseQueue<T> {
         pub fn new(waker: Arc<Waker>) -> Self {
-            let channel = crossbeam_channel::bounded::<BodyRequest>(10);
+            let channel = crossbeam_channel::bounded::<T>(10);
             warn!("New Response queue ");
             Self { channel, waker }
         }
 
-        pub fn get_sender(&self) -> crossbeam_channel::Sender<BodyRequest> {
+        pub fn get_sender(&self) -> crossbeam_channel::Sender<T> {
             self.channel.0.clone()
         }
 
-        pub fn pop_request(&self) -> Result<BodyRequest, crossbeam_channel::TryRecvError> {
+        pub fn pop_request(&self) -> Result<T, crossbeam_channel::TryRecvError> {
             self.channel.1.try_recv()
         }
     }
+    impl QueueTrackableItem for QueuedRequest {
+        fn stream_id(&self) -> u64 {
+            match self {
+                QueuedRequest::Header(content) => content.stream_id,
+                QueuedRequest::Body(content) => content.stream_id,
+            }
+        }
+        fn is_last_item(&self) -> bool {
+            match self {
+                QueuedRequest::Header(content) => content.is_end,
+                QueuedRequest::Body(content) => content.is_end,
+            }
+        }
+        fn scid(&self) -> Vec<u8> {
+            match self {
+                QueuedRequest::Header(content) => content.scid.to_vec(),
+                QueuedRequest::Body(content) => content.scid.to_vec(),
+            }
+        }
+        fn len(&self) -> usize {
+            match self {
+                QueuedRequest::Header(content) => content.get_headers_len(),
+                QueuedRequest::Body(content) => content.len(),
+            }
+        }
+    }
 
+    #[derive(Debug)]
+    pub enum QueuedRequest {
+        Header(HeaderRequest),
+        Body(BodyRequest),
+    }
+    impl QueuedRequest {
+        pub fn new_body(req: BodyRequest) -> Self {
+            Self::Body(req)
+        }
+        pub fn new_header(req: HeaderRequest) -> Self {
+            Self::Header(req)
+        }
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    pub enum HeaderPriority {
+        SendHeader,
+        SendHeader100,
+        SendAdditionnalHeader,
+        SendWithPriority,
+    }
+    #[derive(Debug)]
+    pub struct HeaderRequest {
+        stream_id: u64,
+        scid: Vec<u8>,
+        headers: Vec<h3::Header>,
+        headers_size: usize,
+        is_end: bool,
+        priority_mode: HeaderPriority,
+        send_response: crossbeam_channel::Sender<Result<usize, ()>>,
+        attached_body: Option<BodyType>,
+    }
+    impl HeaderRequest {
+        const AVERAGE_HEADERS_SIZE: usize = 700;
+        ///
+        ///____________________________________
+        ///Create a new HeaderRequest to send to queue,
+        ///attach a body (BodyType) if there is something
+        ///you want to send to peer once, once header
+        ///send is confirmed.
+        ///
+        ///
+        pub fn new(
+            stream_id: u64,
+            scid: &[u8],
+            headers: Vec<h3::Header>,
+            is_end: bool,
+            body: Option<BodyType>,
+            priority_mode: HeaderPriority,
+        ) -> (crossbeam_channel::Receiver<Result<usize, ()>>, Self) {
+            let channel = crossbeam_channel::bounded::<Result<usize, ()>>(1);
+            (
+                channel.1.clone(),
+                HeaderRequest {
+                    stream_id,
+                    scid: scid.to_vec(),
+                    headers,
+                    headers_size: Self::AVERAGE_HEADERS_SIZE,
+                    is_end,
+                    send_response: channel.0.clone(),
+                    priority_mode,
+                    attached_body: body,
+                },
+            )
+        }
+        pub fn get_headers(&self) -> &[h3::Header] {
+            &self.headers
+        }
+        pub fn is_end(&self) -> bool {
+            self.is_end
+        }
+        pub fn attached_body_len(&self) -> Option<usize> {
+            if let Some(attached_body) = self.attached_body.as_ref() {
+                Some(attached_body.bytes_len())
+            } else {
+                None
+            }
+        }
+
+        pub fn priority_mode(&self) -> HeaderPriority {
+            self.priority_mode
+        }
+        pub fn send_body_to_chunking_station(
+            &mut self,
+            chunking_station: &ChunkingStation,
+            last_time_spend: &Arc<Mutex<Duration>>,
+        ) {
+            let body_option = self.attached_body.take();
+            if let Some(body) = body_option {
+                chunking_station.send_response(body, last_time_spend);
+            }
+        }
+        pub fn get_headers_len(&self) -> usize {
+            self.headers_size
+        }
+    }
     #[derive(Debug)]
     pub struct BodyRequest {
         packet_id: usize,
@@ -364,17 +492,17 @@ mod response_queue {
         }
     }
     impl QueueTrackableItem for BodyRequest {
-        fn conn_id(&self) -> String {
-            self.conn_id.to_string()
-        }
         fn stream_id(&self) -> u64 {
             self.stream_id
         }
-        fn item_index(&self) -> usize {
-            self.packet_id
-        }
         fn is_last_item(&self) -> bool {
             self.is_end
+        }
+        fn scid(&self) -> Vec<u8> {
+            self.scid.to_vec()
+        }
+        fn len(&self) -> usize {
+            self.packet.len()
         }
     }
 }
@@ -394,21 +522,21 @@ mod request_reponse_builder {
         None,
     }
 
-    #[derive(Debug)]
+    #[derive(Debug, Clone)]
     pub enum BodyType {
         Data {
             stream_id: u64,
             scid: Vec<u8>,
             conn_id: String,
             data: Vec<u8>,
-            sender: Option<crossbeam_channel::Sender<BodyRequest>>,
+            sender: Option<crossbeam_channel::Sender<QueuedRequest>>,
         },
         FilePath {
             stream_id: u64,
             scid: Vec<u8>,
             conn_id: String,
             file_path: PathBuf,
-            sender: Option<crossbeam_channel::Sender<BodyRequest>>,
+            sender: Option<crossbeam_channel::Sender<QueuedRequest>>,
         },
         None,
     }
