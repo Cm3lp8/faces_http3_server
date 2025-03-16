@@ -52,6 +52,7 @@ mod route_config {
 mod route_mngr {
     use std::{
         collections::HashMap,
+        fmt::Debug,
         hash::Hash,
         sync::{Arc, Mutex},
     };
@@ -214,7 +215,7 @@ mod route_mngr {
             route_configuration: RouteConfig,
             route: impl FnOnce(&mut RouteFormBuilder),
         ) -> &mut Self {
-            self.add_route(path, H3Method::POST, route_configuration, route);
+            self.add_route(path, H3Method::GET, route_configuration, route);
             self
         }
         fn add_route(
@@ -296,6 +297,15 @@ mod route_mngr {
         authority: Option<&'static str>,
         body_cb:
             Option<Box<dyn Fn(RouteEvent) -> Result<RequestResponse, ()> + Send + Sync + 'static>>,
+    }
+    impl Debug for RouteForm {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(
+                f,
+                "method [{:?}] path : [{:?}] , route_configuration [{:?}]",
+                self.method, self.path, self.route_configuration
+            )
+        }
     }
 
     impl PartialEq for RouteForm {

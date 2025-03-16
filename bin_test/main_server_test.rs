@@ -10,7 +10,7 @@ use faces_quic_server::{
     RouteEventListener, RouteForm,
 };
 use faces_quic_server::{RequestType, RouteManager, RouteManagerBuilder, ServerConfig};
-use log::{info, warn};
+use log::{error, info, warn};
 fn main() {
     env_logger::init();
     let addr = "192.168.1.22:3000";
@@ -20,18 +20,36 @@ fn main() {
     let event_loop = EventLoop::new();
 
     event_loop.run(|event, response_builder| match event {
+        RouteEvent::OnHeader(event) => match event.path() {
+            "/large_data" => {}
+            "/test" => {
+                if let Err(e) =
+                    response_builder.send_ok_200_with_file("/home/camille/Vidéos/vid2.mp4")
+                {
+                    log::error!("Failed to send response");
+                }
+            }
+            _ => {}
+        },
         RouteEvent::OnFinished(event) => {
-            if let Some(file_path) = event.get_file_path() {
-                info!(
-                    "[{}] bytes writtent on Le chemin : \n{:#?}",
-                    event.bytes_written(),
-                    file_path
-                );
-            }
-            if let Err(e) = response_builder.send_ok_200_with_file("/home/camille/Vidéos/vid2.mp4")
-            {
-                log::error!("Failed to send response");
-            }
+            match event.path() {
+                "/large_data" => {
+                    if let Some(file_path) = event.get_file_path() {
+                        info!(
+                            "[{}] bytes writtent on Le chemin : \n{:#?}",
+                            event.bytes_written(),
+                            file_path
+                        );
+                    }
+                    if let Err(e) =
+                        response_builder.send_ok_200_with_file("/home/camille/Vidéos/vid.mp4")
+                    {
+                        log::error!("Failed to send response");
+                    }
+                }
+                "/test" => {}
+                _ => {}
+            };
         }
         RouteEvent::OnData(data) => {
             response_builder.send_ok_200();

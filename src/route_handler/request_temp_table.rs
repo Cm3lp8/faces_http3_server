@@ -371,7 +371,7 @@ mod req_temp_table {
             self.body.extend_from_slice(packet);
         }
         pub fn written(&self) -> usize {
-            self.body.len()
+            self.body_written_size
         }
         ///
         ///Drop the file to close it and return the file path.

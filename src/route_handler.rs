@@ -160,6 +160,7 @@ mod request_hndlr {
                     match route_form.method() {
                         H3Method::GET => {
                             /*stream shutdown send response*/
+                            error!("coucou");
                             let mut response =
                                 if let Some(event_subscriber) = route_form.event_subscriber() {
                                     event_subscriber.on_event(route_event)
@@ -271,7 +272,6 @@ mod request_hndlr {
                                         stream_id
                                     )
                                         } else {
-                                            info!("shutdown");
                                             match client.conn().stream_shutdown(
                                                 stream_id,
                                                 quiche::Shutdown::Read,
@@ -303,6 +303,7 @@ mod request_hndlr {
             headers: &[h3::Header],
             stream_id: u64,
             client: &mut quiche_http3_server::QClient,
+            response_sender: crossbeam_channel::Sender<BodyRequest>,
             more_frames: bool,
             response_head: &ChunkingStation,
             waker: &Arc<Waker>,
@@ -389,18 +390,29 @@ mod request_hndlr {
             ) {
                 let is_end = route_event.is_end();
                 if let Some((route_form, _)) =
-                    self.get_routes_from_path_and_method(route_event.path(), route_event.method())
+                    guard.get_routes_from_path_and_method(route_event.path(), route_event.method())
                 {
                     match route_form.method() {
                         H3Method::GET => {
                             /*stream shutdown send response*/
 
-                            let response =
+                            warn!(
+                                "event subscriber [{:?}]",
+                                route_form.event_subscriber().is_some()
+                            );
+                            let mut response =
                                 if let Some(event_subscriber) = route_form.event_subscriber() {
-                                    event_subscriber.on_finished(route_event)
+                                    warn!("has event subscriber []");
+                                    event_subscriber.on_event(route_event)
                                 } else {
+                                    error!("no event subscribre");
                                     None
                                 };
+
+                            if let Some(resp) = &mut response {
+                                resp.attach_chunk_sender(response_sender);
+                            }
+                            warn!("reponse [{:#?}]", response);
                             client
                                 .conn()
                                 .stream_shutdown(stream_id, quiche::Shutdown::Read, 0)
@@ -413,12 +425,14 @@ mod request_hndlr {
                             ) {
                                 match body {
                                     Some(body) => {
-                                        if let Ok(n) = quiche_http3_server::send_more_header(
+                                        if let Ok(n) = quiche_http3_server::send_header(
                                             client, stream_id, headers, false,
                                         ) {
-                                            if let Err(e) = waker.wake() {
-                                                error!("Failed to wake poll [{:?}]", e);
-                                            };
+                                            client.set_body_size_to_body_sending_tracker(
+                                                stream_id,
+                                                body.bytes_len(),
+                                            );
+                                            client.set_headers_send(stream_id, true);
                                             response_head.send_response(body, last_time);
                                             if let Err(e) = waker.wake() {
                                                 error!("Failed to wake poll [{:?}]", e);
