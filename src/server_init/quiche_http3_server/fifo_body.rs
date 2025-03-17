@@ -71,6 +71,9 @@ mod queue_implementation {
                 self.queue.insert(stream_id, queue);
             }
         }
+        pub fn get_queue_mut(&mut self, stream_id: u64) -> Option<&mut VecDeque<T>> {
+            self.queue.get_mut(&stream_id)
+        }
 
         ///___________________________________________________
         ///This iterates on registered streams that have pending bodies. Returns None when all

@@ -150,8 +150,9 @@ mod chunking_implementation {
     ) {
         let waker = waker.clone();
         let last_time_spend = last_time_spend.clone();
+        let mut sended = 0usize;
         std::thread::spawn(move || {
-            let default_pacing = Duration::from_micros(415);
+            let default_pacing = Duration::from_micros(115);
             let mut buf_read = [0; CHUNK_SIZE];
             while let Ok(mut chunkable) = receiver.recv() {
                 let start = Instant::now();
@@ -162,10 +163,8 @@ mod chunking_implementation {
                 } else {
                     default_pacing
                 };
-                while start.elapsed() < duration {
-                    std::thread::yield_now();
-                }
 
+                std::thread::sleep(default_pacing);
                 if let Ok(n) = chunkable.reader.read(&mut buf_read) {
                     let is_end = if n + chunkable.bytes_written == chunkable.body_len {
                         true
@@ -190,12 +189,15 @@ mod chunking_implementation {
                         );
                         panic!("");
                     }
+                    sended += 1;
                     chunkable.packet_id += 1;
                     chunkable.bytes_written += n;
                     if let Err(e) = waker.wake() {
                         panic!("error f waking [{:?}]", e)
                     }
-
+                    if sended % 1000 == 0 {
+                        sended = 0;
+                    }
                     //repush the unfinished read in the channel
                     if !is_end {
                         if let Err(_) = resender.send(chunkable) {
@@ -291,13 +293,15 @@ mod response_queue {
         }
     }
     pub struct ResponseQueue<T: QueueTrackableItem> {
-        channel: (crossbeam_channel::Sender<T>, crossbeam_channel::Receiver<T>),
+        low_priority_channel: (crossbeam_channel::Sender<T>, crossbeam_channel::Receiver<T>),
+        high_priority_channel: (crossbeam_channel::Sender<T>, crossbeam_channel::Receiver<T>),
         waker: Arc<Waker>,
     }
     impl<T: QueueTrackableItem> Clone for ResponseQueue<T> {
         fn clone(&self) -> Self {
             Self {
-                channel: self.channel.clone(),
+                low_priority_channel: self.low_priority_channel.clone(),
+                high_priority_channel: self.high_priority_channel.clone(),
                 waker: self.waker.clone(),
             }
         }
@@ -305,17 +309,33 @@ mod response_queue {
 
     impl<T: QueueTrackableItem> ResponseQueue<T> {
         pub fn new(waker: Arc<Waker>) -> Self {
-            let channel = crossbeam_channel::bounded::<T>(10);
+            let low_priority_channel = crossbeam_channel::unbounded::<T>();
+            let high_priority_channel = crossbeam_channel::unbounded::<T>();
+
             warn!("New Response queue ");
-            Self { channel, waker }
+            Self {
+                low_priority_channel,
+                high_priority_channel,
+                waker,
+            }
         }
 
-        pub fn get_sender(&self) -> crossbeam_channel::Sender<T> {
-            self.channel.0.clone()
+        pub fn get_low_priority_sender(&self) -> crossbeam_channel::Sender<T> {
+            self.low_priority_channel.0.clone()
+        }
+        pub fn get_high_priority_sender(&self) -> crossbeam_channel::Sender<T> {
+            self.high_priority_channel.0.clone()
         }
 
         pub fn pop_request(&self) -> Result<T, crossbeam_channel::TryRecvError> {
-            self.channel.1.try_recv()
+            if let Ok(r) = self.high_priority_channel.1.try_recv() {
+                return Ok(r);
+            }
+
+            if let Ok(l) = self.low_priority_channel.1.try_recv() {
+                return Ok(l);
+            }
+            Err(crossbeam_channel::TryRecvError::Empty)
         }
     }
     impl QueueTrackableItem for QueuedRequest {

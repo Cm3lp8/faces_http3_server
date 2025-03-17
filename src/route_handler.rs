@@ -60,7 +60,8 @@ mod request_hndlr {
         pub fn send_reception_status(
             &self,
             client: &mut quiche_http3_server::QClient,
-            response_sender: crossbeam_channel::Sender<QueuedRequest>,
+            response_sender_high: crossbeam_channel::Sender<QueuedRequest>,
+            response_sender_low: crossbeam_channel::Sender<QueuedRequest>,
             stream_id: u64,
             conn_id: &str,
         ) -> Result<usize, ()> {
@@ -96,7 +97,7 @@ mod request_hndlr {
                                 crate::request_response::HeaderPriority::SendHeader100,
                             );
                             if let Err(_) =
-                                response_sender.send(QueuedRequest::new_header(header_req))
+                                response_sender_high.send(QueuedRequest::new_header(header_req))
                             {
                                 error!("Failed to send header_req")
                             }
@@ -167,7 +168,8 @@ mod request_hndlr {
             scid: &[u8],
             stream_id: u64,
             client: &mut quiche_http3_server::QClient,
-            response_sender: crossbeam_channel::Sender<QueuedRequest>,
+            response_sender_high: crossbeam_channel::Sender<QueuedRequest>,
+            response_sender_low: crossbeam_channel::Sender<QueuedRequest>,
             chunking_station: &ChunkingStation,
             waker: &Arc<Waker>,
             last_time: &Arc<Mutex<Duration>>,
@@ -193,7 +195,7 @@ mod request_hndlr {
                                     None
                                 };
                             if let Some(resp) = &mut response {
-                                resp.attach_chunk_sender(response_sender.clone())
+                                resp.attach_chunk_sender(response_sender_low)
                             }
                             if let Ok((headers, body)) =
                                 route_form.build_response(stream_id, scid, conn_id, response)
@@ -201,6 +203,7 @@ mod request_hndlr {
                                 match body {
                                     Some(body) => {
                                         if !client.headers_send(stream_id) {
+                                            warn!("\n \nsend now header 200 ?\n");
                                             let (_recv_send_confirmation, header_req) = HeaderRequest::new(
                                                   stream_id,
                                                    &scid,
@@ -210,12 +213,16 @@ mod request_hndlr {
                                                    crate::request_response::HeaderPriority::SendAdditionnalHeader,
                                                  );
 
-                                            if let Err(_) = response_sender
+                                            if let Err(_) = response_sender_high
                                                 .send(QueuedRequest::new_header(header_req))
                                             {
                                                 error!("Failed to send header_req")
                                             }
+                                            if let Err(e) = waker.wake() {
+                                                error!("Failed to wake poll [{:?}]", e);
+                                            };
 
+                                            warn!("SENDED ON HIGHPRIORITY ");
                                             /*
                                             if let Ok(n) = quiche_http3_server::send_more_header(
                                                 client,
@@ -236,6 +243,7 @@ mod request_hndlr {
                                                 };
                                             }*/
                                         } else {
+                                            warn!("\n therer ???send now header 200 ?\n");
                                             chunking_station.send_response(body, last_time);
                                             if let Err(e) = waker.wake() {
                                                 error!("Failed to wake poll [{:?}]", e);
@@ -289,7 +297,8 @@ mod request_hndlr {
             stream_id: u64,
             client: &mut quiche_http3_server::QClient,
             socket: &mut UdpSocket,
-            response_sender: crossbeam_channel::Sender<QueuedRequest>,
+            response_sender_high: crossbeam_channel::Sender<QueuedRequest>,
+            response_sender_low: crossbeam_channel::Sender<QueuedRequest>,
             more_frames: bool,
             response_head: &ChunkingStation,
             waker: &Arc<Waker>,
@@ -398,13 +407,15 @@ mod request_hndlr {
                                 };
 
                             if let Some(resp) = &mut response {
-                                resp.attach_chunk_sender(response_sender.clone());
+                                resp.attach_chunk_sender(response_sender_low);
                             }
                             warn!("reponse [{:#?}]", response);
-                            client
-                                .conn()
-                                .stream_shutdown(stream_id, quiche::Shutdown::Read, 0)
-                                .unwrap();
+                            /*
+                                                        client
+                                                            .conn()
+                                                            .stream_shutdown(stream_id, quiche::Shutdown::Read, 0)
+                                                            .unwrap();
+                            */
                             if let Ok((headers, body)) = route_form.build_response(
                                 stream_id,
                                 &scid,
@@ -419,10 +430,10 @@ mod request_hndlr {
                                                 &scid,
                                                 headers.clone(),
                                                 false,
-                                                Some(body.clone()),
+                                                Some(body),
                                                 crate::request_response::HeaderPriority::SendHeader,
                                             );
-                                        if let Err(_) = response_sender
+                                        if let Err(_) = response_sender_high
                                             .send(QueuedRequest::new_header(header_req))
                                         {
                                             error!("Failed to send header_req")
@@ -454,7 +465,7 @@ mod request_hndlr {
                                                 None,
                                                 crate::request_response::HeaderPriority::SendHeader,
                                             );
-                                        if let Err(_) = response_sender
+                                        if let Err(_) = response_sender_high
                                             .send(QueuedRequest::new_header(header_req))
                                         {
                                             error!("Failed to send header_req")
