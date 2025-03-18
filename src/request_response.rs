@@ -67,6 +67,8 @@ mod response_queue_implementation {
 mod chunking_implementation {
     use core::panic;
     use std::{
+        backtrace,
+        collections::HashMap,
         fs::{self, metadata, Metadata},
         io::{BufRead, BufReader, Cursor},
         path::Path,
@@ -140,68 +142,156 @@ mod chunking_implementation {
         }
     }
 
+    fn average_pending_size(
+        round: &mut usize,
+        total: &mut usize,
+        buffer_size: usize,
+        range: usize,
+        client_quantity: usize,
+    ) -> Option<usize> {
+        *total += buffer_size;
+
+        if *round % range == 0 {
+            let average = (*total as f32 / range as f32) as usize / client_quantity;
+            warn!("average  = [{}]", average as f32);
+            *total = 0;
+            *round = 0;
+            return Some(average);
+        }
+        None
+    }
+
+    ///
+    ///____________________________________
+    ///
+    fn adjust_back_pressure(
+        total: &mut usize,
+        pending_buffer_usage_map: &Arc<Mutex<HashMap<Scid, HashMap<StreamId, usize>>>>,
+        thres: usize,
+        round: &mut usize,
+    ) -> (Option<usize>, bool) {
+        let client_quantity = pending_buffer_usage_map.lock().unwrap().len();
+        let mut buffer_size_total = 0;
+        let mut stream_quantity = 0;
+        for client in pending_buffer_usage_map.lock().unwrap().iter() {
+            for buffer in client.1.iter() {
+                let buffer_size = buffer.1;
+                stream_quantity += 1;
+                buffer_size_total += buffer_size;
+            }
+        }
+        if stream_quantity > 0 {
+            let buffer_size_average = buffer_size_total / stream_quantity;
+
+            let average_q =
+                average_pending_size(round, total, buffer_size_average, 10, client_quantity);
+            if buffer_size_average < thres {
+                (average_q, true)
+            } else {
+                (average_q, false)
+            }
+        } else {
+            (None, true)
+        }
+    }
+
     const CHUNK_SIZE: usize = 1350;
+
+    type Scid = Vec<u8>;
+    type StreamId = u64;
 
     pub fn run_worker(
         last_time_spend: &Arc<Mutex<Duration>>,
         waker: &Arc<Waker>,
         receiver: crossbeam_channel::Receiver<ChunkableBody>,
         resender: crossbeam_channel::Sender<ChunkableBody>,
+        pending_buffer_usage_map: Arc<Mutex<HashMap<Scid, HashMap<StreamId, usize>>>>,
     ) {
         let waker = waker.clone();
+        let max_pacing = 900;
+        let min_pacing = 60;
         let last_time_spend = last_time_spend.clone();
         let mut sended = 0usize;
+        let pending_buffer_map = pending_buffer_usage_map.clone();
         std::thread::spawn(move || {
-            let default_pacing = Duration::from_micros(115);
+            let mut pacing_micro_q = 159;
+            let mut default_pacing = Duration::from_micros(pacing_micro_q);
             let mut buf_read = [0; CHUNK_SIZE];
-            while let Ok(mut chunkable) = receiver.recv() {
-                let start = Instant::now();
-                let last_duration = *last_time_spend.lock().unwrap();
+            let mut round = 0;
+            let mut total = 0;
+            let back_pressure_threshold = 1;
+            'read: loop {
+                round += 1;
+                let (average_quantity_in_pending, can_send) =
+                    adjust_back_pressure(&mut total, &pending_buffer_usage_map, 1, &mut round);
 
-                let duration = if last_duration < default_pacing {
-                    default_pacing
-                } else {
-                    default_pacing
-                };
+                if let Some(average_current_quantity) = average_quantity_in_pending {
+                    if average_current_quantity > back_pressure_threshold {
+                        if pacing_micro_q < max_pacing {
+                            pacing_micro_q += 1;
+                        }
+                        warn!("pace [{pacing_micro_q}]");
+                        default_pacing = Duration::from_micros(pacing_micro_q);
+                    } else if average_current_quantity <= average_current_quantity {
+                        if pacing_micro_q > min_pacing {
+                            pacing_micro_q -= 20;
+                        }
+                        warn!("pace [{pacing_micro_q}]");
+                        default_pacing = Duration::from_micros(pacing_micro_q);
+                    }
+                }
 
-                std::thread::sleep(default_pacing);
-                if let Ok(n) = chunkable.reader.read(&mut buf_read) {
-                    let is_end = if n + chunkable.bytes_written == chunkable.body_len {
-                        true
+                if !can_send {
+                    continue 'read;
+                }
+
+                if let Ok(mut chunkable) = receiver.recv() {
+                    let start = Instant::now();
+                    let last_duration = *last_time_spend.lock().unwrap();
+
+                    let duration = if last_duration < default_pacing {
+                        default_pacing
                     } else {
-                        false
+                        default_pacing
                     };
-                    if let Err(e) =
-                        chunkable
-                            .sender
-                            .send(QueuedRequest::new_body(BodyRequest::new(
-                                chunkable.stream_id,
-                                chunkable.conn_id.as_str(),
-                                &chunkable.scid,
-                                chunkable.packet_id,
-                                buf_read[..n].to_vec(),
-                                is_end,
-                            )))
-                    {
-                        error!(
-                            "Failed sending body request to conn [{}] at packet [{}] [{:?}]",
-                            chunkable.conn_id, chunkable.packet_id, e
-                        );
-                        panic!("");
-                    }
-                    sended += 1;
-                    chunkable.packet_id += 1;
-                    chunkable.bytes_written += n;
-                    if let Err(e) = waker.wake() {
-                        panic!("error f waking [{:?}]", e)
-                    }
-                    if sended % 1000 == 0 {
-                        sended = 0;
-                    }
-                    //repush the unfinished read in the channel
-                    if !is_end {
-                        if let Err(_) = resender.send(chunkable) {
-                            error!("Failed to resend chunkable body")
+
+                    std::thread::sleep(default_pacing);
+                    if let Ok(n) = chunkable.reader.read(&mut buf_read) {
+                        let is_end = if n + chunkable.bytes_written == chunkable.body_len {
+                            true
+                        } else {
+                            false
+                        };
+                        let queuable_item = QueuedRequest::new_body(BodyRequest::new(
+                            chunkable.stream_id,
+                            chunkable.conn_id.as_str(),
+                            &chunkable.scid,
+                            chunkable.packet_id,
+                            buf_read[..n].to_vec(),
+                            is_end,
+                        ));
+
+                        if let Err(e) = chunkable.sender.send(queuable_item) {
+                            error!(
+                                "Failed sending body request to conn [{}] at packet [{}] [{:?}]",
+                                chunkable.conn_id, chunkable.packet_id, e
+                            );
+                            panic!("");
+                        }
+                        sended += 1;
+                        chunkable.packet_id += 1;
+                        chunkable.bytes_written += n;
+                        if let Err(e) = waker.wake() {
+                            panic!("error f waking [{:?}]", e)
+                        }
+                        if sended % 1000 == 0 {
+                            sended = 0;
+                        }
+                        //repush the unfinished read in the channel
+                        if !is_end {
+                            if let Err(_) = resender.send(chunkable) {
+                                error!("Failed to resend chunkable body")
+                            }
                         }
                     }
                 }
@@ -211,6 +301,7 @@ mod chunking_implementation {
 }
 mod response_queue {
     use std::{
+        collections::HashMap,
         sync::{Arc, Mutex},
         time::Duration,
     };
@@ -226,6 +317,9 @@ mod response_queue {
         BodyType,
     };
 
+    type Scid = Vec<u8>;
+    type StreamId = u64;
+
     ///____________________________________
     ///Channel to send a body to be chunked before sending to peer.
     pub struct ChunkingStation {
@@ -234,12 +328,15 @@ mod response_queue {
             crossbeam_channel::Receiver<ChunkableBody>,
         ),
         waker: Arc<Waker>,
+        pending_buffer_usage_map: Arc<Mutex<HashMap<Scid, HashMap<StreamId, usize>>>>,
     }
     impl ChunkingStation {
         pub fn new(waker: Arc<Waker>, last_time_spend: Arc<Mutex<Duration>>) -> Self {
+            let pending_buffer_usage_map = Arc::new(Mutex::new(HashMap::new()));
             let chunking_station = Self {
                 station_channel: crossbeam_channel::unbounded(),
                 waker,
+                pending_buffer_usage_map: pending_buffer_usage_map.clone(),
             };
 
             chunking_implementation::run_worker(
@@ -247,11 +344,15 @@ mod response_queue {
                 &chunking_station.waker,
                 chunking_station.station_channel.1.clone(),
                 chunking_station.station_channel.0.clone(),
+                pending_buffer_usage_map,
             );
 
             chunking_station
         }
 
+        pub fn set_pending_buffers_usage(&self, map: HashMap<Vec<u8>, HashMap<u64, usize>>) {
+            *self.pending_buffer_usage_map.lock().unwrap() = map;
+        }
         pub fn send_response(&self, msg: BodyType, last_time_spend: &Arc<Mutex<Duration>>) {
             match msg {
                 BodyType::Data {

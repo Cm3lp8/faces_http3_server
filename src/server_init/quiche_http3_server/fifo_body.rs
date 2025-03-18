@@ -30,6 +30,15 @@ mod queue_implementation {
                 queue: HashMap::new(),
             }
         }
+        pub fn buffer_size_per_stream(&self) -> HashMap<u64, usize> {
+            let mut map = HashMap::new();
+
+            for (k, q) in self.queue.iter() {
+                map.insert(*k, q.len());
+            }
+
+            map
+        }
         pub fn max_pending_queue(&self) -> Option<(u64, usize)> {
             if let Some(item) = self.queue.iter().max_by_key(|item| item.1.len()) {
                 Some((*item.0, item.1.len()))

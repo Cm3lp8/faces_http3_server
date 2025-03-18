@@ -19,7 +19,7 @@ use std::rc::Rc;
 mod fifo_body;
 
 pub use Client as QClient;
-const MAX_DATAGRAM_SIZE: usize = 1350;
+const MAX_DATAGRAM_SIZE: usize = 4096;
 const WAKER_TOKEN: Token = Token(1);
 struct PartialResponse {
     headers: Option<Vec<quiche::h3::Header>>,
@@ -105,7 +105,10 @@ impl Client {
 }
 type ClientMap = HashMap<quiche::ConnectionId<'static>, Client>;
 
+type Scid = Vec<u8>;
+type StreamId = u64;
 trait PriorityUpdate {
+    fn get_pending_buffers_usages(&self) -> HashMap<Scid, HashMap<StreamId, usize>>;
     fn priority_value_mut(&mut self, round: usize) -> Vec<&mut Client> {
         let vec = Vec::new();
         vec
@@ -116,6 +119,16 @@ trait PriorityUpdate {
 }
 
 impl PriorityUpdate for ClientMap {
+    fn get_pending_buffers_usages(&self) -> HashMap<Scid, HashMap<StreamId, usize>> {
+        let mut o = HashMap::new();
+
+        for client in self.values() {
+            let scid = client.conn.source_id().to_vec();
+            let buffer_size = client.pending_body_queue.buffer_size_per_stream();
+            o.insert(scid, buffer_size);
+        }
+        o
+    }
     fn has_too_much_pending(&self, thres: usize) -> bool {
         for (id, client) in self.iter() {
             if let Some((stream_id, queue_size)) = client.get_max_pending_queue_size() {
@@ -176,6 +189,7 @@ mod quiche_implementation {
         let mut buf = [0; 65535];
         let mut out = [0; MAX_DATAGRAM_SIZE];
 
+        let a_socket_time = Arc::new(Mutex::new(Duration::from_micros(100)));
         // Setup the event loop.
         let mut poll = mio::Poll::new().unwrap();
         let mut events = mio::Events::with_capacity(8192 * 16);
@@ -231,6 +245,7 @@ mod quiche_implementation {
         let mut total = 0;
         let mut send_packet_time = Instant::now();
         let mut round = 0;
+        //let mut last_instant: Option<Instant> = None;
         loop {
             round += 1;
             // Find the shorter timeout from all the active connections.
@@ -421,14 +436,6 @@ mod quiche_implementation {
                                 file_writer_channel.clone(),
                             );
                             req_recvd += 1;
-                            /*
-                            handle_request(
-                                client,
-                                stream_id,
-                                &list,
-                                &server_config.request_handler(),
-                            );
-                            */
                         }
                         Ok((stream_id, quiche::h3::Event::Data)) => {
                             while let Ok(read) =
@@ -506,7 +513,6 @@ mod quiche_implementation {
 
             'manage: {
                 if let Ok(mut response_body) = response_queue.pop_request() {
-                    //std::thread::sleep(socket_time);
                     let scid = response_body.scid();
                     let connexion_id = ConnectionId::from_vec(scid.to_vec());
                     let stream_id = response_body.stream_id();
@@ -653,24 +659,14 @@ mod quiche_implementation {
                                 continue;
                             }
                             if queue.len() == 0 {
-                                //  if client.partial_responses.get(&stream_id).is_some() {
-                                //    if let Some(_val) = handle_writable(client, stream_id) {}
-                                //  continue;
-                                //}
                                 continue;
                             }
-                            /*
-                            if client.partial_responses.get(&stream_id).is_some() {
-                                if let Some(_val) = handle_writable(client, stream_id) {}
-                                continue;
-                            }*/
-                            let mut item = queue.pop_front().unwrap();
-
-                            if item.len() > client.conn.stream_capacity(stream_id).unwrap() {
+                            //this 1350 value should be sync with the one used in chunkingsStation
+                            if 1350 > client.conn.stream_capacity(stream_id).unwrap() {
                                 if stream_id == 0 {}
-                                queue.push_front(item);
                                 continue;
                             }
+                            let mut item = queue.pop_front().unwrap();
 
                             match item {
                                 QueuedRequest::Header(ref mut content) => {
@@ -793,6 +789,7 @@ mod quiche_implementation {
                     }
                 }
 
+                chunking_station.set_pending_buffers_usage(clients.get_pending_buffers_usages());
                 'wake: {
                     for client in clients.values() {
                         for stream_id in client.pending_body_queue.stream_vec() {
@@ -831,12 +828,11 @@ mod quiche_implementation {
                             }
                         }
             */
-            let pacing_delay = Duration::from_micros(311);
-            let mut send_duration = Instant::now();
             let mut has_blocked = false;
             for client in clients.values_mut() {
                 let mut packet_send = 0;
                 loop {
+                    let mut send_duration = Instant::now();
                     let (write, send_info) = match client.conn.send(&mut out) {
                         Ok(v) => v,
                         Err(quiche::Error::Done) => {
@@ -849,32 +845,35 @@ mod quiche_implementation {
                             break;
                         }
                     };
+                    let t = send_info.at.duration_since(send_duration);
+
+                    let current_instant = send_info.at;
                     if let Err(e) = socket.send_to(&out[..write], send_info.to) {
                         if e.kind() == std::io::ErrorKind::WouldBlock {
                             debug!("send() would block, [{:?}]", e);
+                            std::thread::sleep(*a_socket_time.lock().unwrap());
+
                             has_blocked = true;
                             break;
                         }
                         panic!("send() failed: {:?}", e);
                     }
+                    //if let Some(last_instant) = &mut last_instant {
                     debug!("\n{} written {} bytes", client.conn.trace_id(), write);
                     //  println!("{} written {} bytes", client.conn.trace_id(), write);
                     packet_send += 1;
-                    if packet_send >= 10 {
+                    if packet_send >= 100 {
                         break;
-                    }
-
-                    while send_duration.elapsed() < pacing_delay {
-                        std::thread::yield_now();
                     }
                 }
                 //std::thread::sleep(Duration::from_micros(500));
             }
+            /*
             socket_time = if has_blocked {
-                send_duration.elapsed()
+                // send_duration.elapsed()
             } else {
                 socket_time
-            };
+            };*/
             *last_time_spend.lock().unwrap() = send_packet_time.elapsed();
             send_packet_time = Instant::now();
             // Garbage collect closed connections.
