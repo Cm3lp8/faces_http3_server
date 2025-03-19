@@ -63,6 +63,11 @@ mod queue_implementation {
                 self.queue.insert(stream_id, queue);
             }
         }
+        ///___________________________________________________
+        ///Remove the queue associated with the stream,
+        pub fn remove_stream_queue(&mut self, stream_id: u64) {
+            self.queue.remove(&stream_id);
+        }
         ///_______________________________
         ///Push front the element in the fifo in the corresponding stream queue
         ///if stream is none, stream Vedeque is updated to keep track of futures iterations.

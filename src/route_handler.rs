@@ -255,33 +255,17 @@ mod request_hndlr {
                                         }
                                     }
                                     None => {
-                                        if let Err(_) =
-                                            quiche_http3_server::send_response_when_finished(
-                                                client,
+                                        if let Err(_) = response_sender_high.send(
+                                            QueuedRequest::new_body(BodyRequest::new(
                                                 stream_id,
-                                                headers,
+                                                conn_id,
+                                                scid,
+                                                0,
                                                 vec![],
                                                 true,
-                                            )
-                                        {
-                                            error!(
-                                        "Failed to send response after a post request [{:?}]",
-                                        stream_id
-                                    )
-                                        } else {
-                                            match client.conn().stream_shutdown(
-                                                stream_id,
-                                                quiche::Shutdown::Read,
-                                                0,
-                                            ) {
-                                                Ok(_v) => {}
-                                                Err(e) => {
-                                                    error!(
-                                        "error stream_shutdown stream_id [{stream_id}] [{:?}]",
-                                        e
-                                    )
-                                                }
-                                            }
+                                            )),
+                                        ) {
+                                            error!("Failed to send header_req")
                                         }
                                     }
                                 }

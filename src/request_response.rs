@@ -153,7 +153,6 @@ mod chunking_implementation {
 
         if *round % range == 0 {
             let average = (*total as f32 / range as f32) as usize / client_quantity;
-            warn!("average  = [{}]", average as f32);
             *total = 0;
             *round = 0;
             return Some(average);
@@ -223,20 +222,18 @@ mod chunking_implementation {
             'read: loop {
                 round += 1;
                 let (average_quantity_in_pending, can_send) =
-                    adjust_back_pressure(&mut total, &pending_buffer_usage_map, 1, &mut round);
+                    adjust_back_pressure(&mut total, &pending_buffer_usage_map, 20, &mut round);
 
                 if let Some(average_current_quantity) = average_quantity_in_pending {
                     if average_current_quantity > back_pressure_threshold {
                         if pacing_micro_q < max_pacing {
                             pacing_micro_q += 1;
                         }
-                        warn!("pace [{pacing_micro_q}]");
                         default_pacing = Duration::from_micros(pacing_micro_q);
                     } else if average_current_quantity <= average_current_quantity {
                         if pacing_micro_q > min_pacing {
                             pacing_micro_q -= 20;
                         }
-                        warn!("pace [{pacing_micro_q}]");
                         default_pacing = Duration::from_micros(pacing_micro_q);
                     }
                 }

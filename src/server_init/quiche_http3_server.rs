@@ -548,6 +548,9 @@ mod quiche_implementation {
                                         if is_end {
                                             send_body_response(client, stream_id, vec![], is_end)
                                                 .unwrap();
+                                            client
+                                                .pending_body_queue
+                                                .remove_stream_queue(stream_id);
                                         }
                                         if let Err(e) = waker_clone.wake() {}
                                     }
@@ -774,6 +777,10 @@ mod quiche_implementation {
                                         ) {
                                             client.pending_body_queue.push_item_on_front(item);
                                             error!("Afailed to send final header for stream [{stream_id}]");
+                                        } else {
+                                            client
+                                                .pending_body_queue
+                                                .remove_stream_queue(stream_id);
                                         }
                                         if let Err(_e) = waker_clone.wake() {
                                             error!("failed to wake poll");
@@ -806,28 +813,27 @@ mod quiche_implementation {
                 }
             }
 
-            /*
-                        for client in clients.priority_value_mut(round) {
-                            let str_v = client.pending_body_queue.stream_vec();
-                            if let Some(it) = client.pending_body_queue.for_stream() {
-                                for (stream_id, queue) in it {
-                                    let r = client.get_written(*stream_id);
-                                    if r.0 % 60000 == 0
-                                        || r.0 % 60001 == 0
-                                        || r.0 % 60004 == 0
-                                        || r.0 % 1350 * 20 == 0
-                                        || (r.0 % 1350 * 20) - 3 == 0
-                                        || (r.0 % 1350 * 20) - 2 == 0
-                                        || (r.0 % 1350 * 20) - 1 == 0
-                                    {
-                                        println!("------------------------------------------------------------------");
-                                        info!("bytes written [{:?}] in queue -> [{}] for stream [{stream_id}] conn [{:?}] str_t{:?}", client.get_written(*stream_id), queue.len(), client.conn.trace_id(), str_v);
-                                        println!("------------------------------------------------------------------");
-                                    }
-                                }
-                            }
+            for client in clients.priority_value_mut(round) {
+                let str_v = client.pending_body_queue.stream_vec();
+                if let Some(it) = client.pending_body_queue.for_stream() {
+                    for (stream_id, queue) in it {
+                        let r = client.get_written(*stream_id);
+                        if r.0 % 60000 == 0
+                            || r.0 % 60001 == 0
+                            || r.0 % 60004 == 0
+                            || r.0 % 1350 * 20 == 0
+                            || (r.0 % 1350 * 20) - 3 == 0
+                            || (r.0 % 1350 * 20) - 2 == 0
+                            || (r.0 % 1350 * 20) - 1 == 0
+                        {
+                            println!("------------------------------------------------------------------");
+                            info!("bytes written [{:?}] in queue -> [{}] for stream [{stream_id}] conn [{:?}] str_t{:?}", client.get_written(*stream_id), queue.len(), client.conn.trace_id(), str_v);
+                            println!("------------------------------------------------------------------");
                         }
-            */
+                    }
+                }
+            }
+
             let mut has_blocked = false;
             for client in clients.values_mut() {
                 let mut packet_send = 0;
