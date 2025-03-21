@@ -42,7 +42,7 @@ fn main() {
                         );
                     }
                     if let Err(e) =
-                        response_builder.send_ok_200_with_file("/home/camille/Vidéos/vid.mp4")
+                        response_builder.send_ok_200_with_file("/home/camille/Vidéos/vid2.mp4")
                     {
                         log::error!("Failed to send response");
                     }

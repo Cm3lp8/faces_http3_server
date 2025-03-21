@@ -19,7 +19,7 @@ use std::rc::Rc;
 mod fifo_body;
 
 pub use Client as QClient;
-const MAX_DATAGRAM_SIZE: usize = 4096;
+const MAX_DATAGRAM_SIZE: usize = 1350;
 const WAKER_TOKEN: Token = Token(1);
 struct PartialResponse {
     headers: Option<Vec<quiche::h3::Header>>,
@@ -123,6 +123,9 @@ impl PriorityUpdate for ClientMap {
         let mut o = HashMap::new();
 
         for client in self.values() {
+            if client.conn_ref().is_closed() {
+                continue;
+            }
             let scid = client.conn.source_id().to_vec();
             let buffer_size = client.pending_body_queue.buffer_size_per_stream();
             o.insert(scid, buffer_size);
@@ -255,7 +258,13 @@ mod quiche_implementation {
             poll.poll(&mut events, timeout).unwrap();
             // Read incoming UDP packets from the socket and feed them to quiche,
             // until there are no more packets to read.
+
+            let mut read_loop_count = 0;
             'read: loop {
+                read_loop_count += 1;
+                if read_loop_count > 50 {
+                    break 'read;
+                }
                 // If the event loop reported no events, it means that the timeout
                 // has expired, so handle it without attempting to read packets. We
                 // will then proceed with the send loop.
@@ -418,231 +427,267 @@ mod quiche_implementation {
                     // Process HTTP/3 events.
                     let mut req_recvd = 0;
                     //  while req_recvd < 10 {
-                    let http3_conn = client.http3_conn.as_mut().unwrap();
-                    match http3_conn.poll(&mut client.conn) {
-                        Ok((stream_id, quiche::h3::Event::Headers { list, more_frames })) => {
-                            route_manager.routes_handler().parse_headers(
-                                &server_config,
-                                &list,
-                                stream_id,
-                                client,
-                                &mut socket,
-                                response_queue.get_high_priority_sender(),
-                                response_queue.get_low_priority_sender(),
-                                more_frames,
-                                &chunking_station,
-                                &waker_clone,
-                                &last_time_spend,
-                                file_writer_channel.clone(),
-                            );
-                            req_recvd += 1;
-                        }
-                        Ok((stream_id, quiche::h3::Event::Data)) => {
-                            while let Ok(read) =
-                                http3_conn.recv_body(&mut client.conn, stream_id, &mut out)
-                            {
-                                let scid = client.conn.source_id().as_ref().to_vec();
-                                if let Err(_) = route_manager.routes_handler().write_body_packet(
+                    let mut h3_read_count = 0;
+                    let max_read = 3000;
+                    'h3_read: loop {
+                        h3_read_count += 1;
+
+                        let http3_conn = client.http3_conn.as_mut().unwrap();
+                        match http3_conn.poll(&mut client.conn) {
+                            Ok((stream_id, quiche::h3::Event::Headers { list, more_frames })) => {
+                                route_manager.routes_handler().parse_headers(
+                                    &server_config,
+                                    &list,
                                     stream_id,
-                                    &scid,
-                                    client.conn.trace_id(),
-                                    &out[..read],
-                                    false,
-                                ) {
-                                    error!("Failed writing body packet on stream_id [{stream_id}]");
-                                }
-                                total += read;
+                                    client,
+                                    &mut socket,
+                                    response_queue.get_high_priority_sender(),
+                                    response_queue.get_low_priority_sender(),
+                                    more_frames,
+                                    &chunking_station,
+                                    &waker_clone,
+                                    &last_time_spend,
+                                    file_writer_channel.clone(),
+                                );
                                 req_recvd += 1;
                             }
-                            let trace_id = client.conn.trace_id().to_string();
+                            Ok((stream_id, quiche::h3::Event::Data)) => {
+                                while let Ok(read) =
+                                    http3_conn.recv_body(&mut client.conn, stream_id, &mut out)
+                                {
+                                    let scid = client.conn.source_id().as_ref().to_vec();
+                                    if let Err(_) =
+                                        route_manager.routes_handler().write_body_packet(
+                                            stream_id,
+                                            &scid,
+                                            client.conn.trace_id(),
+                                            &out[..read],
+                                            false,
+                                        )
+                                    {
+                                        error!(
+                                            "Failed writing body packet on stream_id [{stream_id}]"
+                                        );
+                                    }
+                                    total += read;
+                                    req_recvd += 1;
+                                }
+                                let trace_id = client.conn.trace_id().to_string();
 
-                            if let Err(_) = route_manager.routes_handler().send_reception_status(
-                                client,
-                                response_queue.get_high_priority_sender(),
-                                response_queue.get_low_priority_sender(),
-                                stream_id,
-                                trace_id.as_str(),
-                            ) {
-                                error!("Failed to send progress response status")
+                                if let Err(_) =
+                                    route_manager.routes_handler().send_reception_status(
+                                        client,
+                                        response_queue.get_high_priority_sender(),
+                                        response_queue.get_low_priority_sender(),
+                                        stream_id,
+                                        trace_id.as_str(),
+                                    )
+                                {
+                                    error!("Failed to send progress response status")
+                                }
+                            }
+                            Ok((stream_id, quiche::h3::Event::Finished)) => {
+                                info!("\n finished ! stream [{}] send now OK 200 ? \n", stream_id);
+                                let trace_id = client.conn.trace_id().to_owned();
+                                let scid = client.conn.source_id().as_ref().to_vec();
+
+                                route_manager.routes_handler().handle_finished_stream(
+                                    trace_id.as_str(),
+                                    &scid,
+                                    stream_id,
+                                    client,
+                                    response_queue.get_high_priority_sender(),
+                                    response_queue.get_low_priority_sender(),
+                                    &chunking_station,
+                                    &waker_clone,
+                                    &last_time_spend,
+                                );
+                                ()
+                            }
+                            Ok((_stream_id, quiche::h3::Event::Reset { .. })) => (),
+                            Ok((_prioritized_element_id, quiche::h3::Event::PriorityUpdate)) => {
+                                debug!("prioritytupdate");
+                                ()
+                            }
+                            Ok((_goaway_id, quiche::h3::Event::GoAway)) => {
+                                debug!("GoAway");
+                                ()
+                            }
+                            Err(quiche::h3::Error::Done) => {
+                                break;
+                            }
+                            Err(e) => {
+                                error!("{} HTTP/3 error {:?}", client.conn.trace_id(), e);
+                                break;
                             }
                         }
-                        Ok((stream_id, quiche::h3::Event::Finished)) => {
-                            info!("\n finished ! stream [{}] send now OK 200 ? \n", stream_id);
-                            let trace_id = client.conn.trace_id().to_owned();
-                            let scid = client.conn.source_id().as_ref().to_vec();
-
-                            route_manager.routes_handler().handle_finished_stream(
-                                trace_id.as_str(),
-                                &scid,
-                                stream_id,
-                                client,
-                                response_queue.get_high_priority_sender(),
-                                response_queue.get_low_priority_sender(),
-                                &chunking_station,
-                                &waker_clone,
-                                &last_time_spend,
-                            );
-                            ()
-                        }
-                        Ok((_stream_id, quiche::h3::Event::Reset { .. })) => (),
-                        Ok((_prioritized_element_id, quiche::h3::Event::PriorityUpdate)) => {
-                            debug!("prioritytupdate");
-                            ()
-                        }
-                        Ok((_goaway_id, quiche::h3::Event::GoAway)) => {
-                            debug!("GoAway");
-                            ()
-                        }
-                        Err(quiche::h3::Error::Done) => {
-                            break;
-                        }
-                        Err(e) => {
-                            error!("{} HTTP/3 error {:?}", client.conn.trace_id(), e);
-                            break;
+                        // }
+                        if read_loop_count > max_read {
+                            break 'h3_read;
                         }
                     }
-                    // }
                 }
             }
-            if round % 100 == 0 {
-                std::thread::sleep(Duration::from_millis(3));
-            }
+
             // Generate outgoing QUIC packets for all active connections and send
             // them on the UDP socket, until quiche reports that there are no more
             // packets to be sent.
 
             'manage: {
-                if let Ok(mut response_body) = response_queue.pop_request() {
-                    let scid = response_body.scid();
-                    let connexion_id = ConnectionId::from_vec(scid.to_vec());
-                    let stream_id = response_body.stream_id();
+                'intra: {
+                    if let Ok(mut response_body) = response_queue.pop_request() {
+                        let scid = response_body.scid();
+                        let connexion_id = ConnectionId::from_vec(scid.to_vec());
+                        let stream_id = response_body.stream_id();
 
-                    if let Some(client) = clients.get_mut(&connexion_id) {
-                        if !client.pending_body_queue.is_stream_queue_empty(stream_id)
-                            | client.partial_responses.get(&stream_id).is_some()
-                        {
-                            client.pending_body_queue.push_item(response_body);
-                        } else {
-                            if response_body.len() > client.conn.stream_capacity(stream_id).unwrap()
+                        if let Some(client) = clients.get_mut(&connexion_id) {
+                            if client.conn().is_closed() {
+                                break 'intra;
+                            }
+                            if !client.pending_body_queue.is_stream_queue_empty(stream_id)
+                                | client.partial_responses.get(&stream_id).is_some()
                             {
                                 client.pending_body_queue.push_item(response_body);
                             } else {
-                                match response_body {
-                                    QueuedRequest::Body(ref mut content) => {
-                                        if let Err(e) = send_body_response(
-                                            client,
-                                            content.stream_id(),
-                                            content.take_data(),
-                                            false,
-                                        ) {
-                                            client
-                                                .pending_body_queue
-                                                .push_item_on_front(response_body);
-
-                                            if let Err(_e) = waker_clone.wake() {
-                                                error!("failed to wake poll");
+                                if response_body.len()
+                                    > client.conn.stream_capacity(stream_id).unwrap_or(0)
+                                {
+                                    client.pending_body_queue.push_item(response_body);
+                                } else {
+                                    match response_body {
+                                        QueuedRequest::Body(ref mut content) => {
+                                            if client.conn().is_closed() {
+                                                break 'intra;
                                             }
-                                        };
-                                        let is_end = client.is_body_totally_written(stream_id);
+                                            if let Err(e) = send_body_response(
+                                                client,
+                                                content.stream_id(),
+                                                content.take_data(),
+                                                false,
+                                            ) {
+                                                client
+                                                    .pending_body_queue
+                                                    .push_item_on_front(response_body);
 
-                                        if is_end {
-                                            send_body_response(client, stream_id, vec![], is_end)
+                                                if let Err(_e) = waker_clone.wake() {
+                                                    error!("failed to wake poll");
+                                                }
+                                            };
+                                            let is_end = client.is_body_totally_written(stream_id);
+
+                                            if is_end {
+                                                send_body_response(
+                                                    client,
+                                                    stream_id,
+                                                    vec![],
+                                                    is_end,
+                                                )
                                                 .unwrap();
-                                            client
-                                                .pending_body_queue
-                                                .remove_stream_queue(stream_id);
+                                                client
+                                                    .pending_body_queue
+                                                    .remove_stream_queue(stream_id);
+                                            }
+                                            if let Err(e) = waker_clone.wake() {}
                                         }
-                                        if let Err(e) = waker_clone.wake() {}
-                                    }
-                                    QueuedRequest::Header(ref mut content) => {
-                                        let headers = content.get_headers().to_vec();
-                                        let is_end = content.is_end();
-                                        let attached_body_len = content.attached_body_len();
+                                        QueuedRequest::Header(ref mut content) => {
+                                            let headers = content.get_headers().to_vec();
+                                            let is_end = content.is_end();
+                                            let attached_body_len = content.attached_body_len();
 
-                                        match content.priority_mode() {
-                                            HeaderPriority::SendHeader => {
-                                                if let Ok(n) = quiche_http3_server::send_header(
-                                                    client,
-                                                    stream_id,
-                                                    headers.to_vec(),
-                                                    is_end,
-                                                ) {
-                                                    client.set_headers_send(stream_id, true);
-                                                    if let Some(body_len) = attached_body_len {
-                                                        warn!("header bodylen [{:?}]", body_len);
-                                                        client
-                                                            .set_body_size_to_body_sending_tracker(
-                                                                stream_id, body_len,
-                                                            );
-                                                        content.send_body_to_chunking_station(
-                                                            &chunking_station,
-                                                            &last_time_spend,
-                                                        );
+                                            match content.priority_mode() {
+                                                HeaderPriority::SendHeader => {
+                                                    if client.conn().is_closed() {
+                                                        break 'intra;
                                                     }
-                                                    if let Err(e) = waker.wake() {
-                                                        error!("Failed to wake poll [{:?}]", e);
-                                                    };
-                                                } else {
-                                                    client
-                                                        .pending_body_queue
-                                                        .push_item_on_front(response_body);
-                                                }
-                                            }
-                                            HeaderPriority::SendHeader100 => {
-                                                if let Ok(n) = quiche_http3_server::send_header(
-                                                    client,
-                                                    stream_id,
-                                                    headers.to_vec(),
-                                                    is_end,
-                                                ) {
-                                                    route_manager
-                                                        .routes_handler()
-                                                        .set_intermediate_headers_send(
-                                                            stream_id, client,
-                                                        );
-
-                                                    if let Err(e) = waker.wake() {
-                                                        error!("Failed to wake poll [{:?}]", e);
-                                                    };
-                                                } else {
-                                                    client
-                                                        .pending_body_queue
-                                                        .push_item_on_front(response_body);
-                                                }
-                                            }
-                                            HeaderPriority::SendAdditionnalHeader => {
-                                                if let Ok(n) = quiche_http3_server::send_more_header(
-                                                    client,
-                                                    stream_id,
-                                                    headers.clone(),
-                                                    false,
-                                                ) {
-                                                    if let Some(body_len) = attached_body_len {
-                                                        client
+                                                    if let Ok(n) = quiche_http3_server::send_header(
+                                                        client,
+                                                        stream_id,
+                                                        headers.to_vec(),
+                                                        is_end,
+                                                    ) {
+                                                        client.set_headers_send(stream_id, true);
+                                                        if let Some(body_len) = attached_body_len {
+                                                            client
                                                             .set_body_size_to_body_sending_tracker(
                                                                 stream_id, body_len,
                                                             );
-                                                        info!(
-                                                            "Sendadd headers bodylen[{:?}]",
-                                                            body_len
-                                                        );
-                                                        client.set_headers_send(stream_id, true);
-
-                                                        content.send_body_to_chunking_station(
-                                                            &chunking_station,
-                                                            &last_time_spend,
-                                                        );
+                                                            content.send_body_to_chunking_station(
+                                                                &chunking_station,
+                                                                &last_time_spend,
+                                                            );
+                                                        }
                                                         if let Err(e) = waker.wake() {
                                                             error!("Failed to wake poll [{:?}]", e);
                                                         };
+                                                    } else {
+                                                        client
+                                                            .pending_body_queue
+                                                            .push_item_on_front(response_body);
                                                     }
-                                                } else {
-                                                    client
-                                                        .pending_body_queue
-                                                        .push_item_on_front(response_body);
                                                 }
+                                                HeaderPriority::SendHeader100 => {
+                                                    if let Ok(n) = quiche_http3_server::send_header(
+                                                        client,
+                                                        stream_id,
+                                                        headers.to_vec(),
+                                                        is_end,
+                                                    ) {
+                                                        route_manager
+                                                            .routes_handler()
+                                                            .set_intermediate_headers_send(
+                                                                stream_id, client,
+                                                            );
+
+                                                        /*
+                                                        if let Err(e) = waker.wake() {
+                                                            error!("Failed to wake poll [{:?}]", e);
+                                                        };*/
+                                                    } else {
+                                                        client
+                                                            .pending_body_queue
+                                                            .push_item_on_front(response_body);
+                                                    }
+                                                }
+                                                HeaderPriority::SendAdditionnalHeader => {
+                                                    if let Ok(n) =
+                                                        quiche_http3_server::send_more_header(
+                                                            client,
+                                                            stream_id,
+                                                            headers.clone(),
+                                                            content.is_end(),
+                                                        )
+                                                    {
+                                                        if let Some(body_len) = attached_body_len {
+                                                            client
+                                                            .set_body_size_to_body_sending_tracker(
+                                                                stream_id, body_len,
+                                                            );
+                                                            info!(
+                                                                "Sendadd headers bodylen[{:?}]",
+                                                                body_len
+                                                            );
+                                                            client
+                                                                .set_headers_send(stream_id, true);
+
+                                                            content.send_body_to_chunking_station(
+                                                                &chunking_station,
+                                                                &last_time_spend,
+                                                            ); /*
+                                                               if let Err(e) = waker.wake() {
+                                                                   error!(
+                                                                       "Failed to wake poll [{:?}]",
+                                                                       e
+                                                                   );
+                                                               };*/
+                                                        }
+                                                    } else {
+                                                        client
+                                                            .pending_body_queue
+                                                            .push_item_on_front(response_body);
+                                                    }
+                                                }
+                                                _ => {}
                                             }
-                                            _ => {}
                                         }
                                     }
                                 }
@@ -651,21 +696,27 @@ mod quiche_implementation {
                     }
                 }
                 for client in clients.values_mut() {
+                    if let Some((stream_id, _queue)) = client.pending_body_queue.next_stream() {
+                        if client.partial_responses.get(&stream_id).is_some() {
+                            if let Some(_val) = handle_writable(client, stream_id) {}
+                            if let Err(_e) = waker_clone.wake() {
+                                error!("failed to wake poll");
+                            }
+                        }
+                    }
+                }
+                for client in clients.values_mut() {
                     // Handle writable streams.
+                    if client.conn().is_closed() {
+                        continue;
+                    }
                     if let Some((stream_id, queue)) = client.pending_body_queue.next_stream() {
                         if let Some(queue) = queue {
-                            if client.partial_responses.get(&stream_id).is_some() {
-                                if let Some(_val) = handle_writable(client, stream_id) {}
-                                if let Err(_e) = waker_clone.wake() {
-                                    error!("failed to wake poll");
-                                }
-                                continue;
-                            }
                             if queue.len() == 0 {
                                 continue;
                             }
                             //this 1350 value should be sync with the one used in chunkingsStation
-                            if 1350 > client.conn.stream_capacity(stream_id).unwrap() {
+                            if 4096 * 2 > client.conn.stream_capacity(stream_id).unwrap_or(0) {
                                 if stream_id == 0 {}
                                 continue;
                             }
@@ -687,7 +738,6 @@ mod quiche_implementation {
                                             ) {
                                                 client.set_headers_send(stream_id, true);
                                                 if let Some(body_len) = attached_body_len {
-                                                    warn!("headerrefp bodylen [{:?}]", body_len);
                                                     client.set_body_size_to_body_sending_tracker(
                                                         stream_id, body_len,
                                                     );
@@ -728,13 +778,12 @@ mod quiche_implementation {
                                                 client,
                                                 stream_id,
                                                 headers.clone(),
-                                                false,
+                                                content.is_end(),
                                             ) {
                                                 if let Some(body_len) = attached_body_len {
                                                     client.set_body_size_to_body_sending_tracker(
                                                         stream_id, body_len,
                                                     );
-                                                    info!("Sendadd repo headers [{:?}]", body_len);
                                                     client.set_headers_send(stream_id, true);
 
                                                     content.send_body_to_chunking_station(
@@ -764,10 +813,6 @@ mod quiche_implementation {
                                     };
                                     let is_end =
                                         client.is_body_totally_written(content.stream_id());
-                                    let b_w = client.get_written(stream_id);
-                                    if b_w.0 > b_w.1 {
-                                        error!("is superior [{}]", stream_id);
-                                    }
                                     if is_end {
                                         if let Err(e) = send_body_response(
                                             client,
@@ -796,7 +841,7 @@ mod quiche_implementation {
                     }
                 }
 
-                chunking_station.set_pending_buffers_usage(clients.get_pending_buffers_usages());
+                // chunking_station.set_pending_buffers_usage(clients.get_pending_buffers_usages());
                 'wake: {
                     for client in clients.values() {
                         for stream_id in client.pending_body_queue.stream_vec() {
@@ -813,6 +858,7 @@ mod quiche_implementation {
                 }
             }
 
+            /*
             for client in clients.priority_value_mut(round) {
                 let str_v = client.pending_body_queue.stream_vec();
                 if let Some(it) = client.pending_body_queue.for_stream() {
@@ -832,7 +878,7 @@ mod quiche_implementation {
                         }
                     }
                 }
-            }
+            }*/
 
             let mut has_blocked = false;
             for client in clients.values_mut() {
@@ -853,11 +899,12 @@ mod quiche_implementation {
                     };
                     let t = send_info.at.duration_since(send_duration);
 
+                    std::thread::sleep(Duration::from_micros(60));
+
                     let current_instant = send_info.at;
                     if let Err(e) = socket.send_to(&out[..write], send_info.to) {
                         if e.kind() == std::io::ErrorKind::WouldBlock {
                             debug!("send() would block, [{:?}]", e);
-                            std::thread::sleep(*a_socket_time.lock().unwrap());
 
                             has_blocked = true;
                             break;
@@ -868,11 +915,10 @@ mod quiche_implementation {
                     debug!("\n{} written {} bytes", client.conn.trace_id(), write);
                     //  println!("{} written {} bytes", client.conn.trace_id(), write);
                     packet_send += 1;
-                    if packet_send >= 100 {
+                    if packet_send >= 200 {
                         break;
                     }
                 }
-                //std::thread::sleep(Duration::from_micros(500));
             }
             /*
             socket_time = if has_blocked {

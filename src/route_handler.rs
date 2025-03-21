@@ -255,16 +255,17 @@ mod request_hndlr {
                                         }
                                     }
                                     None => {
-                                        if let Err(_) = response_sender_high.send(
-                                            QueuedRequest::new_body(BodyRequest::new(
-                                                stream_id,
-                                                conn_id,
-                                                scid,
-                                                0,
-                                                vec![],
-                                                true,
-                                            )),
-                                        ) {
+                                        let (_recv_send_confirmation, header_req) = HeaderRequest::new(
+                                                  stream_id,
+                                                   &scid,
+                                                 headers.clone(),
+                                               true,
+                                            None,
+                                                   crate::request_response::HeaderPriority::SendAdditionnalHeader,
+                                                 );
+                                        if let Err(_) = response_sender_high
+                                            .send(QueuedRequest::new_header(header_req))
+                                        {
                                             error!("Failed to send header_req")
                                         }
                                     }
@@ -397,7 +398,7 @@ mod request_hndlr {
                             if let Some(resp) = &mut response {
                                 resp.attach_chunk_sender(response_sender_low);
                             }
-                            warn!("reponse [{:#?}]", response);
+                            warn!("reponse [{:?}]", response);
                             /*
                                                         client
                                                             .conn()
@@ -426,6 +427,7 @@ mod request_hndlr {
                                         {
                                             error!("Failed to send header_req")
                                         }
+                                        info!("sending post request");
 
                                         /*
                                                                                 if let Ok(n) = quiche_http3_server::send_header(

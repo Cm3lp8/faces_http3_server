@@ -183,18 +183,18 @@ mod chunking_implementation {
             let buffer_size_average = buffer_size_total / stream_quantity;
 
             let average_q =
-                average_pending_size(round, total, buffer_size_average, 10, client_quantity);
+                average_pending_size(round, total, buffer_size_average, 100, client_quantity);
             if buffer_size_average < thres {
                 (average_q, true)
             } else {
-                (average_q, false)
+                (average_q, true)
             }
         } else {
             (None, true)
         }
     }
 
-    const CHUNK_SIZE: usize = 1350;
+    const CHUNK_SIZE: usize = 4096 * 2;
 
     type Scid = Vec<u8>;
     type StreamId = u64;
@@ -207,41 +207,44 @@ mod chunking_implementation {
         pending_buffer_usage_map: Arc<Mutex<HashMap<Scid, HashMap<StreamId, usize>>>>,
     ) {
         let waker = waker.clone();
-        let max_pacing = 900;
+        let max_pacing = 80;
         let min_pacing = 60;
         let last_time_spend = last_time_spend.clone();
         let mut sended = 0usize;
         let pending_buffer_map = pending_buffer_usage_map.clone();
         std::thread::spawn(move || {
-            let mut pacing_micro_q = 159;
+            let mut pacing_micro_q = 19;
             let mut default_pacing = Duration::from_micros(pacing_micro_q);
             let mut buf_read = [0; CHUNK_SIZE];
             let mut round = 0;
             let mut total = 0;
             let back_pressure_threshold = 1;
+
             'read: loop {
                 round += 1;
-                let (average_quantity_in_pending, can_send) =
-                    adjust_back_pressure(&mut total, &pending_buffer_usage_map, 20, &mut round);
+                /*
+                                let (average_quantity_in_pending, can_send) =
+                                    adjust_back_pressure(&mut total, &pending_buffer_usage_map, 1, &mut round);
 
-                if let Some(average_current_quantity) = average_quantity_in_pending {
-                    if average_current_quantity > back_pressure_threshold {
-                        if pacing_micro_q < max_pacing {
-                            pacing_micro_q += 1;
-                        }
-                        default_pacing = Duration::from_micros(pacing_micro_q);
-                    } else if average_current_quantity <= average_current_quantity {
-                        if pacing_micro_q > min_pacing {
-                            pacing_micro_q -= 20;
-                        }
-                        default_pacing = Duration::from_micros(pacing_micro_q);
-                    }
-                }
+                                if let Some(average_current_quantity) = average_quantity_in_pending {
+                                    if average_current_quantity > back_pressure_threshold {
+                                        if pacing_micro_q < max_pacing {
+                                            pacing_micro_q += 1;
+                                        }
+                                        default_pacing = Duration::from_micros(pacing_micro_q);
+                                    } else if average_current_quantity <= average_current_quantity {
+                                        if pacing_micro_q > min_pacing {
+                                            pacing_micro_q -= 2;
+                                        }
+                                        default_pacing = Duration::from_micros(pacing_micro_q);
+                                    }
+                                }
 
-                if !can_send {
-                    continue 'read;
-                }
-
+                                if !can_send {
+                                    std::thread::sleep(default_pacing);
+                                    continue 'read;
+                                }
+                */
                 if let Ok(mut chunkable) = receiver.recv() {
                     let start = Instant::now();
                     let last_duration = *last_time_spend.lock().unwrap();
