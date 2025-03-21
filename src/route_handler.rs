@@ -109,9 +109,10 @@ mod request_hndlr {
                         }
                         {
                             if let Some(body) = reception_status.body() {
+                                /*
                                 response_sender_high.send(QueuedRequest::Body(BodyRequest::new(
                                     stream_id, conn_id, &scid, 0, body, false,
-                                )));
+                                )))*/
                                 /*
                                 if let Ok(stream_cap) = client.conn().stream_capacity(stream_id) {
                                     if stream_cap >= body.len() {

@@ -192,6 +192,7 @@ mod quiche_implementation {
         let mut buf = [0; 65535];
         let mut out = [0; MAX_DATAGRAM_SIZE];
 
+        let mut last_send_instant: Option<Instant> = None;
         let a_socket_time = Arc::new(Mutex::new(Duration::from_micros(100)));
         // Setup the event loop.
         let mut poll = mio::Poll::new().unwrap();
@@ -231,10 +232,10 @@ mod quiche_implementation {
         config.set_max_idle_timeout(20_000);
         config.set_max_recv_udp_payload_size(MAX_DATAGRAM_SIZE);
         config.set_max_send_udp_payload_size(MAX_DATAGRAM_SIZE);
-        config.set_initial_max_data(1_000_000_000);
-        config.set_initial_max_stream_data_bidi_local(1_500_000_000);
-        config.set_initial_max_stream_data_bidi_remote(1_500_000_000);
-        config.set_initial_max_stream_data_uni(10_000_000);
+        config.set_initial_max_data(100_000_000);
+        config.set_initial_max_stream_data_bidi_local(200_000_000);
+        config.set_initial_max_stream_data_bidi_remote(200_000_000);
+        config.set_initial_max_stream_data_uni(100_000_000);
         config.set_initial_max_streams_bidi(100);
         config.set_initial_max_streams_uni(100);
         config.set_disable_active_migration(true);
@@ -262,9 +263,6 @@ mod quiche_implementation {
             let mut read_loop_count = 0;
             'read: loop {
                 read_loop_count += 1;
-                if read_loop_count > 50 {
-                    break 'read;
-                }
                 // If the event loop reported no events, it means that the timeout
                 // has expired, so handle it without attempting to read packets. We
                 // will then proceed with the send loop.
@@ -428,7 +426,7 @@ mod quiche_implementation {
                     let mut req_recvd = 0;
                     //  while req_recvd < 10 {
                     let mut h3_read_count = 0;
-                    let max_read = 3000;
+                    let max_read = 1000;
                     'h3_read: loop {
                         h3_read_count += 1;
 
@@ -522,9 +520,6 @@ mod quiche_implementation {
                             }
                         }
                         // }
-                        if read_loop_count > max_read {
-                            break 'h3_read;
-                        }
                     }
                 }
             }
@@ -534,7 +529,9 @@ mod quiche_implementation {
             // packets to be sent.
 
             'manage: {
+                let mut stop = 0;
                 'intra: {
+                    stop += 1;
                     if let Ok(mut response_body) = response_queue.pop_request() {
                         let scid = response_body.scid();
                         let connexion_id = ConnectionId::from_vec(scid.to_vec());
@@ -695,6 +692,7 @@ mod quiche_implementation {
                         }
                     }
                 }
+                /*
                 for client in clients.values_mut() {
                     if let Some((stream_id, _queue)) = client.pending_body_queue.next_stream() {
                         if client.partial_responses.get(&stream_id).is_some() {
@@ -704,8 +702,16 @@ mod quiche_implementation {
                             }
                         }
                     }
-                }
+                }*/
                 for client in clients.values_mut() {
+                    if let Some((stream_id, _queue)) = client.pending_body_queue.next_stream() {
+                        if client.partial_responses.get(&stream_id).is_some() {
+                            if let Some(_val) = handle_writable(client, stream_id) {}
+                            if let Err(_e) = waker_clone.wake() {
+                                error!("failed to wake poll");
+                            }
+                        }
+                    }
                     // Handle writable streams.
                     if client.conn().is_closed() {
                         continue;
@@ -716,7 +722,7 @@ mod quiche_implementation {
                                 continue;
                             }
                             //this 1350 value should be sync with the one used in chunkingsStation
-                            if 4096 * 2 > client.conn.stream_capacity(stream_id).unwrap_or(0) {
+                            if 512 > client.conn.stream_capacity(stream_id).unwrap_or(0) {
                                 if stream_id == 0 {}
                                 continue;
                             }
@@ -880,11 +886,18 @@ mod quiche_implementation {
                 }
             }*/
 
-            let mut has_blocked = false;
             for client in clients.values_mut() {
-                let mut packet_send = 0;
                 loop {
-                    let mut send_duration = Instant::now();
+                    if let Some(last_instant) = last_send_instant {
+                        while Instant::now() <= last_instant {
+                            //        let _ = poll.poll(
+                            //          &mut events,
+                            //   while
+                            std::thread::yield_now();
+                            //    );
+                            //continue;
+                        }
+                    }
                     let (write, send_info) = match client.conn.send(&mut out) {
                         Ok(v) => v,
                         Err(quiche::Error::Done) => {
@@ -897,16 +910,12 @@ mod quiche_implementation {
                             break;
                         }
                     };
-                    let t = send_info.at.duration_since(send_duration);
+                    last_send_instant = Some(send_info.at);
 
-                    std::thread::sleep(Duration::from_micros(60));
-
-                    let current_instant = send_info.at;
                     if let Err(e) = socket.send_to(&out[..write], send_info.to) {
                         if e.kind() == std::io::ErrorKind::WouldBlock {
                             debug!("send() would block, [{:?}]", e);
 
-                            has_blocked = true;
                             break;
                         }
                         panic!("send() failed: {:?}", e);
@@ -914,10 +923,6 @@ mod quiche_implementation {
                     //if let Some(last_instant) = &mut last_instant {
                     debug!("\n{} written {} bytes", client.conn.trace_id(), write);
                     //  println!("{} written {} bytes", client.conn.trace_id(), write);
-                    packet_send += 1;
-                    if packet_send >= 200 {
-                        break;
-                    }
                 }
             }
             /*

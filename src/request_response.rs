@@ -194,7 +194,7 @@ mod chunking_implementation {
         }
     }
 
-    const CHUNK_SIZE: usize = 4096 * 2;
+    const CHUNK_SIZE: usize = 512;
 
     type Scid = Vec<u8>;
     type StreamId = u64;
@@ -214,7 +214,6 @@ mod chunking_implementation {
         let pending_buffer_map = pending_buffer_usage_map.clone();
         std::thread::spawn(move || {
             let mut pacing_micro_q = 19;
-            let mut default_pacing = Duration::from_micros(pacing_micro_q);
             let mut buf_read = [0; CHUNK_SIZE];
             let mut round = 0;
             let mut total = 0;
@@ -249,13 +248,6 @@ mod chunking_implementation {
                     let start = Instant::now();
                     let last_duration = *last_time_spend.lock().unwrap();
 
-                    let duration = if last_duration < default_pacing {
-                        default_pacing
-                    } else {
-                        default_pacing
-                    };
-
-                    std::thread::sleep(default_pacing);
                     if let Ok(n) = chunkable.reader.read(&mut buf_read) {
                         let is_end = if n + chunkable.bytes_written == chunkable.body_len {
                             true
