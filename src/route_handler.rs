@@ -19,7 +19,9 @@ mod request_hndlr {
 
     use crate::{
         file_writer::{FileWritable, FileWriterChannel},
-        request_response::{BodyRequest, ChunkingStation, HeaderRequest},
+        request_response::{
+            BodyRequest, ChunkSender, ChunkingStation, ChunksDispatchChannel, HeaderRequest,
+        },
         route_events::{self, EventType, RouteEvent},
         route_manager::{DataManagement, RouteManagerInner},
         server_config,
@@ -64,6 +66,7 @@ mod request_hndlr {
             response_sender_low: crossbeam_channel::Sender<QueuedRequest>,
             stream_id: u64,
             conn_id: &str,
+            chunk_dispatch_channel: &ChunksDispatchChannel,
         ) -> Result<usize, ()> {
             let guard = &*self.inner.lock().unwrap();
             let scid = client.conn().source_id().as_ref().to_vec();
@@ -88,17 +91,23 @@ mod request_hndlr {
                                                             .routes_states()
                                                             .set_intermediate_headers_send(stream_id, conn_id.to_string());
                             */
+
+                            let sender =
+                                chunk_dispatch_channel.insert_new_channel(stream_id, &scid);
                             let (_recv_send_confirmation, header_req) = HeaderRequest::new(
                                 stream_id,
                                 &scid,
                                 headers.clone(),
                                 false,
                                 None,
+                                None,
                                 crate::request_response::HeaderPriority::SendHeader100,
                             );
-                            if let Err(_) =
-                                response_sender_high.send(QueuedRequest::new_header(header_req))
-                            {
+                            if let Err(_) = chunk_dispatch_channel.send_to_high_priority_queue(
+                                stream_id,
+                                &scid,
+                                QueuedRequest::new_header(header_req),
+                            ) {
                                 error!("Failed to send header_req")
                             }
                             /*
@@ -110,7 +119,7 @@ mod request_hndlr {
                         {
                             if let Some(body) = reception_status.body() {
                                 /*
-                                response_sender_high.send(QueuedRequest::Body(BodyRequest::new(
+                                chunk_dispatch_channel.send_to_queue(stream_id, &scid,QueuedRequest::Body(BodyRequest::new(
                                     stream_id, conn_id, &scid, 0, body, false,
                                 )))*/
                                 /*
@@ -193,6 +202,15 @@ mod request_hndlr {
                     match route_form.method() {
                         H3Method::GET => {}
                         H3Method::POST => {
+                            chunking_station
+                                .get_chunking_dispatch_channel()
+                                .insert_new_channel(stream_id, scid);
+                            let body_sender = chunking_station
+                                .get_chunking_dispatch_channel()
+                                .get_low_priority_sender(stream_id, scid);
+                            let header_sender = chunking_station
+                                .get_chunking_dispatch_channel()
+                                .get_high_priority_sender(stream_id, scid);
                             let mut response =
                                 if let Some(event_subscriber) = route_form.event_subscriber() {
                                     event_subscriber.on_event(route_event)
@@ -200,7 +218,7 @@ mod request_hndlr {
                                     None
                                 };
                             if let Some(resp) = &mut response {
-                                resp.attach_chunk_sender(response_sender_low)
+                                resp.attach_chunk_sender(body_sender.unwrap())
                             }
                             if let Ok((headers, body)) =
                                 route_form.build_response(stream_id, scid, conn_id, response)
@@ -215,11 +233,17 @@ mod request_hndlr {
                                                  headers.clone(),
                                                false,
                                                 Some(body),
+                                                header_sender,
                                                    crate::request_response::HeaderPriority::SendAdditionnalHeader,
                                                  );
 
-                                            if let Err(_) = response_sender_high
-                                                .send(QueuedRequest::new_header(header_req))
+                                            if let Err(_) = chunking_station
+                                                .get_chunking_dispatch_channel()
+                                                .send_to_high_priority_queue(
+                                                    stream_id,
+                                                    &scid,
+                                                    QueuedRequest::new_header(header_req),
+                                                )
                                             {
                                                 error!("Failed to send header_req")
                                             }
@@ -262,10 +286,16 @@ mod request_hndlr {
                                                  headers.clone(),
                                                true,
                                             None,
+                                            header_sender,
                                                    crate::request_response::HeaderPriority::SendAdditionnalHeader,
                                                  );
-                                        if let Err(_) = response_sender_high
-                                            .send(QueuedRequest::new_header(header_req))
+                                        if let Err(_) = chunking_station
+                                            .get_chunking_dispatch_channel()
+                                            .send_to_high_priority_queue(
+                                                stream_id,
+                                                &scid,
+                                                QueuedRequest::new_header(header_req),
+                                            )
                                         {
                                             error!("Failed to send header_req")
                                         }
@@ -283,6 +313,7 @@ mod request_hndlr {
         pub fn parse_headers(
             &self,
             server_config: &Arc<ServerConfig>,
+            chunk_dispatch_channel: &ChunksDispatchChannel,
             headers: &[h3::Header],
             stream_id: u64,
             client: &mut quiche_http3_server::QClient,
@@ -375,6 +406,10 @@ mod request_hndlr {
                 stream_id,
                 EventType::OnHeader,
             ) {
+                chunk_dispatch_channel.insert_new_channel(stream_id, &scid);
+                let header_sender =
+                    chunk_dispatch_channel.get_high_priority_sender(stream_id, &scid);
+                let body_sender = chunk_dispatch_channel.get_low_priority_sender(stream_id, &scid);
                 let is_end = route_event.is_end();
                 if let Some((route_form, _)) =
                     guard.get_routes_from_path_and_method(route_event.path(), route_event.method())
@@ -397,7 +432,7 @@ mod request_hndlr {
                                 };
 
                             if let Some(resp) = &mut response {
-                                resp.attach_chunk_sender(response_sender_low);
+                                resp.attach_chunk_sender(body_sender.unwrap());
                             }
                             warn!("reponse [{:?}]", response);
                             /*
@@ -421,10 +456,15 @@ mod request_hndlr {
                                                 headers.clone(),
                                                 false,
                                                 Some(body),
+                                                header_sender,
                                                 crate::request_response::HeaderPriority::SendHeader,
                                             );
-                                        if let Err(_) = response_sender_high
-                                            .send(QueuedRequest::new_header(header_req))
+                                        if let Err(_) = chunk_dispatch_channel
+                                            .send_to_high_priority_queue(
+                                                stream_id,
+                                                &scid,
+                                                QueuedRequest::new_header(header_req),
+                                            )
                                         {
                                             error!("Failed to send header_req")
                                         }
@@ -454,10 +494,15 @@ mod request_hndlr {
                                                 headers.clone(),
                                                 is_end,
                                                 None,
+                                                header_sender,
                                                 crate::request_response::HeaderPriority::SendHeader,
                                             );
-                                        if let Err(_) = response_sender_high
-                                            .send(QueuedRequest::new_header(header_req))
+                                        if let Err(_) = chunk_dispatch_channel
+                                            .send_to_high_priority_queue(
+                                                stream_id,
+                                                &scid,
+                                                QueuedRequest::new_header(header_req),
+                                            )
                                         {
                                             error!("Failed to send header_req")
                                         }
@@ -541,7 +586,7 @@ mod request_hndlr {
         ///Attach a channel sender to the body that corresponds to the associated client.
         ///Sender can be build with :
         ///client.get_response_sender()
-        fn attach_chunk_sender(&mut self, sndr: crossbeam_channel::Sender<QueuedRequest>) {
+        fn attach_chunk_sender(&mut self, sndr: ChunkSender) {
             match self.body_as_mut() {
                 crate::request_response::BodyType::Data {
                     stream_id,

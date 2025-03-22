@@ -1,8 +1,11 @@
+pub use chunk_dispatch_channel::{ChunkReceiver, ChunkSender, ChunksDispatchChannel};
 pub use request_reponse_builder::{BodyType, RequestResponse};
 pub use response_elements::ContentType;
 pub use response_elements::Status;
 pub use response_queue::{BodyRequest, HeaderPriority, HeaderRequest, QueuedRequest};
 pub use response_queue::{ChunkingStation, ResponseQueue};
+
+mod chunk_dispatch_channel;
 
 mod response_queue_implementation {
     use std::{
@@ -80,6 +83,8 @@ mod chunking_implementation {
     use mio::Waker;
     use ring::test::File;
 
+    use self::chunk_dispatch_channel::ChunkSender;
+
     use super::*;
 
     pub struct ChunkableBody {
@@ -87,7 +92,7 @@ mod chunking_implementation {
         scid: Vec<u8>,
         conn_id: String,
         reader: Box<dyn BufRead + Send + Sync + 'static>,
-        sender: crossbeam_channel::Sender<QueuedRequest>,
+        sender: ChunkSender,
         body_len: usize,
         packet_id: usize,
         bytes_written: usize,
@@ -95,7 +100,7 @@ mod chunking_implementation {
 
     impl ChunkableBody {
         pub fn new_data(
-            sender: crossbeam_channel::Sender<QueuedRequest>,
+            sender: ChunkSender,
             stream_id: u64,
             scid: &[u8],
             conn_id: String,
@@ -114,7 +119,7 @@ mod chunking_implementation {
             })
         }
         pub fn new_file(
-            sender: crossbeam_channel::Sender<QueuedRequest>,
+            sender: ChunkSender,
             scid: &[u8],
             stream_id: u64,
             conn_id: String,
@@ -194,7 +199,7 @@ mod chunking_implementation {
         }
     }
 
-    const CHUNK_SIZE: usize = 512;
+    const CHUNK_SIZE: usize = 1024;
 
     type Scid = Vec<u8>;
     type StreamId = u64;
@@ -205,46 +210,16 @@ mod chunking_implementation {
         receiver: crossbeam_channel::Receiver<ChunkableBody>,
         resender: crossbeam_channel::Sender<ChunkableBody>,
         pending_buffer_usage_map: Arc<Mutex<HashMap<Scid, HashMap<StreamId, usize>>>>,
+        chunk_station: ChunksDispatchChannel,
     ) {
         let waker = waker.clone();
-        let max_pacing = 80;
-        let min_pacing = 60;
         let last_time_spend = last_time_spend.clone();
         let mut sended = 0usize;
-        let pending_buffer_map = pending_buffer_usage_map.clone();
         std::thread::spawn(move || {
-            let mut pacing_micro_q = 19;
             let mut buf_read = [0; CHUNK_SIZE];
-            let mut round = 0;
-            let mut total = 0;
-            let back_pressure_threshold = 1;
 
             'read: loop {
-                round += 1;
-                /*
-                                let (average_quantity_in_pending, can_send) =
-                                    adjust_back_pressure(&mut total, &pending_buffer_usage_map, 1, &mut round);
-
-                                if let Some(average_current_quantity) = average_quantity_in_pending {
-                                    if average_current_quantity > back_pressure_threshold {
-                                        if pacing_micro_q < max_pacing {
-                                            pacing_micro_q += 1;
-                                        }
-                                        default_pacing = Duration::from_micros(pacing_micro_q);
-                                    } else if average_current_quantity <= average_current_quantity {
-                                        if pacing_micro_q > min_pacing {
-                                            pacing_micro_q -= 2;
-                                        }
-                                        default_pacing = Duration::from_micros(pacing_micro_q);
-                                    }
-                                }
-
-                                if !can_send {
-                                    std::thread::sleep(default_pacing);
-                                    continue 'read;
-                                }
-                */
-                if let Ok(mut chunkable) = receiver.recv() {
+                while let Ok(mut chunkable) = receiver.recv() {
                     let start = Instant::now();
                     let last_duration = *last_time_spend.lock().unwrap();
 
@@ -254,6 +229,9 @@ mod chunking_implementation {
                         } else {
                             false
                         };
+
+                        std::thread::sleep(Duration::from_micros(100));
+
                         let queuable_item = QueuedRequest::new_body(BodyRequest::new(
                             chunkable.stream_id,
                             chunkable.conn_id.as_str(),
@@ -284,6 +262,11 @@ mod chunking_implementation {
                             if let Err(_) = resender.send(chunkable) {
                                 error!("Failed to resend chunkable body")
                             }
+                        } else {
+                            info!(
+                                "stream [{}] SUCCESS all data has been chunked  [{}/{}] !! ",
+                                chunkable.stream_id, chunkable.bytes_written, chunkable.body_len
+                            )
                         }
                     }
                 }
@@ -304,9 +287,10 @@ mod response_queue {
     use crate::server_init::quiche_http3_server::QueueTrackableItem;
 
     use super::{
+        chunk_dispatch_channel::ChunkSender,
         chunking_implementation::{self, ChunkableBody},
         response_queue_implementation::{send_data, send_file},
-        BodyType,
+        BodyType, ChunksDispatchChannel,
     };
 
     type Scid = Vec<u8>;
@@ -321,14 +305,18 @@ mod response_queue {
         ),
         waker: Arc<Waker>,
         pending_buffer_usage_map: Arc<Mutex<HashMap<Scid, HashMap<StreamId, usize>>>>,
+        chunk_dispatch_channel: ChunksDispatchChannel,
     }
     impl ChunkingStation {
         pub fn new(waker: Arc<Waker>, last_time_spend: Arc<Mutex<Duration>>) -> Self {
             let pending_buffer_usage_map = Arc::new(Mutex::new(HashMap::new()));
+
+            let chunk_dispatch_channel = ChunksDispatchChannel::new();
             let chunking_station = Self {
                 station_channel: crossbeam_channel::unbounded(),
                 waker,
                 pending_buffer_usage_map: pending_buffer_usage_map.clone(),
+                chunk_dispatch_channel,
             };
 
             chunking_implementation::run_worker(
@@ -337,9 +325,14 @@ mod response_queue {
                 chunking_station.station_channel.1.clone(),
                 chunking_station.station_channel.0.clone(),
                 pending_buffer_usage_map,
+                chunking_station.chunk_dispatch_channel.clone(),
             );
 
             chunking_station
+        }
+
+        pub fn get_chunking_dispatch_channel(&self) -> ChunksDispatchChannel {
+            self.chunk_dispatch_channel.clone()
         }
 
         pub fn set_pending_buffers_usage(&self, map: HashMap<Vec<u8>, HashMap<u64, usize>>) {
@@ -378,7 +371,9 @@ mod response_queue {
                         conn_id,
                         file_path,
                     ) {
-                        self.station_channel.0.send(c_b);
+                        if let Err(e) = self.station_channel.0.send(c_b) {
+                            error!("failed sending filereader to chunking station [{:?}]", e);
+                        }
                     };
                 }
                 BodyType::None => {}
@@ -470,6 +465,12 @@ mod response_queue {
         pub fn new_header(req: HeaderRequest) -> Self {
             Self::Header(req)
         }
+        pub fn packet_id(&self) -> usize {
+            match self {
+                Self::Header(header) => 0,
+                Self::Body(body) => body.packet_id,
+            }
+        }
     }
 
     #[derive(Clone, Copy, Debug)]
@@ -488,6 +489,7 @@ mod response_queue {
         is_end: bool,
         priority_mode: HeaderPriority,
         send_response: crossbeam_channel::Sender<Result<usize, ()>>,
+        chunk_sender: Option<ChunkSender>,
         attached_body: Option<BodyType>,
     }
     impl HeaderRequest {
@@ -506,6 +508,7 @@ mod response_queue {
             headers: Vec<h3::Header>,
             is_end: bool,
             body: Option<BodyType>,
+            chunk_sender: Option<ChunkSender>,
             priority_mode: HeaderPriority,
         ) -> (crossbeam_channel::Receiver<Result<usize, ()>>, Self) {
             let channel = crossbeam_channel::bounded::<Result<usize, ()>>(1);
@@ -518,6 +521,7 @@ mod response_queue {
                     headers_size: Self::AVERAGE_HEADERS_SIZE,
                     is_end,
                     send_response: channel.0.clone(),
+                    chunk_sender,
                     priority_mode,
                     attached_body: body,
                 },
@@ -627,6 +631,8 @@ mod request_reponse_builder {
 
     use quiche::h3::{self, Header, NameValue};
 
+    use self::chunk_dispatch_channel::ChunkSender;
+
     use super::*;
     #[derive(Debug)]
     pub enum BodyTypeBuilder {
@@ -642,14 +648,14 @@ mod request_reponse_builder {
             scid: Vec<u8>,
             conn_id: String,
             data: Vec<u8>,
-            sender: Option<crossbeam_channel::Sender<QueuedRequest>>,
+            sender: Option<ChunkSender>,
         },
         FilePath {
             stream_id: u64,
             scid: Vec<u8>,
             conn_id: String,
             file_path: PathBuf,
-            sender: Option<crossbeam_channel::Sender<QueuedRequest>>,
+            sender: Option<ChunkSender>,
         },
         None,
     }

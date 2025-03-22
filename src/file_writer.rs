@@ -95,13 +95,16 @@ mod writable_type {
 }
 
 mod file_writer_worker {
+    use std::time::Duration;
+
     use super::trait_writable::FileWritable;
 
     pub fn run<T: FileWritable>(receiver: crossbeam_channel::Receiver<T>) {
         if let Err(_) = std::thread::Builder::new()
-            .stack_size(1024 * 1024)
+            .stack_size(1024 * 1024 * 2)
             .spawn(move || {
                 while let Ok(writable_item) = receiver.recv() {
+                    std::thread::sleep(Duration::from_micros(20));
                     if let Err(_) = writable_item.write_on_disk() {
                         error!("Failed to write data on disk");
                     }
