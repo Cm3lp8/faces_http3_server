@@ -692,23 +692,8 @@ mod quiche_implementation {
                             }
                         }
                     }
-                    if writtable == 0 {
-                        let _ = waker_clone.wake();
-                    }
                 }
 
-                let mut stop = 0;
-                /*
-                for client in clients.values_mut() {
-                    if let Some((stream_id, _queue)) = client.pending_body_queue.next_stream() {
-                        if client.partial_responses.get(&stream_id).is_some() {
-                            if let Some(_val) = handle_writable(client, stream_id) {}
-                            if let Err(_e) = waker_clone.wake() {
-                                error!("failed to wake poll");
-                            }
-                        }
-                    }
-                }*/
                 for client in clients.values() {
                     for stream_id in
                         chunk_dispatch_channel.streams(client.conn.source_id().as_ref())
@@ -863,6 +848,7 @@ mod quiche_implementation {
                 }
 
                 // chunking_station.set_pending_buffers_usage(clients.get_pending_buffers_usages());
+                /*
                 'wake: {
                     for client in clients.values() {
                         for stream_id in client.pending_body_queue.stream_vec() {
@@ -876,68 +862,49 @@ mod quiche_implementation {
                             }
                         }
                     }
-                }
+                }*/
             }
-
-            /*
-            for client in clients.priority_value_mut(round) {
-                let str_v = client.pending_body_queue.stream_vec();
-                if let Some(it) = client.pending_body_queue.for_stream() {
-                    for (stream_id, queue) in it {
-                        let r = client.get_written(*stream_id);
-                        if r.0 % 60000 == 0
-                            || r.0 % 60001 == 0
-                            || r.0 % 60004 == 0
-                            || r.0 % 1350 * 20 == 0
-                            || (r.0 % 1350 * 20) - 3 == 0
-                            || (r.0 % 1350 * 20) - 2 == 0
-                            || (r.0 % 1350 * 20) - 1 == 0
-                        {
-                            println!("------------------------------------------------------------------");
-                            info!("bytes written [{:?}] in queue -> [{}] for stream [{stream_id}] conn [{:?}] str_t{:?}", client.get_written(*stream_id), queue.len(), client.conn.trace_id(), str_v);
-                            println!("------------------------------------------------------------------");
-                        }
-                    }
-                }
-            }*/
 
             // Generate outgoing QUIC packets for all active connections and send
             // them on the UDP socket, until quiche reports that there are no more
             // packets to be sent.
-            for client in clients.values_mut() {
-                loop {
-                    if let Some(last_instant) = last_send_instant {
-                        while Instant::now() <= last_instant {
-                            std::thread::yield_now();
-                            std::thread::sleep(Duration::from_micros(20));
-                            continue;
-                        }
-                    }
-                    let (write, send_info) = match client.conn.send(&mut out) {
-                        Ok(v) => v,
-                        Err(quiche::Error::Done) => {
-                            break;
-                        }
-                        Err(e) => {
-                            error!("{} send failed: {:?}", client.conn.trace_id(), e);
-                            warn!("{} send failed: {:?}", client.conn.trace_id(), e);
-                            client.conn.close(false, 0x1, b"fail").ok();
-                            break;
-                        }
-                    };
-                    last_send_instant = Some(send_info.at);
 
-                    if let Err(e) = socket.send_to(&out[..write], send_info.to) {
-                        if e.kind() == std::io::ErrorKind::WouldBlock {
-                            debug!("send() would block, [{:?}]", e);
-
-                            break;
+            {
+                std::thread::sleep(Duration::from_nanos(10));
+                for client in clients.values_mut() {
+                    'out: loop {
+                        if let Some(last_instant) = last_send_instant {
+                            while Instant::now() <= last_instant {
+                                std::thread::yield_now();
+                                continue 'out;
+                            }
                         }
-                        panic!("send() failed: {:?}", e);
+                        let (write, send_info) = match client.conn.send(&mut out) {
+                            Ok(v) => v,
+                            Err(quiche::Error::Done) => {
+                                break;
+                            }
+                            Err(e) => {
+                                error!("{} send failed: {:?}", client.conn.trace_id(), e);
+                                warn!("{} send failed: {:?}", client.conn.trace_id(), e);
+                                client.conn.close(false, 0x1, b"fail").ok();
+                                break;
+                            }
+                        };
+                        last_send_instant = Some(send_info.at);
+
+                        if let Err(e) = socket.send_to(&out[..write], send_info.to) {
+                            if e.kind() == std::io::ErrorKind::WouldBlock {
+                                debug!("send() would block, [{:?}]", e);
+
+                                break;
+                            }
+                            panic!("send() failed: {:?}", e);
+                        }
+                        //if let Some(last_instant) = &mut last_instant {
+                        debug!("\n{} written {} bytes", client.conn.trace_id(), write);
+                        //  println!("{} written {} bytes", client.conn.trace_id(), write);
                     }
-                    //if let Some(last_instant) = &mut last_instant {
-                    debug!("\n{} written {} bytes", client.conn.trace_id(), write);
-                    //  println!("{} written {} bytes", client.conn.trace_id(), write);
                 }
             }
             /*

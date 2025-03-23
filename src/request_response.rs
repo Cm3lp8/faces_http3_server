@@ -71,7 +71,7 @@ mod chunking_implementation {
     use core::panic;
     use std::{
         backtrace,
-        collections::HashMap,
+        collections::{HashMap, VecDeque},
         fs::{self, metadata, Metadata},
         io::{BufRead, BufReader, Cursor},
         path::Path,
@@ -199,7 +199,7 @@ mod chunking_implementation {
         }
     }
 
-    const CHUNK_SIZE: usize = 1024;
+    const CHUNK_SIZE: usize = 4096;
 
     type Scid = Vec<u8>;
     type StreamId = u64;
@@ -213,8 +213,13 @@ mod chunking_implementation {
         chunk_station: ChunksDispatchChannel,
     ) {
         let waker = waker.clone();
+        let waker_clone = waker.clone();
         let last_time_spend = last_time_spend.clone();
         let mut sended = 0usize;
+        type Ids = (u64, Vec<u8>);
+        let pending_items: Arc<Mutex<HashMap<Ids, VecDeque<(ChunkSender, QueuedRequest)>>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let pending_items_clone = pending_items.clone();
         std::thread::spawn(move || {
             let mut buf_read = [0; CHUNK_SIZE];
 
@@ -232,28 +237,42 @@ mod chunking_implementation {
 
                         std::thread::sleep(Duration::from_micros(100));
 
-                        let queuable_item = QueuedRequest::new_body(BodyRequest::new(
-                            chunkable.stream_id,
-                            chunkable.conn_id.as_str(),
-                            &chunkable.scid,
-                            chunkable.packet_id,
-                            buf_read[..n].to_vec(),
-                            is_end,
-                        ));
+                        pending_items
+                            .lock()
+                            .unwrap()
+                            .entry((chunkable.stream_id, chunkable.scid.to_vec()))
+                            .and_modify(|item| {
+                                let queuable_item = QueuedRequest::new_body(BodyRequest::new(
+                                    chunkable.stream_id,
+                                    chunkable.conn_id.as_str(),
+                                    &chunkable.scid,
+                                    chunkable.packet_id,
+                                    buf_read[..n].to_vec(),
+                                    is_end,
+                                ));
 
-                        if let Err(e) = chunkable.sender.send(queuable_item) {
-                            error!(
-                                "Failed sending body request to conn [{}] at packet [{}] [{:?}]",
-                                chunkable.conn_id, chunkable.packet_id, e
-                            );
-                            panic!("");
-                        }
-                        sended += 1;
-                        chunkable.packet_id += 1;
-                        chunkable.bytes_written += n;
+                                item.push_back((chunkable.sender.clone(), queuable_item))
+                            })
+                            .or_insert_with(|| {
+                                let queuable_item = QueuedRequest::new_body(BodyRequest::new(
+                                    chunkable.stream_id,
+                                    chunkable.conn_id.as_str(),
+                                    &chunkable.scid,
+                                    chunkable.packet_id,
+                                    buf_read[..n].to_vec(),
+                                    is_end,
+                                ));
+                                let mut v = VecDeque::new();
+                                v.push_back((chunkable.sender.clone(), queuable_item));
+                                v
+                            });
                         if let Err(e) = waker.wake() {
                             panic!("error f waking [{:?}]", e)
                         }
+
+                        sended += 1;
+                        chunkable.packet_id += 1;
+                        chunkable.bytes_written += n;
                         if sended % 1000 == 0 {
                             sended = 0;
                         }
@@ -268,6 +287,21 @@ mod chunking_implementation {
                                 chunkable.stream_id, chunkable.bytes_written, chunkable.body_len
                             )
                         }
+                    }
+                }
+            }
+        });
+
+        std::thread::spawn(move || 'send: loop {
+            std::thread::sleep(Duration::from_micros(100));
+            let guard = &mut *pending_items_clone.lock().unwrap();
+            for (k, v) in guard.iter_mut() {
+                if let Some((sender, queueable_item)) = v.pop_front() {
+                    if let Err(e) = sender.send(queueable_item) {
+                        error!("faield to send queued request")
+                    }
+                    if let Err(e) = waker_clone.wake() {
+                        panic!("error f waking [{:?}]", e)
                     }
                 }
             }
