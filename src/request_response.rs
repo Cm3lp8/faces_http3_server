@@ -465,24 +465,28 @@ mod response_queue {
             match self {
                 QueuedRequest::Header(content) => content.stream_id,
                 QueuedRequest::Body(content) => content.stream_id,
+                QueuedRequest::BodyProgression(content) => content.stream_id,
             }
         }
         fn is_last_item(&self) -> bool {
             match self {
                 QueuedRequest::Header(content) => content.is_end,
                 QueuedRequest::Body(content) => content.is_end,
+                QueuedRequest::BodyProgression(content) => content.is_end,
             }
         }
         fn scid(&self) -> Vec<u8> {
             match self {
                 QueuedRequest::Header(content) => content.scid.to_vec(),
                 QueuedRequest::Body(content) => content.scid.to_vec(),
+                QueuedRequest::BodyProgression(content) => content.scid.to_vec(),
             }
         }
         fn len(&self) -> usize {
             match self {
                 QueuedRequest::Header(content) => content.get_headers_len(),
                 QueuedRequest::Body(content) => content.len(),
+                QueuedRequest::BodyProgression(content) => content.len(),
             }
         }
     }
@@ -491,6 +495,7 @@ mod response_queue {
     pub enum QueuedRequest {
         Header(HeaderRequest),
         Body(BodyRequest),
+        BodyProgression(BodyRequest),
     }
     impl QueuedRequest {
         pub fn new_body(req: BodyRequest) -> Self {
@@ -503,6 +508,7 @@ mod response_queue {
             match self {
                 Self::Header(header) => 0,
                 Self::Body(body) => body.packet_id,
+                Self::BodyProgression(body) => body.packet_id,
             }
         }
     }

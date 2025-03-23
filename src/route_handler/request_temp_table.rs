@@ -12,7 +12,11 @@ mod reception_status {
         }
         pub fn has_something_to_update(&self) -> bool {
             if let Some(p_w) = self.percentage_written {
-                true
+                if p_w < 99 {
+                    true
+                } else {
+                    false
+                }
             } else {
                 false
             }

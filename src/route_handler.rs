@@ -118,10 +118,13 @@ mod request_hndlr {
                         }
                         {
                             if let Some(body) = reception_status.body() {
-                                /*
-                                chunk_dispatch_channel.send_to_queue(stream_id, &scid,QueuedRequest::Body(BodyRequest::new(
-                                    stream_id, conn_id, &scid, 0, body, false,
-                                )))*/
+                                chunk_dispatch_channel.send_to_queue(
+                                    stream_id,
+                                    &scid,
+                                    QueuedRequest::BodyProgression(BodyRequest::new(
+                                        stream_id, conn_id, &scid, 0, body, false,
+                                    )),
+                                );
                                 /*
                                 if let Ok(stream_cap) = client.conn().stream_capacity(stream_id) {
                                     if stream_cap >= body.len() {

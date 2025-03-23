@@ -456,6 +456,7 @@ mod quiche_implementation {
                                 );
                                 req_recvd += 1;
                                 let trace_id = client.conn.trace_id().to_string();
+
                                 if let Err(_) =
                                     route_manager.routes_handler().send_reception_status(
                                         client,
@@ -492,7 +493,6 @@ mod quiche_implementation {
                                 }
                                 let trace_id = client.conn.trace_id().to_string();
 
-                                /*
                                 if let Err(_) =
                                     route_manager.routes_handler().send_reception_status(
                                         client,
@@ -504,7 +504,7 @@ mod quiche_implementation {
                                     )
                                 {
                                     error!("Failed to send progress response status")
-                                }*/
+                                }
                             }
                             Ok((stream_id, quiche::h3::Event::Finished)) => {
                                 info!("\n finished ! stream [{}] send now OK 200 ? \n", stream_id);
@@ -589,12 +589,23 @@ mod quiche_implementation {
                                     let is_end = client.is_body_totally_written(stream_id);
 
                                     if is_end {
-                                        warn!("is end ! ");
+                                        warn!("is end [{:?}] ! ", client.get_written(stream_id));
                                         send_body_response(client, stream_id, vec![], is_end)
                                             .unwrap();
                                         client.pending_body_queue.remove_stream_queue(stream_id);
                                     }
                                     if let Err(_e) = waker_clone.wake() {}
+                                }
+                                QueuedRequest::BodyProgression(ref mut content) => {
+                                    if let Err(_e) = send_body_response(
+                                        client,
+                                        content.stream_id(),
+                                        content.take_data(),
+                                        false,
+                                    ) {
+                                        client.pending_body_queue.push_item_on_front(request_chunk);
+                                        info!("pushed [[{}]]", p_id);
+                                    }
                                 }
                                 QueuedRequest::Header(ref mut content) => {
                                     let headers = content.get_headers().to_vec();
@@ -842,6 +853,17 @@ mod quiche_implementation {
                                         }
                                     }
                                 }
+                                QueuedRequest::BodyProgression(ref mut content) => {
+                                    if let Err(_e) = send_body_response(
+                                        client,
+                                        content.stream_id(),
+                                        content.take_data(),
+                                        false,
+                                    ) {
+                                        client.pending_body_queue.push_item_on_front(item);
+                                        continue;
+                                    };
+                                }
                             }
                         }
                     }
@@ -1008,7 +1030,7 @@ mod quiche_implementation {
         let conn = &mut client.conn;
         if let Err(e) = http3_conn.send_additional_headers(conn, stream_id, &headers, false, is_end)
         {
-            debug!(
+            warn!(
                 "send more header [{:?}] Failed send intermediate 100 response, [{:?}]",
                 headers, e
             );
