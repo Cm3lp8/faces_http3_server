@@ -7,66 +7,6 @@ pub use response_queue::{ChunkingStation, ResponseQueue};
 
 mod chunk_dispatch_channel;
 
-mod response_queue_implementation {
-    use std::{
-        error::Error,
-        fs,
-        io::{BufReader, Cursor, Read},
-        ops::Deref,
-        path::Path,
-        sync::{Arc, Mutex},
-        time::{Duration, Instant},
-    };
-
-    use mio::Waker;
-
-    use self::response_queue::BodyRequest;
-
-    use super::*;
-
-    pub fn send_data(
-        stream_id: u64,
-        conn_id: &str,
-        data: Vec<u8>,
-        sender: &crossbeam_channel::Sender<BodyRequest>,
-        waker: &Arc<Waker>,
-        last_time_spend: &Arc<Mutex<Duration>>,
-    ) {
-        let sender = sender.clone();
-
-        let data_len = data.len();
-        let mut reader = BufReader::new(Cursor::new(data));
-        let conn_id = conn_id.to_owned();
-        let waker = waker.clone();
-        let last_time_spend = last_time_spend.clone();
-        let default_pacing = Duration::from_micros(500);
-
-        std::thread::Builder::new()
-            .stack_size(1024 * 128)
-            .spawn(move || {})
-            .unwrap();
-    }
-    pub fn send_file(
-        stream_id: u64,
-        conn_id: &str,
-        file_path: &Path,
-        sender: &crossbeam_channel::Sender<BodyRequest>,
-        waker: &Arc<Waker>,
-        last_time_spend: &Arc<Mutex<Duration>>,
-    ) {
-        let conn_id = conn_id.to_owned();
-        let waker = waker.clone();
-        let last_time_spend = last_time_spend.clone();
-        let default_pacing = Duration::from_micros(900);
-        let sender = sender.clone();
-        let file_path = file_path.to_path_buf();
-
-        std::thread::Builder::new()
-            .stack_size(128 * 1024)
-            .spawn(move || {})
-            .unwrap();
-    }
-}
 mod chunking_implementation {
     use core::panic;
     use std::{
@@ -144,58 +84,6 @@ mod chunking_implementation {
             } else {
                 Err(())
             }
-        }
-    }
-
-    fn average_pending_size(
-        round: &mut usize,
-        total: &mut usize,
-        buffer_size: usize,
-        range: usize,
-        client_quantity: usize,
-    ) -> Option<usize> {
-        *total += buffer_size;
-
-        if *round % range == 0 {
-            let average = (*total as f32 / range as f32) as usize / client_quantity;
-            *total = 0;
-            *round = 0;
-            return Some(average);
-        }
-        None
-    }
-
-    ///
-    ///____________________________________
-    ///
-    fn adjust_back_pressure(
-        total: &mut usize,
-        pending_buffer_usage_map: &Arc<Mutex<HashMap<Scid, HashMap<StreamId, usize>>>>,
-        thres: usize,
-        round: &mut usize,
-    ) -> (Option<usize>, bool) {
-        let client_quantity = pending_buffer_usage_map.lock().unwrap().len();
-        let mut buffer_size_total = 0;
-        let mut stream_quantity = 0;
-        for client in pending_buffer_usage_map.lock().unwrap().iter() {
-            for buffer in client.1.iter() {
-                let buffer_size = buffer.1;
-                stream_quantity += 1;
-                buffer_size_total += buffer_size;
-            }
-        }
-        if stream_quantity > 0 {
-            let buffer_size_average = buffer_size_total / stream_quantity;
-
-            let average_q =
-                average_pending_size(round, total, buffer_size_average, 100, client_quantity);
-            if buffer_size_average < thres {
-                (average_q, true)
-            } else {
-                (average_q, true)
-            }
-        } else {
-            (None, true)
         }
     }
 
@@ -323,7 +211,6 @@ mod response_queue {
     use super::{
         chunk_dispatch_channel::ChunkSender,
         chunking_implementation::{self, ChunkableBody},
-        response_queue_implementation::{send_data, send_file},
         BodyType, ChunksDispatchChannel,
     };
 

@@ -125,6 +125,7 @@ mod request_hndlr {
                                         stream_id, conn_id, &scid, 0, body, false,
                                     )),
                                 );
+
                                 /*
                                 if let Ok(stream_cap) = client.conn().stream_capacity(stream_id) {
                                     if stream_cap >= body.len() {

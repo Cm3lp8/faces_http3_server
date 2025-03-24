@@ -4,15 +4,25 @@ mod reception_status {
     use super::*;
 
     pub struct ReceptionStatus {
-        percentage_written: Option<usize>,
+        percentage_written: Option<f32>,
+        written: Option<usize>,
+        total: Option<usize>,
     }
     impl ReceptionStatus {
-        pub fn new(percentage_written: Option<usize>) -> Self {
-            ReceptionStatus { percentage_written }
+        pub fn new(
+            percentage_written: Option<f32>,
+            written: Option<usize>,
+            total: Option<usize>,
+        ) -> Self {
+            ReceptionStatus {
+                percentage_written,
+                written,
+                total,
+            }
         }
         pub fn has_something_to_update(&self) -> bool {
             if let Some(p_w) = self.percentage_written {
-                if p_w < 99 {
+                if p_w < 0.98 {
                     true
                 } else {
                     false
@@ -30,7 +40,7 @@ mod reception_status {
         }
         pub fn is_end(&self) -> bool {
             if let Some(progress) = self.percentage_written {
-                progress == 100
+                progress == 1.0
             } else {
                 false
             }
@@ -47,7 +57,16 @@ mod reception_status {
         ///
         pub fn body(&self) -> Option<Vec<u8>> {
             if let Some(progress) = self.percentage_written {
-                Some(format!("s??%progress={}", progress).as_bytes().to_vec())
+                let written = self.written.unwrap_or(0);
+                let total = self.total.unwrap_or(0);
+                Some(
+                    format!(
+                        "s??%progress={}%&written={}%&total={}",
+                        progress, written, total
+                    )
+                    .as_bytes()
+                    .to_vec(),
+                )
             } else {
                 None
             }
@@ -104,22 +123,32 @@ mod req_temp_table {
                 let headers_send = entry.progress_header_sent;
                 if let Some(content_length) = entry.content_length {
                     let written = entry.written();
-                    let percentage_written =
-                        ((written as f32 / content_length as f32) * 100f32) as usize;
+                    let percentage_written = written as f32 / content_length as f32;
 
                     if let Some(prec_value) = entry.precedent_percentage_written {
-                        if prec_value == percentage_written {
+                        if (prec_value * 100.0) as usize == (percentage_written * 100.0) as usize {
                             entry.precedent_percentage_written = Some(percentage_written);
-                            return Some((ReceptionStatus::new(None), headers_send));
+                            return Some((ReceptionStatus::new(None, None, None), headers_send));
                         }
                         entry.precedent_percentage_written = Some(percentage_written);
                         return Some((
-                            ReceptionStatus::new(Some(percentage_written)),
+                            ReceptionStatus::new(
+                                Some(percentage_written),
+                                Some(written),
+                                Some(content_length),
+                            ),
                             headers_send,
                         ));
                     }
                     entry.precedent_percentage_written = Some(percentage_written);
-                    return Some((ReceptionStatus::new(Some(percentage_written)), headers_send));
+                    return Some((
+                        ReceptionStatus::new(
+                            Some(percentage_written),
+                            Some(written),
+                            Some(content_length),
+                        ),
+                        headers_send,
+                    ));
                 }
                 return None;
             }
@@ -308,7 +337,7 @@ mod req_temp_table {
         args: Option<Vec<ReqArgs>>,
         body_written_size: usize,
         content_length: Option<usize>,
-        precedent_percentage_written: Option<usize>,
+        precedent_percentage_written: Option<f32>,
         file_writer_channel: FileWriterChannel,
         progress_header_sent: bool,
         body: Vec<u8>,
