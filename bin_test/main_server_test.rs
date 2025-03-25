@@ -20,20 +20,14 @@ fn main() {
     pub struct AppStateTest;
     let mut router = RouteManager::new_with_app_state(AppStateTest);
 
+    router.global_middleware(Arc::new(MyGlobalMiddleWare));
+
     let event_loop = EventLoop::new();
 
     event_loop.run(|event, response_builder| match event {
         RouteEvent::OnHeader(event) => match event.path() {
-            "/large_data" => {
-                warn!("Large data HEADER {:?}", event);
-            }
-            "/test" => {
-                if let Err(e) =
-                    response_builder.send_ok_200_with_file("/home/camille/Vidéos/vid2.mp4")
-                {
-                    log::error!("Failed to send response");
-                }
-            }
+            "/large_data" => {}
+            "/test" => {}
             _ => {}
         },
         RouteEvent::OnFinished(event) => {
@@ -52,7 +46,13 @@ fn main() {
                         log::error!("Failed to send response");
                     }
                 }
-                "/test" => {}
+                "/test" => {
+                    if let Err(e) =
+                        response_builder.send_ok_200_with_file("/home/camille/Vidéos/vid2.mp4")
+                    {
+                        log::error!("Failed to send response");
+                    }
+                }
                 _ => {}
             };
         }
@@ -62,10 +62,22 @@ fn main() {
         _ => {}
     });
 
+    struct MyGlobalMiddleWare;
+    impl MyGlobalMiddleWare {
+        fn inform(headers: &HeadersColl) {
+            info!("[This is a global_middleware]");
+        }
+    }
     struct MyMiddleWareTest;
     impl MyMiddleWareTest {
         fn inform(headers: &HeadersColl) {
             warn!("|||\n{}|||", headers.display())
+        }
+    }
+    impl MiddleWare<AppStateTest> for MyGlobalMiddleWare {
+        fn on_header(&self, headers: &HeadersColl, app_stat: &AppStateTest) -> MiddleWareResult {
+            Self::inform(headers);
+            MiddleWareResult::Continue
         }
     }
 

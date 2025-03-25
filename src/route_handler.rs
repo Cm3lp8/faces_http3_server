@@ -473,7 +473,7 @@ mod request_hndlr {
                 conn_id.as_str(),
                 &scid,
                 stream_id,
-                EventType::OnHeader,
+                EventType::OnFinished,
             ) {
                 chunk_dispatch_channel.insert_new_channel(stream_id, &scid);
                 let header_sender =

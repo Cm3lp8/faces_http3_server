@@ -95,6 +95,7 @@ mod route_mngr {
             RouteManagerBuilder {
                 routes_formats: HashMap::new(),
                 app_state: Some(app_state),
+                global_middlewares: vec![],
             }
         }
         pub fn get_routes_from_path(
@@ -141,6 +142,7 @@ mod route_mngr {
             RouteManagerBuilder {
                 routes_formats: HashMap::new(),
                 app_state: None,
+                global_middlewares: vec![],
             }
         }
         pub fn app_state(&self) -> &S {
@@ -206,6 +208,7 @@ mod route_mngr {
     pub struct RouteManagerBuilder<S> {
         routes_formats: HashMap<ReqPath, Vec<RouteForm<S>>>,
         app_state: Option<S>,
+        global_middlewares: Vec<Arc<dyn MiddleWare<S> + Send + Sync + 'static>>,
     }
     impl<S: Send + Sync + 'static> RouteManagerBuilder<S> {
         pub fn build(&mut self) -> RouteManager<S> {
@@ -218,6 +221,16 @@ mod route_mngr {
             RouteManager {
                 inner: Arc::new(Mutex::new(request_manager_inner)),
             }
+        }
+        ///___________________________
+        ///Add a middleware that will affect all routes.
+        ///It will be process before the route specifics middlewares.
+        pub fn global_middleware(
+            &mut self,
+            entry: Arc<dyn MiddleWare<S> + Send + Sync + 'static>,
+        ) -> &mut Self {
+            self.global_middlewares.push(entry);
+            self
         }
         pub fn route_post(
             &mut self,
@@ -247,6 +260,8 @@ mod route_mngr {
             let mut route_form = RouteForm::new(path, method, route_configuration);
 
             route(&mut route_form);
+
+            route_form.add_global_middlewares(self.global_middlewares.clone());
 
             let route = route_form.build();
             self.add_new_route(route);
@@ -451,6 +466,14 @@ mod route_mngr {
             middleware: Arc<dyn MiddleWare<S> + Send + Sync + 'static>,
         ) -> &mut Self {
             self.middlewares.push(middleware);
+            self
+        }
+        fn add_global_middlewares(
+            &mut self,
+            entries: Vec<Arc<dyn MiddleWare<S> + Send + Sync + 'static>>,
+        ) -> &mut Self {
+            let specific_mdw = std::mem::replace(&mut self.middlewares, entries);
+            self.middlewares.extend(specific_mdw);
             self
         }
         pub fn build(&mut self) -> RouteForm<S> {
