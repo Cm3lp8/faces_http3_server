@@ -133,7 +133,7 @@ mod test {
     #[test]
     fn server_config() {
         let address = "127.0.0.1:3000";
-        let mut request_manager_builder = RouteManager::new();
+        let mut request_manager_builder = RouteManager::new_with_app_state(());
         let request_manager = request_manager_builder.build();
 
         let server_config = ServerConfig::new()

@@ -26,7 +26,7 @@ mod request_hndlr {
         route_manager::{DataManagement, RouteManagerInner},
         server_config,
         server_init::quiche_http3_server::{self, Client},
-        BodyStorage, RequestResponse, RouteEventListener, ServerConfig,
+        BodyStorage, HeadersColl, RequestResponse, RouteEventListener, ServerConfig,
     };
     use mio::{net::UdpSocket, Waker};
     use quiche::{
@@ -38,12 +38,12 @@ mod request_hndlr {
 
     use super::*;
 
-    pub struct RouteHandler {
-        inner: Arc<Mutex<RouteManagerInner>>,
+    pub struct RouteHandler<S> {
+        inner: Arc<Mutex<RouteManagerInner<S>>>,
     }
 
-    impl RouteHandler {
-        pub fn new(route_mngr_inner: Arc<Mutex<RouteManagerInner>>) -> Self {
+    impl<S: Send + Sync + 'static> RouteHandler<S> {
+        pub fn new(route_mngr_inner: Arc<Mutex<RouteManagerInner<S>>>) -> Self {
             RouteHandler {
                 inner: route_mngr_inner,
             }
@@ -54,6 +54,68 @@ mod request_hndlr {
             guard
                 .routes_states()
                 .set_intermediate_headers_send(stream_id, conn_id.to_string());
+        }
+        pub fn send_reception_status_first(
+            &self,
+            client: &mut quiche_http3_server::QClient,
+            response_sender_high: crossbeam_channel::Sender<QueuedRequest>,
+            response_sender_low: crossbeam_channel::Sender<QueuedRequest>,
+            stream_id: u64,
+            conn_id: &str,
+            chunk_dispatch_channel: &ChunksDispatchChannel,
+        ) -> Result<usize, ()> {
+            let guard = &*self.inner.lock().unwrap();
+            let scid = client.conn().source_id().as_ref().to_vec();
+            let reception_status = guard
+                .routes_states()
+                .get_reception_status_infos(stream_id, conn_id.to_owned());
+
+            if let Some((reception_status, header_send)) = reception_status {
+                if reception_status.has_something_to_update() {
+                    if let Some(percentage_written) =
+                        reception_status.get_percentage_written_to_string()
+                    {
+                        let headers = vec![
+                            h3::Header::new(b":status", b"100"),
+                            h3::Header::new(b"x-for", stream_id.to_string().as_bytes()),
+                            h3::Header::new(b"x-progress", percentage_written.as_bytes()),
+                        ];
+
+                        if !header_send {
+                            /*
+                                                        guard
+                                                            .routes_states()
+                                                            .set_intermediate_headers_send(stream_id, conn_id.to_string());
+                            */
+
+                            let sender =
+                                chunk_dispatch_channel.insert_new_channel(stream_id, &scid);
+                            let (_recv_send_confirmation, header_req) = HeaderRequest::new(
+                                stream_id,
+                                &scid,
+                                headers.clone(),
+                                false,
+                                None,
+                                None,
+                                crate::request_response::HeaderPriority::SendHeader100,
+                            );
+                            if let Err(_) = chunk_dispatch_channel.send_to_high_priority_queue(
+                                stream_id,
+                                &scid,
+                                QueuedRequest::new_header(header_req),
+                            ) {
+                                error!("Failed to send header_req")
+                            }
+                            /*
+                                                        return quiche_http3_server::send_header(
+                                                            client, stream_id, headers, false,
+                                                        );
+                            */
+                        }
+                    };
+                }
+            }
+            Ok(0)
         }
         ///
         /// Send a reception status to the client, only if something can be updated.
@@ -176,7 +238,7 @@ mod request_hndlr {
             h3_conn: &mut h3::Connection,
         ) {
         }
-        fn get_routes_from_path(&self, path: &str, cb: impl FnOnce(Option<&Vec<RouteForm>>)) {
+        fn get_routes_from_path(&self, path: &str, cb: impl FnOnce(Option<&Vec<RouteForm<S>>>)) {
             let guard = &*self.inner.lock().unwrap();
             cb(guard.routes_formats().get(path));
         }
@@ -230,7 +292,6 @@ mod request_hndlr {
                                 match body {
                                     Some(body) => {
                                         if !client.headers_send(stream_id) {
-                                            warn!("\n \nsend now header 200 ?\n");
                                             let (_recv_send_confirmation, header_req) = HeaderRequest::new(
                                                   stream_id,
                                                    &scid,
@@ -255,7 +316,6 @@ mod request_hndlr {
                                                 error!("Failed to wake poll [{:?}]", e);
                                             };
 
-                                            warn!("SENDED ON HIGHPRIORITY ");
                                             /*
                                             if let Ok(n) = quiche_http3_server::send_more_header(
                                                 client,
@@ -276,7 +336,6 @@ mod request_hndlr {
                                                 };
                                             }*/
                                         } else {
-                                            warn!("\n therer ???send now header 200 ?\n");
                                             chunking_station.send_response(body, last_time);
                                             if let Err(e) = waker.wake() {
                                                 error!("Failed to wake poll [{:?}]", e);
@@ -318,7 +377,7 @@ mod request_hndlr {
             &self,
             server_config: &Arc<ServerConfig>,
             chunk_dispatch_channel: &ChunksDispatchChannel,
-            headers: &[h3::Header],
+            mut headers: Vec<h3::Header>,
             stream_id: u64,
             client: &mut quiche_http3_server::QClient,
             socket: &mut UdpSocket,
@@ -332,20 +391,22 @@ mod request_hndlr {
         ) {
             let conn_id = client.conn().trace_id().to_string();
             let scid = client.conn().source_id().as_ref().to_vec();
-            let mut method: Option<&[u8]> = None;
-            let mut path: Option<&str> = None;
+            let mut method: Option<Vec<u8>> = None;
+            let mut path: Option<String> = None;
             let mut content_length: Option<usize> = None;
 
-            for hdr in headers {
-                match hdr.name() {
-                    b":method" => method = Some(hdr.value()),
-                    b":path" => path = Some(std::str::from_utf8(hdr.value()).unwrap()),
-                    b"content-length" => {
-                        if let Some(method) = method {
-                            if let Ok(method_parsed) = H3Method::parse(method) {
-                                if H3Method::POST == method_parsed || H3Method::PUT == method_parsed
-                                {
-                                    content_length = Some(
+            {
+                for hdr in &headers {
+                    match hdr.name() {
+                        b":method" => method = Some(hdr.value().to_vec()),
+                        b":path" => path = Some(String::from_utf8(hdr.value().to_vec()).unwrap()),
+                        b"content-length" => {
+                            if let Some(method) = &method {
+                                if let Ok(method_parsed) = H3Method::parse(&method) {
+                                    if H3Method::POST == method_parsed
+                                        || H3Method::PUT == method_parsed
+                                    {
+                                        content_length = Some(
                                     std::str::from_utf8(hdr.value())
                                 .unwrap_or_else(|item| {
                                     error!(
@@ -359,11 +420,12 @@ mod request_hndlr {
                                     0
                                 }),
                         )
+                                    }
                                 }
                             }
                         }
+                        _ => {}
                     }
-                    _ => {}
                 }
             }
             if method.is_none() || path.is_none() {
@@ -375,12 +437,15 @@ mod request_hndlr {
             let mut data_management: Option<DataManagement> = None;
             let mut event_subscriber: Option<Arc<dyn RouteEventListener + 'static + Send + Sync>> =
                 None;
-            if let Ok(method) = H3Method::parse(method.unwrap()) {
+            if let Ok(method) = H3Method::parse(&method.unwrap()) {
                 if let Some((route_form, _)) =
-                    guard.get_routes_from_path_and_method(path.unwrap(), method)
+                    guard.get_routes_from_path_and_method(path.as_ref().unwrap().as_str(), method)
                 {
                     data_management = route_form.data_management_type();
                     event_subscriber = route_form.event_subscriber();
+                    event_subscriber.as_ref().unwrap().on_header();
+                    let headers_coll: HeadersColl = method.get_headers_for_middleware(&mut headers);
+                    route_form.process_middlewares(&headers_coll, &guard.app_state());
                 }
                 guard.routes_states().add_partial_request(
                     server_config,
@@ -388,9 +453,9 @@ mod request_hndlr {
                     stream_id,
                     method,
                     data_management,
-                    event_subscriber,
-                    headers,
-                    path.unwrap(),
+                    event_subscriber.clone(),
+                    &headers,
+                    path.unwrap().as_str(),
                     content_length,
                     !more_frames,
                     file_writer_channel,
@@ -400,7 +465,7 @@ mod request_hndlr {
             }
 
             if more_frames {
-                debug!("returning because more frames");
+                info!("returning because more frames");
                 return;
             }
 
@@ -422,13 +487,8 @@ mod request_hndlr {
                         H3Method::GET => {
                             /*stream shutdown send response*/
 
-                            warn!(
-                                "event subscriber [{:?}]",
-                                route_form.event_subscriber().is_some()
-                            );
                             let mut response =
                                 if let Some(event_subscriber) = route_form.event_subscriber() {
-                                    warn!("has event subscriber []");
                                     event_subscriber.on_event(route_event)
                                 } else {
                                     error!("no event subscribre");
@@ -438,7 +498,6 @@ mod request_hndlr {
                             if let Some(resp) = &mut response {
                                 resp.attach_chunk_sender(body_sender.unwrap());
                             }
-                            warn!("reponse [{:?}]", response);
                             /*
                                                         client
                                                             .conn()
@@ -535,13 +594,13 @@ mod request_hndlr {
             path: &str,
             methode: H3Method,
             request_type: RequestType,
-            cb: impl FnOnce(Option<&RouteForm>),
+            cb: impl FnOnce(Option<&RouteForm<S>>),
         ) {
-            self.get_routes_from_path(path, |request_coll: Option<&Vec<RouteForm>>| {
+            self.get_routes_from_path(path, |request_coll: Option<&Vec<RouteForm<S>>>| {
                 if request_coll.is_none() {
                     cb(None)
                 } else {
-                    let coll: &Vec<RouteForm> = request_coll.unwrap();
+                    let coll: &Vec<RouteForm<S>> = request_coll.unwrap();
                     if let Some(found_request) = coll.iter().find(|item| item.method() == &methode)
                     {
                         cb(Some(found_request));
@@ -557,7 +616,7 @@ mod request_hndlr {
             &self,
             path: &'b str,
             methode: H3Method,
-        ) -> Option<(&RouteForm, Option<Vec<&'b str>>)> {
+        ) -> Option<(&RouteForm<S>, Option<Vec<&'b str>>)> {
             //if param in path
 
             /*

@@ -3,6 +3,7 @@ extern crate log;
 
 pub use event_listener::{EventLoop, RouteEventListener};
 use file_writer::FileWriter;
+pub use middleware::{HeadersColl, MiddleWare, MiddleWareResult};
 pub use request_response::{ContentType, RequestResponse, Status};
 pub use route_events::{
     DataEvent, EventResponseChannel, EventResponseWaiter, ResponseBuilderSender, RouteEvent,
@@ -15,6 +16,7 @@ pub use server_config::{
 use server_init::quiche_http3_server::{BodyReqQueue, QueueTrackableItem};
 mod event_listener;
 mod file_writer;
+mod middleware;
 mod request_response;
 mod route_events;
 mod route_handler;

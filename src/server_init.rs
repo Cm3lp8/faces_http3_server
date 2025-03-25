@@ -85,7 +85,10 @@ mod server_initiation {
                     self
                 }
         */
-        pub fn run_blocking(&mut self, route_manager: RouteManager) -> Http3Server {
+        pub fn run_blocking<S: 'static + Send + Sync>(
+            &mut self,
+            route_manager: RouteManager<S>,
+        ) -> Http3Server {
             let config_clone = self.server_config.build();
             let config_clone = Arc::new(config_clone);
             let server = Http3Server {
@@ -97,7 +100,10 @@ mod server_initiation {
             thread::park();
             server
         }
-        pub fn run(&mut self, route_manager: RouteManager) -> Http3Server {
+        pub fn run<S: 'static + Send + Sync>(
+            &mut self,
+            route_manager: RouteManager<S>,
+        ) -> Http3Server {
             let config_clone = self.server_config.build();
             let config_clone = Arc::new(config_clone);
             let server = Http3Server {

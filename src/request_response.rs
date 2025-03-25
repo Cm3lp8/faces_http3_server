@@ -170,7 +170,7 @@ mod chunking_implementation {
                                 error!("Failed to resend chunkable body")
                             }
                         } else {
-                            info!(
+                            debug!(
                                 "stream [{}] SUCCESS all data has been chunked  [{}/{}] !! ",
                                 chunkable.stream_id, chunkable.bytes_written, chunkable.body_len
                             )
@@ -321,7 +321,6 @@ mod response_queue {
             let low_priority_channel = crossbeam_channel::unbounded::<T>();
             let high_priority_channel = crossbeam_channel::unbounded::<T>();
 
-            warn!("New Response queue ");
             Self {
                 low_priority_channel,
                 high_priority_channel,

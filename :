@@ -6,8 +6,8 @@ use std::{thread, usize};
 
 use faces_quic_server::{
     BodyStorage, ContentType, DataEvent, DataManagement, EventLoop, EventResponseChannel, H3Method,
-    HeadersColl, Http3Server, MiddleWare, MiddleWareResult, RequestResponse, ResponseBuilderSender,
-    RouteConfig, RouteEvent, RouteEventListener, RouteForm,
+    Http3Server, RequestResponse, ResponseBuilderSender, RouteConfig, RouteEvent,
+    RouteEventListener, RouteForm, MiddleWare,
 };
 use faces_quic_server::{RequestType, RouteManager, RouteManagerBuilder, ServerConfig};
 use log::{error, info, warn};
@@ -16,9 +16,7 @@ fn main() {
     let addr = "192.168.1.22:3000";
 
     let app_state = ();
-
-    pub struct AppStateTest;
-    let mut router = RouteManager::new_with_app_state(AppStateTest);
+    let mut router = RouteManager::new();
 
     let event_loop = EventLoop::new();
 
@@ -61,37 +59,28 @@ fn main() {
         }
         _ => {}
     });
+    
+    let middle_ware: usize = 0;
 
-    struct MyMiddleWareTest;
-    impl MyMiddleWareTest {
-        fn inform(headers: &HeadersColl) {
-            warn!("|||\n{}|||", headers.display())
-        }
+    impl<()> MiddleWare<()> for usize {
+
     }
-
-    impl MiddleWare<AppStateTest> for MyMiddleWareTest {
-        fn on_header(&self, headers: &HeadersColl, app_stat: &AppStateTest) -> MiddleWareResult {
-            Self::inform(headers);
-            MiddleWareResult::Continue
-        }
-    }
-
     router.route_post(
         "/large_data",
         RouteConfig::new(DataManagement::Storage(BodyStorage::File)),
         |route_builder| {
             route_builder.subscribe_event(event_loop.clone());
-            route_builder.middleware(Arc::new(MyMiddleWareTest));
+            route_builder.middleware(app_state);
         },
     );
     router.route_get("/test", RouteConfig::default(), |route_builder| {
         route_builder.subscribe_event(event_loop.clone());
-        route_builder.middleware(Arc::new(MyMiddleWareTest));
     });
 
     let _server = Http3Server::new(addr)
         .add_key_path("/home/camille/Documents/rust/faces_http3_server/key.pem")
         .add_cert_path("/home/camille/Documents/rust/faces_http3_server/cert.pem")
         .set_file_storage_path("/home/camille/.temp_server/")
+        .with_app_state(app_state)
         .run_blocking(router.build());
 }

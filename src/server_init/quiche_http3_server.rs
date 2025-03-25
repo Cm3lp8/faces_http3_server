@@ -190,7 +190,10 @@ mod quiche_implementation {
 
     use super::*;
 
-    pub fn run(server_config: Arc<ServerConfig>, route_manager: RouteManager) {
+    pub fn run<S: Send + Sync + 'static>(
+        server_config: Arc<ServerConfig>,
+        route_manager: RouteManager<S>,
+    ) {
         let mut buf = [0; 65535];
         let mut out = [0; MAX_DATAGRAM_SIZE];
 
@@ -442,7 +445,7 @@ mod quiche_implementation {
                                 route_manager.routes_handler().parse_headers(
                                     &server_config,
                                     &chunk_dispatch_channel,
-                                    &list,
+                                    list,
                                     stream_id,
                                     client,
                                     &mut socket,
@@ -458,7 +461,7 @@ mod quiche_implementation {
                                 let trace_id = client.conn.trace_id().to_string();
 
                                 if let Err(_) =
-                                    route_manager.routes_handler().send_reception_status(
+                                    route_manager.routes_handler().send_reception_status_first(
                                         client,
                                         response_queue.get_high_priority_sender(),
                                         response_queue.get_low_priority_sender(),
@@ -507,7 +510,6 @@ mod quiche_implementation {
                                 }
                             }
                             Ok((stream_id, quiche::h3::Event::Finished)) => {
-                                info!("\n finished ! stream [{}] send now OK 200 ? \n", stream_id);
                                 let trace_id = client.conn.trace_id().to_owned();
                                 let scid = client.conn.source_id().as_ref().to_vec();
 
@@ -589,7 +591,6 @@ mod quiche_implementation {
                                     let is_end = client.is_body_totally_written(stream_id);
 
                                     if is_end {
-                                        warn!("is end [{:?}] ! ", client.get_written(stream_id));
                                         send_body_response(client, stream_id, vec![], is_end)
                                             .unwrap();
                                         client.pending_body_queue.remove_stream_queue(stream_id);
@@ -673,10 +674,6 @@ mod quiche_implementation {
                                                     client.set_body_size_to_body_sending_tracker(
                                                         stream_id, body_len,
                                                     );
-                                                    info!(
-                                                        "Sendadd headers bodylen[{:?}]",
-                                                        body_len
-                                                    );
                                                     client.set_headers_send(stream_id, true);
 
                                                     content.send_body_to_chunking_station(
@@ -691,7 +688,6 @@ mod quiche_implementation {
                                                        };*/
                                                 }
                                             } else {
-                                                warn!("cane_t send additional header");
                                                 client
                                                     .pending_body_queue
                                                     .push_item_on_front(request_chunk);
@@ -743,7 +739,6 @@ mod quiche_implementation {
                                     let headers = content.get_headers().to_vec();
                                     let is_end = content.is_end();
                                     let attached_body_len = content.attached_body_len();
-                                    warn!("header pending [{:?}] ", content);
 
                                     match content.priority_mode() {
                                         HeaderPriority::SendHeader => {
@@ -1030,10 +1025,6 @@ mod quiche_implementation {
         let conn = &mut client.conn;
         if let Err(e) = http3_conn.send_additional_headers(conn, stream_id, &headers, false, is_end)
         {
-            warn!(
-                "send more header [{:?}] Failed send intermediate 100 response, [{:?}]",
-                headers, e
-            );
         } else {
             return Ok(1);
         }
@@ -1218,19 +1209,7 @@ mod quiche_implementation {
         let conn = &mut client.conn;
 
         let written = match http3_conn.send_body(conn, stream_id, &data, is_end) {
-            Ok(v) => {
-                if is_end {
-                    info!(
-                        "final send for [{stream_id}] {}/{} bytes written. [{:?}] [{:?}]\n b [{:?}]",
-                        v,
-                        data.len(),
-                        client.get_written(stream_id),
-                        client.conn.trace_id(),
-                        client.get_written(if stream_id == 4 {0}else {4})
-                    )
-                };
-                v
-            }
+            Ok(v) => v,
             Err(quiche::h3::Error::Done) => 0,
             Err(e) => {
                 error!(
@@ -1260,11 +1239,11 @@ mod quiche_implementation {
          * */
         Ok(written)
     }
-    fn handle_request(
+    fn handle_request<S>(
         client: &mut Client,
         stream_id: u64,
         headers: &[quiche::h3::Header],
-        route_handler: &RouteHandler,
+        route_handler: &RouteHandler<S>,
     ) {
         let conn = &mut client.conn;
         let http3_conn = &mut client.http3_conn.as_mut().unwrap();
@@ -1314,10 +1293,10 @@ mod quiche_implementation {
         }
     }
     /// Builds an HTTP/3 response given a request.
-    fn build_response(
+    fn build_response<S>(
         root: &str,
         request: &[quiche::h3::Header],
-        request_handler: &RouteHandler,
+        request_handler: &RouteHandler<S>,
     ) -> (Vec<quiche::h3::Header>, Vec<u8>) {
         let mut file_path = std::path::PathBuf::from(root);
         let mut path = std::path::Path::new("");

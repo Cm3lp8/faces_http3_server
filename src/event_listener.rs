@@ -18,6 +18,7 @@ mod event_listener_trait {
         fn on_event(&self, event: RouteEvent) -> Option<RequestResponse> {
             None
         }
+        fn on_header(&self) {}
     }
 }
 

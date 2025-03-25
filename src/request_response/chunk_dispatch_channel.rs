@@ -85,7 +85,6 @@ mod dispatcher {
                 guard.map.get(&(stream_id, scid.to_vec()))
             {
                 if let Ok(i) = higher_priority.try_recv() {
-                    warn!("\nhdr [{:?}]\n", i);
                     return Ok(i);
                 }
                 match lower_priority.try_recv() {

@@ -51,6 +51,7 @@ mod route_config {
 
 mod route_mngr {
     use std::{
+        any::Any,
         collections::HashMap,
         fmt::Debug,
         hash::Hash,
@@ -61,10 +62,11 @@ mod route_mngr {
 
     use crate::{
         event_listener,
+        middleware::MiddleWare,
         request_response::{BodyType, RequestResponse},
         route_events::RouteEvent,
         route_handler::RequestsTable,
-        RouteEventListener,
+        HeadersColl, RouteEventListener,
     };
 
     use self::route_config::DataManagement;
@@ -73,23 +75,33 @@ mod route_mngr {
 
     type ReqPath = &'static str;
 
-    pub struct RouteManager {
-        inner: Arc<Mutex<RouteManagerInner>>,
+    pub struct RouteManager<S> {
+        inner: Arc<Mutex<RouteManagerInner<S>>>,
     }
-    impl Clone for RouteManager {
+    impl<S: Send + Sync + 'static> Clone for RouteManager<S> {
         fn clone(&self) -> Self {
             Self {
                 inner: self.inner.clone(),
             }
         }
     }
-    impl RouteManager {
-        pub fn new() -> RouteManagerBuilder {
+    impl<S: Send + Sync + 'static> RouteManager<S> {
+        ///
+        ///___________________________
+        ///Create a new Router with a concrete S as generic for an app state.
+        ///Use S for MiddleWare trait implementation.
+        ///
+        pub fn new_with_app_state(app_state: S) -> RouteManagerBuilder<S> {
             RouteManagerBuilder {
                 routes_formats: HashMap::new(),
+                app_state: Some(app_state),
             }
         }
-        pub fn get_routes_from_path(&self, path: &str, cb: impl FnOnce(Option<&Vec<RouteForm>>)) {
+        pub fn get_routes_from_path(
+            &self,
+            path: &str,
+            cb: impl FnOnce(Option<&Vec<RouteForm<S>>>),
+        ) {
             let guard = &*self.inner.lock().unwrap();
 
             cb(guard.get_routes_from_path(path));
@@ -99,24 +111,25 @@ mod route_mngr {
             path: &str,
             methode: H3Method,
             request_type: RequestType,
-            cb: impl FnOnce(Option<&RouteForm>),
+            cb: impl FnOnce(Option<&RouteForm<S>>),
         ) {
             let guard = &*self.inner.lock().unwrap();
 
             cb(guard.get_routes_from_path_and_method_b(path, methode));
         }
-        pub fn routes_handler(&self) -> RouteHandler {
+        pub fn routes_handler(&self) -> RouteHandler<S> {
             RouteHandler::new(self.inner.clone())
         }
     }
 
-    pub struct RouteManagerInner {
-        routes_formats: HashMap<ReqPath, Vec<RouteForm>>,
+    pub struct RouteManagerInner<S> {
+        routes_formats: HashMap<ReqPath, Vec<RouteForm<S>>>,
+        app_state: S,
         route_states: RequestsTable, //trace_id of the Connection as
                                      //key value is HashMap
                                      //for stream_id u64
     }
-    impl RouteManagerInner {
+    impl<S: Send + Sync + 'static> RouteManagerInner<S> {
         ///
         ///Init the request manager builder.
         ///You can add new request forms with add_new_request_form();
@@ -124,26 +137,30 @@ mod route_mngr {
         ///
         ///
         ///
-        pub fn new() -> RouteManagerBuilder {
+        pub fn new() -> RouteManagerBuilder<S> {
             RouteManagerBuilder {
                 routes_formats: HashMap::new(),
+                app_state: None,
             }
+        }
+        pub fn app_state(&self) -> &S {
+            &self.app_state
         }
         pub fn routes_states(&self) -> &RequestsTable {
             &self.route_states
         }
-        pub fn routes_formats(&self) -> &HashMap<ReqPath, Vec<RouteForm>> {
+        pub fn routes_formats(&self) -> &HashMap<ReqPath, Vec<RouteForm<S>>> {
             &self.routes_formats
         }
 
-        pub fn get_routes_from_path(&self, path: &str) -> Option<&Vec<RouteForm>> {
+        pub fn get_routes_from_path(&self, path: &str) -> Option<&Vec<RouteForm<S>>> {
             self.routes_formats.get(path)
         }
         pub fn get_routes_from_path_and_method_b(
             &self,
             path: &str,
             methode: H3Method,
-        ) -> Option<&RouteForm> {
+        ) -> Option<&RouteForm<S>> {
             if let Some(request_coll) = self.get_routes_from_path(path) {
                 if let Some(found_route) =
                     request_coll.iter().find(|item| item.method() == &methode)
@@ -161,7 +178,7 @@ mod route_mngr {
             &self,
             path: &'b str,
             methode: H3Method,
-        ) -> Option<(&RouteForm, Option<Vec<&'b str>>)> {
+        ) -> Option<(&RouteForm<S>, Option<Vec<&'b str>>)> {
             //if param in path
 
             let mut path_s = path.to_string();
@@ -186,13 +203,15 @@ mod route_mngr {
         }
     }
 
-    pub struct RouteManagerBuilder {
-        routes_formats: HashMap<ReqPath, Vec<RouteForm>>,
+    pub struct RouteManagerBuilder<S> {
+        routes_formats: HashMap<ReqPath, Vec<RouteForm<S>>>,
+        app_state: Option<S>,
     }
-    impl RouteManagerBuilder {
-        pub fn build(&mut self) -> RouteManager {
+    impl<S: Send + Sync + 'static> RouteManagerBuilder<S> {
+        pub fn build(&mut self) -> RouteManager<S> {
             let request_manager_inner = RouteManagerInner {
                 routes_formats: std::mem::replace(&mut self.routes_formats, HashMap::new()),
+                app_state: self.app_state.take().unwrap(),
                 route_states: RequestsTable::new(),
             };
 
@@ -204,7 +223,7 @@ mod route_mngr {
             &mut self,
             path: &'static str,
             route_configuration: RouteConfig,
-            route: impl FnOnce(&mut RouteFormBuilder),
+            route: impl FnOnce(&mut RouteFormBuilder<S>),
         ) -> &mut Self {
             self.add_route(path, H3Method::POST, route_configuration, route);
             self
@@ -213,7 +232,7 @@ mod route_mngr {
             &mut self,
             path: &'static str,
             route_configuration: RouteConfig,
-            route: impl FnOnce(&mut RouteFormBuilder),
+            route: impl FnOnce(&mut RouteFormBuilder<S>),
         ) -> &mut Self {
             self.add_route(path, H3Method::GET, route_configuration, route);
             self
@@ -223,7 +242,7 @@ mod route_mngr {
             path: &'static str,
             method: H3Method,
             route_configuration: RouteConfig,
-            route: impl FnOnce(&mut RouteFormBuilder),
+            route: impl FnOnce(&mut RouteFormBuilder<S>),
         ) -> &mut Self {
             let mut route_form = RouteForm::new(path, method, route_configuration);
 
@@ -236,7 +255,7 @@ mod route_mngr {
         ///
         ///Add a new RouteForm to the server.
         ///
-        fn add_new_route(&mut self, route_form: RouteForm) -> &mut Self {
+        fn add_new_route(&mut self, route_form: RouteForm<S>) -> &mut Self {
             let path = route_form.path();
 
             if !self.routes_formats.contains_key(path) {
@@ -279,6 +298,17 @@ mod route_mngr {
                 &_ => Err(()),
             }
         }
+        pub fn get_headers_for_middleware<'a>(
+            &self,
+            headers: &'a mut [h3::Header],
+        ) -> HeadersColl<'a> {
+            match self {
+                Self::POST => HeadersColl::HeadersPost(headers),
+                Self::GET => HeadersColl::HeadersGet(headers),
+                Self::PUT => HeadersColl::HeadersPost(headers),
+                Self::DELETE => HeadersColl::HeadersPost(headers),
+            }
+        }
     }
 
     #[derive(PartialEq)]
@@ -288,9 +318,10 @@ mod route_mngr {
         File(String),
     }
 
-    pub struct RouteForm {
+    pub struct RouteForm<S> {
         method: H3Method,
         event_subscriber: Option<Arc<dyn RouteEventListener + 'static + Send + Sync>>,
+        middlewares: Vec<Arc<dyn MiddleWare<S> + Send + Sync + 'static>>,
         path: &'static str,
         route_configuration: Option<RouteConfig>,
         scheme: &'static str,
@@ -298,7 +329,7 @@ mod route_mngr {
         body_cb:
             Option<Box<dyn Fn(RouteEvent) -> Result<RequestResponse, ()> + Send + Sync + 'static>>,
     }
-    impl Debug for RouteForm {
+    impl<S: Send + Sync + 'static> Debug for RouteForm<S> {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             write!(
                 f,
@@ -308,7 +339,7 @@ mod route_mngr {
         }
     }
 
-    impl PartialEq for RouteForm {
+    impl<S: Send + Sync + 'static> PartialEq for RouteForm<S> {
         fn eq(&self, other: &Self) -> bool {
             self.method() == other.method()
                 && self.path() == self.path()
@@ -317,12 +348,12 @@ mod route_mngr {
         }
     }
 
-    impl RouteForm {
+    impl<S: Send + Sync + 'static> RouteForm<S> {
         pub fn new(
             path: &'static str,
             method: H3Method,
             route_config: RouteConfig,
-        ) -> RouteFormBuilder {
+        ) -> RouteFormBuilder<S> {
             let mut builder = RouteFormBuilder::new();
             builder.set_path(path);
             builder.set_method(method);
@@ -349,6 +380,11 @@ mod route_mngr {
                 None
             }
         }
+        pub fn process_middlewares(&self, headers: &HeadersColl, app_state: &S) {
+            for mdw in &self.middlewares {
+                mdw.on_header(headers, app_state);
+            }
+        }
         pub fn build_response(
             &self,
             stream_id: u64,
@@ -370,9 +406,10 @@ mod route_mngr {
         }
     }
 
-    pub struct RouteFormBuilder {
+    pub struct RouteFormBuilder<S> {
         method: Option<H3Method>,
         event_subscriber: Option<Arc<dyn RouteEventListener + 'static + Send + Sync>>,
+        middlewares: Vec<Arc<dyn MiddleWare<S> + Sync + Send + 'static>>,
         route_configuration: Option<RouteConfig>,
         path: Option<&'static str>,
         scheme: Option<&'static str>,
@@ -388,12 +425,13 @@ mod route_mngr {
         >,
     }
 
-    impl RouteFormBuilder {
+    impl<S: Send + Sync + 'static> RouteFormBuilder<S> {
         pub fn new() -> Self {
             Self {
                 method: None,
                 event_subscriber: None,
                 path: None,
+                middlewares: vec![],
                 route_configuration: None,
                 scheme: None,
                 authority: None,
@@ -408,10 +446,18 @@ mod route_mngr {
             self.event_subscriber = Some(event_listener);
             self
         }
-        pub fn build(&mut self) -> RouteForm {
+        pub fn middleware(
+            &mut self,
+            middleware: Arc<dyn MiddleWare<S> + Send + Sync + 'static>,
+        ) -> &mut Self {
+            self.middlewares.push(middleware);
+            self
+        }
+        pub fn build(&mut self) -> RouteForm<S> {
             RouteForm {
                 method: self.method.take().unwrap(),
                 event_subscriber: self.event_subscriber.take(),
+                middlewares: self.middlewares.clone(),
                 path: self.path.take().unwrap(),
                 route_configuration: self.route_configuration.take(),
                 scheme: self.scheme.take().expect("expected scheme"),
