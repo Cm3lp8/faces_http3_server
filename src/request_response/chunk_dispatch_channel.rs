@@ -5,7 +5,7 @@ mod dispatcher {
         ascii::AsciiExt,
         collections::HashMap,
         error::Error,
-        sync::{Arc, Mutex},
+        sync::{atomic::AtomicUsize, Arc, Mutex},
     };
 
     use crossbeam_channel::SendError;
@@ -89,10 +89,6 @@ mod dispatcher {
                 }
                 match lower_priority.try_recv() {
                     Ok(i) => Ok(i),
-                    Err(e) if e.is_disconnected() => {
-                        warn!("is_disctonneted");
-                        Err(())
-                    }
                     Err(e) => Err(()),
                 }
             } else {
@@ -106,13 +102,15 @@ mod dispatcher {
         pub fn insert_new_channel(&self, stream_id: u64, scid: &[u8]) {
             let guard = &mut *self.inner.lock().unwrap();
             if !guard.already_in_map(stream_id, scid) {
+                let chunk_counter_0 = ChunkCounter::new(10);
+                let chunk_counter_1 = ChunkCounter::new(1010);
                 let chann_0 = crossbeam_channel::unbounded::<QueuedRequest>();
                 let chann_1 = crossbeam_channel::unbounded::<QueuedRequest>();
 
-                let sender_0: ChunkSender = ChunkSender::new(chann_0.0);
-                let receiver_0: ChunkReceiver = ChunkReceiver::new(chann_0.1);
-                let sender_1: ChunkSender = ChunkSender::new(chann_1.0);
-                let receiver_1: ChunkReceiver = ChunkReceiver::new(chann_1.1);
+                let sender_0: ChunkSender = ChunkSender::new(chann_0.0, chunk_counter_0.clone());
+                let receiver_0: ChunkReceiver = ChunkReceiver::new(chann_0.1, chunk_counter_0);
+                let sender_1: ChunkSender = ChunkSender::new(chann_1.0, chunk_counter_1.clone());
+                let receiver_1: ChunkReceiver = ChunkReceiver::new(chann_1.1, chunk_counter_1);
 
                 guard.insert(
                     (stream_id, scid.to_vec()),
@@ -169,28 +167,86 @@ mod dispatcher {
     #[derive(Clone, Debug)]
     pub struct ChunkSender {
         sender: crossbeam_channel::Sender<QueuedRequest>,
+        counter: ChunkCounter,
     }
     impl ChunkSender {
-        fn new(sender: crossbeam_channel::Sender<QueuedRequest>) -> Self {
-            Self { sender }
+        fn new(sender: crossbeam_channel::Sender<QueuedRequest>, counter: ChunkCounter) -> Self {
+            Self { sender, counter }
+        }
+
+        ///____________________
+        ///Return true if the counter limit of items present in the channel is not reached.
+        pub fn is_occupied(&self) -> bool {
+            self.counter.is_occupied()
         }
         pub fn send(
             &self,
             msg: QueuedRequest,
         ) -> Result<(), crossbeam_channel::SendError<QueuedRequest>> {
+            self.counter.try_increment();
             self.sender.send(msg)
         }
     }
 
     pub struct ChunkReceiver {
         receiver: crossbeam_channel::Receiver<QueuedRequest>,
+        counter: ChunkCounter,
     }
     impl ChunkReceiver {
-        fn new(receiver: crossbeam_channel::Receiver<QueuedRequest>) -> Self {
-            Self { receiver }
+        fn new(
+            receiver: crossbeam_channel::Receiver<QueuedRequest>,
+            counter: ChunkCounter,
+        ) -> Self {
+            Self { receiver, counter }
         }
-        fn try_recv(&self) -> Result<QueuedRequest, crossbeam_channel::TryRecvError> {
-            self.receiver.try_recv()
+        fn try_recv(&self) -> Result<QueuedRequest, ()> {
+            if let Ok(r) = self.receiver.try_recv() {
+                self.counter.decrement();
+                Ok(r)
+            } else {
+                Err(())
+            }
+        }
+    }
+    #[derive(Debug)]
+    pub struct ChunkCounter {
+        counter_limit: usize,
+        counter: Arc<AtomicUsize>,
+    }
+    impl ChunkCounter {
+        pub fn new(counter_limit: usize) -> Self {
+            Self {
+                counter_limit,
+                counter: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+        pub fn is_occupied(&self) -> bool {
+            self.counter_limit <= self.counter.load(std::sync::atomic::Ordering::Relaxed)
+        }
+        pub fn try_increment(&self) -> bool {
+            if self.counter_limit == self.counter.load(std::sync::atomic::Ordering::Relaxed) {
+                false
+            } else {
+                self.counter
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+                true
+            }
+        }
+        pub fn decrement(&self) {
+            if self.counter.load(std::sync::atomic::Ordering::Relaxed) > 0 {
+                let old = self
+                    .counter
+                    .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+    }
+    impl Clone for ChunkCounter {
+        fn clone(&self) -> Self {
+            Self {
+                counter_limit: self.counter_limit,
+                counter: self.counter.clone(),
+            }
         }
     }
 }

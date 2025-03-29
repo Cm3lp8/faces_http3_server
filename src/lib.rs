@@ -3,6 +3,7 @@ extern crate log;
 
 pub use event_listener::{EventLoop, RouteEventListener};
 use file_writer::FileWriter;
+pub use handler_dispatcher::RouteHandle;
 pub use middleware::{HeadersColl, MiddleWare, MiddleWareResult};
 pub use request_response::{ContentType, RequestResponse, Status};
 pub use route_events::{
@@ -24,6 +25,8 @@ mod route_manager;
 mod server_config;
 mod server_init;
 pub use server_init::Http3Server;
+mod conn_statistics;
+mod handler_dispatcher;
 #[cfg(test)]
 mod tests {
     use super::*;

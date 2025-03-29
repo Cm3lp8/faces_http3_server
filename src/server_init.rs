@@ -6,9 +6,11 @@ mod server_initiation {
     use std::{path::Path, sync::Arc, thread};
 
     use crate::{
+        handler_dispatcher,
         route_manager::{RouteForm, RouteFormBuilder},
         server_config::ServerConfigBuilder,
-        H3Method, RouteConfig, RouteManager, RouteManagerBuilder, ServerConfig,
+        EventLoop, H3Method, RouteConfig, RouteEvent, RouteManager, RouteManagerBuilder,
+        ServerConfig,
     };
 
     use super::*;
@@ -87,15 +89,34 @@ mod server_initiation {
         */
         pub fn run_blocking<S: 'static + Send + Sync>(
             &mut self,
-            route_manager: RouteManager<S>,
+            mut route_manager_builder: RouteManagerBuilder<S>,
         ) -> Http3Server {
             let config_clone = self.server_config.build();
             let config_clone = Arc::new(config_clone);
             let server = Http3Server {
                 server_config: config_clone.clone(),
             };
+
+            let route_event_dispatcher = route_manager_builder.build_route_event_dispatcher();
+            let event_loop = EventLoop::new(route_event_dispatcher);
+            route_manager_builder.attach_event_loop(event_loop.clone());
+
+            let route_manager = route_manager_builder.build();
+
             std::thread::spawn(move || {
                 quiche_http3_server::run(config_clone, route_manager);
+            });
+
+            event_loop.run(|event, handler_dispatcher, response_builder| match event {
+                RouteEvent::OnHeader(event) => {}
+                RouteEvent::OnFinished(event) => {
+                    let handler_dispatcher = handler_dispatcher.clone();
+                    std::thread::spawn(move || {
+                        handler_dispatcher.dispatch_finished(event);
+                    });
+                }
+                RouteEvent::OnData(data) => {}
+                _ => {}
             });
             thread::park();
             server

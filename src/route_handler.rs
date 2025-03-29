@@ -657,6 +657,7 @@ mod request_hndlr {
                     conn_id,
                     data,
                     sender,
+                    conn_stats,
                 } => {
                     *sender = Some(sndr);
                 }
@@ -666,6 +667,7 @@ mod request_hndlr {
                     conn_id,
                     file_path,
                     sender,
+                    conn_stats,
                 } => {
                     *sender = Some(sndr);
                 }

@@ -23,6 +23,8 @@ mod chunking_implementation {
     use mio::Waker;
     use ring::test::File;
 
+    use crate::conn_statistics::{self, ConnStats};
+
     use self::chunk_dispatch_channel::ChunkSender;
 
     use super::*;
@@ -36,6 +38,7 @@ mod chunking_implementation {
         body_len: usize,
         packet_id: usize,
         bytes_written: usize,
+        conn_stats: Option<ConnStats>,
     }
 
     impl ChunkableBody {
@@ -45,6 +48,7 @@ mod chunking_implementation {
             scid: &[u8],
             conn_id: String,
             data: Vec<u8>,
+            conn_stats: Option<ConnStats>,
         ) -> Result<Self, ()> {
             let body_len = data.len();
             Ok(Self {
@@ -56,6 +60,7 @@ mod chunking_implementation {
                 body_len,
                 packet_id: 0,
                 bytes_written: 0,
+                conn_stats,
             })
         }
         pub fn new_file(
@@ -64,6 +69,7 @@ mod chunking_implementation {
             stream_id: u64,
             conn_id: String,
             path: impl AsRef<Path>,
+            conn_stats: Option<ConnStats>,
         ) -> Result<Self, ()> {
             if let Ok(file) = std::fs::File::open(path) {
                 let body_len = if let Ok(metadata) = file.metadata() {
@@ -80,6 +86,7 @@ mod chunking_implementation {
                     body_len,
                     packet_id: 0,
                     bytes_written: 0,
+                    conn_stats,
                 })
             } else {
                 Err(())
@@ -87,7 +94,7 @@ mod chunking_implementation {
         }
     }
 
-    const CHUNK_SIZE: usize = 4096;
+    const CHUNK_SIZE: usize = 8192;
 
     type Scid = Vec<u8>;
     type StreamId = u64;
@@ -109,51 +116,50 @@ mod chunking_implementation {
             Arc::new(Mutex::new(HashMap::new()));
         let pending_items_clone = pending_items.clone();
         std::thread::spawn(move || {
-            let mut buf_read = [0; CHUNK_SIZE];
+            let mut buf_read_high = vec![0; CHUNK_SIZE];
+            let mut buf_read_low = vec![0; 2048];
+            let mut low = false;
+            let mut buf_read = &mut buf_read_high;
 
             'read: loop {
                 while let Ok(mut chunkable) = receiver.recv() {
                     let start = Instant::now();
                     let last_duration = *last_time_spend.lock().unwrap();
 
-                    if let Ok(n) = chunkable.reader.read(&mut buf_read) {
+                    if chunkable.sender.is_occupied() {
+                        if let Err(_) = resender.send(chunkable) {
+                            error!("Failed to resend chunkable body")
+                        }
+                        std::thread::sleep(Duration::from_micros(20));
+                        if let Err(e) = waker.wake() {
+                            panic!("error f waking [{:?}]", e)
+                        }
+                        continue;
+                    }
+                    if let Some(conn_stats) = &chunkable.conn_stats {
+                        if conn_stats.stats().0 > Duration::from_millis(3) {
+                            buf_read = &mut buf_read_low;
+                        }
+                    }
+                    if let Ok(n) = chunkable.reader.read(buf_read) {
                         let is_end = if n + chunkable.bytes_written == chunkable.body_len {
                             true
                         } else {
                             false
                         };
 
-                        std::thread::sleep(Duration::from_micros(100));
-
-                        pending_items
-                            .lock()
-                            .unwrap()
-                            .entry((chunkable.stream_id, chunkable.scid.to_vec()))
-                            .and_modify(|item| {
-                                let queuable_item = QueuedRequest::new_body(BodyRequest::new(
-                                    chunkable.stream_id,
-                                    chunkable.conn_id.as_str(),
-                                    &chunkable.scid,
-                                    chunkable.packet_id,
-                                    buf_read[..n].to_vec(),
-                                    is_end,
-                                ));
-
-                                item.push_back((chunkable.sender.clone(), queuable_item))
-                            })
-                            .or_insert_with(|| {
-                                let queuable_item = QueuedRequest::new_body(BodyRequest::new(
-                                    chunkable.stream_id,
-                                    chunkable.conn_id.as_str(),
-                                    &chunkable.scid,
-                                    chunkable.packet_id,
-                                    buf_read[..n].to_vec(),
-                                    is_end,
-                                ));
-                                let mut v = VecDeque::new();
-                                v.push_back((chunkable.sender.clone(), queuable_item));
-                                v
-                            });
+                        let queueable_item = QueuedRequest::new_body(BodyRequest::new(
+                            chunkable.stream_id,
+                            chunkable.conn_id.as_str(),
+                            &chunkable.scid,
+                            chunkable.packet_id,
+                            buf_read[..n].to_vec(),
+                            is_end,
+                        ));
+                        if let Err(e) = chunkable.sender.send(queueable_item) {
+                            error!("faield to send queued request")
+                        }
+                        std::thread::sleep(Duration::from_micros(2));
                         if let Err(e) = waker.wake() {
                             panic!("error f waking [{:?}]", e)
                         }
@@ -170,26 +176,14 @@ mod chunking_implementation {
                                 error!("Failed to resend chunkable body")
                             }
                         } else {
-                            debug!(
+                            if let Err(e) = waker.wake() {
+                                panic!("error f waking [{:?}]", e)
+                            }
+                            info!(
                                 "stream [{}] SUCCESS all data has been chunked  [{}/{}] !! ",
                                 chunkable.stream_id, chunkable.bytes_written, chunkable.body_len
                             )
                         }
-                    }
-                }
-            }
-        });
-
-        std::thread::spawn(move || 'send: loop {
-            std::thread::sleep(Duration::from_micros(100));
-            let guard = &mut *pending_items_clone.lock().unwrap();
-            for (k, v) in guard.iter_mut() {
-                if let Some((sender, queueable_item)) = v.pop_front() {
-                    if let Err(e) = sender.send(queueable_item) {
-                        error!("faield to send queued request")
-                    }
-                    if let Err(e) = waker_clone.wake() {
-                        panic!("error f waking [{:?}]", e)
                     }
                 }
             }
@@ -206,7 +200,7 @@ mod response_queue {
     use mio::Waker;
     use quiche::h3;
 
-    use crate::server_init::quiche_http3_server::QueueTrackableItem;
+    use crate::{conn_statistics::ConnStats, server_init::quiche_http3_server::QueueTrackableItem};
 
     use super::{
         chunk_dispatch_channel::ChunkSender,
@@ -267,6 +261,7 @@ mod response_queue {
                     conn_id,
                     data,
                     sender,
+                    conn_stats,
                 } => {
                     if let Ok(c_b) = ChunkableBody::new_data(
                         sender.expect("No sender attached"),
@@ -274,6 +269,7 @@ mod response_queue {
                         &scid,
                         conn_id,
                         data,
+                        conn_stats,
                     ) {
                         self.station_channel.0.send(c_b);
                     };
@@ -284,6 +280,7 @@ mod response_queue {
                     conn_id,
                     file_path,
                     sender,
+                    conn_stats,
                 } => {
                     if let Ok(c_b) = ChunkableBody::new_file(
                         sender.expect("no sender attached"),
@@ -291,6 +288,7 @@ mod response_queue {
                         stream_id,
                         conn_id,
                         file_path,
+                        conn_stats,
                     ) {
                         if let Err(e) = self.station_channel.0.send(c_b) {
                             error!("failed sending filereader to chunking station [{:?}]", e);
@@ -474,9 +472,11 @@ mod response_queue {
             &mut self,
             chunking_station: &ChunkingStation,
             last_time_spend: &Arc<Mutex<Duration>>,
+            conn_stats: ConnStats,
         ) {
             let body_option = self.attached_body.take();
-            if let Some(body) = body_option {
+            if let Some(mut body) = body_option {
+                body.attach_conn_stats(conn_stats);
                 chunking_station.send_response(body, last_time_spend);
             }
         }
@@ -557,6 +557,8 @@ mod request_reponse_builder {
 
     use quiche::h3::{self, Header, NameValue};
 
+    use crate::conn_statistics::ConnStats;
+
     use self::chunk_dispatch_channel::ChunkSender;
 
     use super::*;
@@ -575,6 +577,7 @@ mod request_reponse_builder {
             conn_id: String,
             data: Vec<u8>,
             sender: Option<ChunkSender>,
+            conn_stats: Option<ConnStats>,
         },
         FilePath {
             stream_id: u64,
@@ -582,6 +585,7 @@ mod request_reponse_builder {
             conn_id: String,
             file_path: PathBuf,
             sender: Option<ChunkSender>,
+            conn_stats: Option<ConnStats>,
         },
         None,
     }
@@ -594,6 +598,7 @@ mod request_reponse_builder {
                 conn_id,
                 data,
                 sender: None,
+                conn_stats: None,
             }
         }
         pub fn new_file(
@@ -608,6 +613,30 @@ mod request_reponse_builder {
                 conn_id,
                 file_path: file_path.as_ref().to_path_buf(),
                 sender: None,
+                conn_stats: None,
+            }
+        }
+        pub fn attach_conn_stats(&mut self, conn_statis: ConnStats) {
+            match self {
+                Self::Data {
+                    stream_id,
+                    scid,
+                    conn_id,
+                    data,
+                    sender,
+                    conn_stats,
+                } => *conn_stats = Some(conn_statis),
+                Self::FilePath {
+                    stream_id,
+                    scid,
+                    conn_id,
+                    file_path,
+                    sender,
+                    conn_stats,
+                } => {
+                    *conn_stats = Some(conn_statis);
+                }
+                Self::None => {}
             }
         }
         pub fn bytes_len(&self) -> usize {
@@ -618,6 +647,7 @@ mod request_reponse_builder {
                     conn_id,
                     data,
                     sender,
+                    conn_stats,
                 } => data.len(),
                 Self::FilePath {
                     stream_id,
@@ -625,6 +655,7 @@ mod request_reponse_builder {
                     conn_id,
                     file_path,
                     sender,
+                    conn_stats,
                 } => std::fs::File::open(file_path)
                     .unwrap()
                     .metadata()

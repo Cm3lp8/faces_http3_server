@@ -62,6 +62,7 @@ mod route_mngr {
 
     use crate::{
         event_listener,
+        handler_dispatcher::{RouteEventDispatcher, RouteHandle},
         middleware::MiddleWare,
         request_response::{BodyType, RequestResponse},
         route_events::RouteEvent,
@@ -222,6 +223,21 @@ mod route_mngr {
                 inner: Arc::new(Mutex::new(request_manager_inner)),
             }
         }
+        pub fn build_route_event_dispatcher(&self) -> RouteEventDispatcher {
+            let mut handler_dispatcher = RouteEventDispatcher::new();
+            handler_dispatcher.set_handles(&self.routes_formats);
+            handler_dispatcher
+        }
+        pub fn attach_event_loop(
+            &mut self,
+            event_loop: Arc<dyn RouteEventListener + Send + Sync + 'static>,
+        ) {
+            for route_coll in self.routes_formats.values_mut() {
+                for route in route_coll {
+                    route.set_event_subscriber(&event_loop);
+                }
+            }
+        }
         ///___________________________
         ///Add a middleware that will affect all routes.
         ///It will be process before the route specifics middlewares.
@@ -291,7 +307,7 @@ mod route_mngr {
         }
     }
 
-    #[derive(Clone, Debug, Copy, PartialEq)]
+    #[derive(Clone, Debug, Copy, PartialEq, Hash, Eq)]
     pub enum H3Method {
         GET,
         POST,
@@ -336,6 +352,7 @@ mod route_mngr {
     pub struct RouteForm<S> {
         method: H3Method,
         event_subscriber: Option<Arc<dyn RouteEventListener + 'static + Send + Sync>>,
+        handler_subscriber: Vec<Arc<dyn RouteHandle + Send + Sync + 'static>>,
         middlewares: Vec<Arc<dyn MiddleWare<S> + Send + Sync + 'static>>,
         path: &'static str,
         route_configuration: Option<RouteConfig>,
@@ -382,6 +399,15 @@ mod route_mngr {
         pub fn method(&self) -> &H3Method {
             &self.method
         }
+        pub fn handles(&self) -> Vec<Arc<dyn RouteHandle + Sync + Send + 'static>> {
+            self.handler_subscriber.clone()
+        }
+        pub fn set_event_subscriber(
+            &mut self,
+            event_listener: &Arc<dyn RouteEventListener + Send + Sync + 'static>,
+        ) {
+            self.event_subscriber = Some(event_listener.clone());
+        }
         pub fn event_subscriber(
             &self,
         ) -> Option<Arc<dyn RouteEventListener + 'static + Send + Sync>> {
@@ -424,6 +450,7 @@ mod route_mngr {
     pub struct RouteFormBuilder<S> {
         method: Option<H3Method>,
         event_subscriber: Option<Arc<dyn RouteEventListener + 'static + Send + Sync>>,
+        handler_subscriber: Vec<Arc<dyn RouteHandle + Send + Sync + 'static>>,
         middlewares: Vec<Arc<dyn MiddleWare<S> + Sync + Send + 'static>>,
         route_configuration: Option<RouteConfig>,
         path: Option<&'static str>,
@@ -445,6 +472,7 @@ mod route_mngr {
             Self {
                 method: None,
                 event_subscriber: None,
+                handler_subscriber: vec![],
                 path: None,
                 middlewares: vec![],
                 route_configuration: None,
@@ -452,6 +480,13 @@ mod route_mngr {
                 authority: None,
                 body_cb: None,
             }
+        }
+        pub fn handler(
+            &mut self,
+            handler: Arc<dyn RouteHandle + Send + Sync + 'static>,
+        ) -> &mut Self {
+            self.handler_subscriber.push(handler);
+            self
         }
 
         pub fn subscribe_event(
@@ -480,6 +515,7 @@ mod route_mngr {
             RouteForm {
                 method: self.method.take().unwrap(),
                 event_subscriber: self.event_subscriber.take(),
+                handler_subscriber: std::mem::replace(&mut self.handler_subscriber, vec![]),
                 middlewares: self.middlewares.clone(),
                 path: self.path.take().unwrap(),
                 route_configuration: self.route_configuration.take(),

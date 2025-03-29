@@ -26,24 +26,37 @@ mod event_loop {
 
     use std::sync::Arc;
 
+    use crate::handler_dispatcher::RouteEventDispatcher;
+
     use super::*;
     pub struct EventLoop {
         channel: (
             crossbeam_channel::Sender<(RouteEvent, ResponseBuilderSender)>,
             crossbeam_channel::Receiver<(RouteEvent, ResponseBuilderSender)>,
         ),
+        route_event_dispatcher: RouteEventDispatcher,
     }
     impl EventLoop {
-        pub fn new() -> Arc<Self> {
+        pub fn new(route_event_dispatcher: RouteEventDispatcher) -> Arc<Self> {
             let channel = crossbeam_channel::bounded::<(RouteEvent, ResponseBuilderSender)>(100);
 
-            Arc::new(Self { channel })
+            Arc::new(Self {
+                channel,
+                route_event_dispatcher,
+            })
         }
-        pub fn run(&self, cb: impl Fn(RouteEvent, ResponseBuilderSender) + Send + Sync + 'static) {
+        pub fn run(
+            &self,
+            cb: impl Fn(RouteEvent, &RouteEventDispatcher, ResponseBuilderSender)
+                + Send
+                + Sync
+                + 'static,
+        ) {
             let recv = self.channel.1.clone();
+            let route_event_dispatcher = self.route_event_dispatcher.clone();
             std::thread::spawn(move || {
                 while let Ok((event, response_builder)) = recv.recv() {
-                    cb(event, response_builder)
+                    cb(event, &route_event_dispatcher, response_builder)
                 }
             });
         }
