@@ -3,11 +3,12 @@ extern crate log;
 
 pub use event_listener::{EventLoop, RouteEventListener};
 use file_writer::FileWriter;
-pub use handler_dispatcher::RouteHandle;
+pub use handler_dispatcher::{Response, RouteHandle, RouteResponse};
 pub use middleware::{HeadersColl, MiddleWare, MiddleWareResult};
 pub use request_response::{ContentType, RequestResponse, Status};
 pub use route_events::{
-    DataEvent, EventResponseChannel, EventResponseWaiter, ResponseBuilderSender, RouteEvent,
+    DataEvent, EventResponseChannel, EventResponseWaiter, FinishedEvent, ResponseBuilderSender,
+    RouteEvent,
 };
 pub use route_manager::DataManagement;
 pub use server_config::{

@@ -108,14 +108,16 @@ mod server_initiation {
             });
 
             event_loop.run(|event, handler_dispatcher, response_builder| match event {
-                RouteEvent::OnHeader(event) => {}
                 RouteEvent::OnFinished(event) => {
                     let handler_dispatcher = handler_dispatcher.clone();
                     std::thread::spawn(move || {
-                        handler_dispatcher.dispatch_finished(event);
+                        let response: crate::RouteResponse =
+                            handler_dispatcher.dispatch_finished(event);
+
+                        response_builder.build_response(response);
                     });
                 }
-                RouteEvent::OnData(data) => {}
+                RouteEvent::OnData(_data) => {}
                 _ => {}
             });
             thread::park();

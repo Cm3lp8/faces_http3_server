@@ -9,7 +9,7 @@ mod event_response_channel {
     use mio::event;
     use quiche::h3;
 
-    use crate::{RequestResponse, RouteEvent};
+    use crate::{RequestResponse, RouteEvent, RouteResponse};
 
     pub struct EventResponseChannel;
     impl EventResponseChannel {
@@ -46,6 +46,16 @@ mod event_response_channel {
                 RequestResponse::new_ok_200(stream_id, scid, conn_id)
                     .header("x-received-data", self.bytes_written.to_string().as_str()),
             )
+        }
+        pub fn build_response(
+            &self,
+            route_response: RouteResponse,
+        ) -> Result<(), crossbeam_channel::SendError<RequestResponse>> {
+            match route_response {
+                RouteResponse::OK200 => self.send_ok_200(),
+                RouteResponse::OK200_DATA(data) => self.send_ok_200_with_data(data),
+                RouteResponse::OK200_FILE(file_path) => self.send_ok_200_with_file(file_path),
+            }
         }
         pub fn send_ok_200_with_data(
             &self,
