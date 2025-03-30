@@ -117,7 +117,7 @@ mod chunking_implementation {
         let pending_items_clone = pending_items.clone();
         std::thread::spawn(move || {
             let mut buf_read_high = vec![0; CHUNK_SIZE];
-            let mut buf_read_low = vec![0; 2048];
+            let mut buf_read_low = vec![0; CHUNK_SIZE];
             let mut low = false;
             let mut buf_read = &mut buf_read_high;
 
@@ -179,9 +179,9 @@ mod chunking_implementation {
                             if let Err(e) = waker.wake() {
                                 panic!("error f waking [{:?}]", e)
                             }
-                            info!(
-                                "stream [{}] SUCCESS all data has been chunked  [{}/{}] !! ",
-                                chunkable.stream_id, chunkable.bytes_written, chunkable.body_len
+                            debug!(
+                                "stream [{}]  in queue[{}]SUCCESS all data has been chunked  [{}/{}] !! ",
+                                chunkable.stream_id, chunkable.sender.in_queue(),chunkable.bytes_written, chunkable.body_len
                             )
                         }
                     }

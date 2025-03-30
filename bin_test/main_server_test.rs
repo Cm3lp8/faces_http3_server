@@ -27,10 +27,22 @@ fn main() {
                 event.path()
             );
 
-            Response::ok_200_with_data(event, vec![0; 35_000])
+            Response::ok_200_with_data(event, vec![0; 135_000_000])
         }
     }
 
+    struct HandlerTestMini;
+    impl RouteHandle for HandlerTestMini {
+        fn call(&self, event: FinishedEvent, current_status_response: RouteResponse) -> Response {
+            info!(
+                "Received Data on file path [{}] on [{:?}] ",
+                event.bytes_written(),
+                event.path()
+            );
+
+            Response::ok_200_with_data(event, vec![0; 135])
+        }
+    }
     pub struct AppStateTest;
     let mut router = RouteManager::new_with_app_state(AppStateTest);
 
@@ -39,13 +51,16 @@ fn main() {
     struct MyGlobalMiddleWare;
     impl MyGlobalMiddleWare {
         fn inform(headers: &HeadersColl) {
-            info!("[This is a global_middleware]");
+            //  info!("[This is a global_middleware]");
         }
     }
     struct MyMiddleWareTest;
     impl MyMiddleWareTest {
         fn inform(headers: &HeadersColl) {
-            warn!("|||\n{}|||", headers.display())
+            info!(
+                "\n\n### Incoming request: \n\n|||\n{}|||\n",
+                headers.display()
+            )
         }
     }
     impl MiddleWare<AppStateTest> for MyGlobalMiddleWare {
@@ -72,6 +87,10 @@ fn main() {
     );
     router.route_get("/test", RouteConfig::default(), |route_builder| {
         route_builder.handler(Arc::new(HandlerTest));
+        route_builder.middleware(Arc::new(MyMiddleWareTest));
+    });
+    router.route_get("/test_mini", RouteConfig::default(), |route_builder| {
+        route_builder.handler(Arc::new(HandlerTestMini));
         route_builder.middleware(Arc::new(MyMiddleWareTest));
     });
 

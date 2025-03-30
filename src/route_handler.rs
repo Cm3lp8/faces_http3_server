@@ -187,19 +187,6 @@ mod request_hndlr {
                                         stream_id, conn_id, &scid, 0, body, false,
                                     )),
                                 );
-
-                                /*
-                                if let Ok(stream_cap) = client.conn().stream_capacity(stream_id) {
-                                    if stream_cap >= body.len() {
-                                        if let Err(()) = quiche_http3_server::send_body(
-                                            client, stream_id, body, false,
-                                        ) {
-                                            error!("Failed sending progress body status")
-                                        }
-                                    }
-                                } else {
-                                    warn!("stream [{stream_id}] is closed");
-                                }*/
                             }
                         }
                     };
@@ -315,26 +302,6 @@ mod request_hndlr {
                                             if let Err(e) = waker.wake() {
                                                 error!("Failed to wake poll [{:?}]", e);
                                             };
-
-                                            /*
-                                            if let Ok(n) = quiche_http3_server::send_more_header(
-                                                client,
-                                                stream_id,
-                                                headers.clone(),
-                                                false,
-                                            ) {
-                                                client.set_body_size_to_body_sending_tracker(
-                                                    stream_id,
-                                                    body.bytes_len(),
-                                                );
-                                                info!("Send headers [{:?}]", headers);
-                                                client.set_headers_send(stream_id, true);
-                                                chunking_station.send_response(body, last_time);
-
-                                                if let Err(e) = waker.wake() {
-                                                    error!("Failed to wake poll [{:?}]", e);
-                                                };
-                                            }*/
                                         } else {
                                             chunking_station.send_response(body, last_time);
                                             if let Err(e) = waker.wake() {
@@ -465,7 +432,6 @@ mod request_hndlr {
             }
 
             if more_frames {
-                info!("returning because more frames");
                 return;
             }
 
@@ -512,7 +478,7 @@ mod request_hndlr {
                             ) {
                                 match body {
                                     Some(body) => {
-                                        let (recv_send_confirmation, header_req) =
+                                        let (_recv_send_confirmation, header_req) =
                                             HeaderRequest::new(
                                                 stream_id,
                                                 &scid,
@@ -531,26 +497,9 @@ mod request_hndlr {
                                         {
                                             error!("Failed to send header_req")
                                         }
-                                        info!("sending post request");
-
-                                        /*
-                                                                                if let Ok(n) = quiche_http3_server::send_header(
-                                                                                    client, socket, stream_id, headers, false,
-                                                                                ) {
-                                                                                    client.set_body_size_to_body_sending_tracker(
-                                                                                        stream_id,
-                                                                                        body.bytes_len(),
-                                                                                    );
-                                                                                    client.set_headers_send(stream_id, true);
-                                                                                    response_head.send_response(body, last_time);
-                                                                                    if let Err(e) = waker.wake() {
-                                                                                        error!("Failed to wake poll [{:?}]", e);
-                                                                                    };
-                                                                                }
-                                        */
                                     }
                                     None => {
-                                        let (recv_send_confirmation, header_req) =
+                                        let (_recv_send_confirmation, header_req) =
                                             HeaderRequest::new(
                                                 stream_id,
                                                 &scid,

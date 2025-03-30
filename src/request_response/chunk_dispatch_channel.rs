@@ -79,6 +79,16 @@ mod dispatcher {
                 .collect();
             coll
         }
+        pub fn in_queue(&self, stream_id: u64, scid: &[u8]) -> Result<usize, ()> {
+            let guard = &*self.inner.lock().unwrap();
+            if let Some((_, _, lower_priority, higher_priority)) =
+                guard.map.get(&(stream_id, scid.to_vec()))
+            {
+                Ok(lower_priority.in_queue())
+            } else {
+                Err(())
+            }
+        }
         pub fn try_pop(&self, stream_id: u64, scid: &[u8]) -> Result<QueuedRequest, ()> {
             let guard = &*self.inner.lock().unwrap();
             if let Some((_, _, lower_priority, higher_priority)) =
@@ -179,6 +189,9 @@ mod dispatcher {
         pub fn is_occupied(&self) -> bool {
             self.counter.is_occupied()
         }
+        pub fn in_queue(&self) -> usize {
+            self.counter.in_queue()
+        }
         pub fn send(
             &self,
             msg: QueuedRequest,
@@ -198,6 +211,9 @@ mod dispatcher {
             counter: ChunkCounter,
         ) -> Self {
             Self { receiver, counter }
+        }
+        pub fn in_queue(&self) -> usize {
+            self.counter.in_queue()
         }
         fn try_recv(&self) -> Result<QueuedRequest, ()> {
             if let Ok(r) = self.receiver.try_recv() {
@@ -219,6 +235,9 @@ mod dispatcher {
                 counter_limit,
                 counter: Arc::new(AtomicUsize::new(0)),
             }
+        }
+        pub fn in_queue(&self) -> usize {
+            self.counter.load(std::sync::atomic::Ordering::Relaxed)
         }
         pub fn is_occupied(&self) -> bool {
             self.counter_limit <= self.counter.load(std::sync::atomic::Ordering::Relaxed)
