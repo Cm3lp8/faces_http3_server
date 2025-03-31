@@ -20,7 +20,8 @@ mod request_hndlr {
     use crate::{
         file_writer::{FileWritable, FileWriterChannel},
         request_response::{
-            BodyRequest, ChunkSender, ChunkingStation, ChunksDispatchChannel, HeaderRequest,
+            BodyRequest, ChunkSender, ChunkingStation, ChunksDispatchChannel, HeaderPriority,
+            HeaderRequest,
         },
         route_events::{self, EventType, RouteEvent},
         route_manager::{DataManagement, RouteManagerInner},
@@ -33,8 +34,11 @@ mod request_hndlr {
         h3::{self, NameValue},
         Connection,
     };
+    use request_hndlr::route_handle_implementation::send_404;
 
-    use self::request_temp_table::RequestsTable;
+    use self::{
+        request_temp_table::RequestsTable, route_handle_implementation::response_preparation,
+    };
 
     use super::*;
 
@@ -163,10 +167,6 @@ mod request_hndlr {
                         }
                         {
                             if let Some(body) = reception_status.body() {
-                                warn!(
-                                    "sending rec status [{:?}]",
-                                    String::from_utf8_lossy(&body[..])
-                                );
                                 chunk_dispatch_channel.send_to_high_priority_queue(
                                     stream_id,
                                     &scid,
@@ -229,6 +229,22 @@ mod request_hndlr {
             last_time: &Arc<Mutex<Duration>>,
         ) {
             let guard = &*self.inner.lock().unwrap();
+            let chunk_dispatch_channel = chunking_station.get_chunking_dispatch_channel();
+
+            response_preparation(
+                guard,
+                client,
+                waker,
+                &chunk_dispatch_channel,
+                chunking_station,
+                conn_id,
+                &scid,
+                stream_id,
+                EventType::OnFinished,
+                HeaderPriority::SendAdditionnalHeader,
+            );
+
+            /*
             if let Ok(route_event) = guard.routes_states().build_route_event(
                 conn_id,
                 scid,
@@ -290,7 +306,7 @@ mod request_hndlr {
                                                 error!("Failed to wake poll [{:?}]", e);
                                             };
                                         } else {
-                                            chunking_station.send_response(body, last_time);
+                                            chunking_station.send_response(body);
                                             if let Err(e) = waker.wake() {
                                                 error!("Failed to wake poll [{:?}]", e);
                                             };
@@ -325,7 +341,7 @@ mod request_hndlr {
                 }
             } else {
                 debug!("Not found");
-            }
+            }*/
         }
         pub fn parse_headers(
             &self,
@@ -400,6 +416,20 @@ mod request_hndlr {
                     event_subscriber.as_ref().unwrap().on_header();
                     let headers_coll: HeadersColl = method.get_headers_for_middleware(&mut headers);
                     route_form.process_middlewares(&headers_coll, &guard.app_state());
+                } else {
+                    warn!("No route found send a 404 error");
+                    send_404(
+                        path.as_ref().unwrap().as_str(),
+                        guard,
+                        client,
+                        &waker,
+                        chunk_dispatch_channel,
+                        response_head,
+                        &scid,
+                        stream_id,
+                        EventType::OnFinished,
+                        HeaderPriority::SendHeader,
+                    );
                 }
                 guard.routes_states().add_partial_request(
                     server_config,
@@ -422,108 +452,18 @@ mod request_hndlr {
                 return;
             }
 
-            if let Ok(route_event) = guard.routes_states().build_route_event(
+            response_preparation(
+                guard,
+                client,
+                &waker,
+                chunk_dispatch_channel,
+                response_head,
                 conn_id.as_str(),
                 &scid,
                 stream_id,
                 EventType::OnFinished,
-            ) {
-                chunk_dispatch_channel.insert_new_channel(stream_id, &scid);
-                let header_sender =
-                    chunk_dispatch_channel.get_high_priority_sender(stream_id, &scid);
-                let body_sender = chunk_dispatch_channel.get_low_priority_sender(stream_id, &scid);
-                let is_end = route_event.is_end();
-                if let Some((route_form, _)) =
-                    guard.get_routes_from_path_and_method(route_event.path(), route_event.method())
-                {
-                    match route_form.method() {
-                        H3Method::GET => {
-                            /*stream shutdown send response*/
-
-                            let mut response =
-                                if let Some(event_subscriber) = route_form.event_subscriber() {
-                                    event_subscriber.on_event(route_event)
-                                } else {
-                                    error!("no event subscribre");
-                                    None
-                                };
-
-                            if let Some(resp) = &mut response {
-                                resp.attach_chunk_sender(body_sender.unwrap());
-                            }
-                            /*
-                                                        client
-                                                            .conn()
-                                                            .stream_shutdown(stream_id, quiche::Shutdown::Read, 0)
-                                                            .unwrap();
-                            */
-                            if let Ok((headers, body)) = route_form.build_response(
-                                stream_id,
-                                &scid,
-                                conn_id.as_str(),
-                                response,
-                            ) {
-                                match body {
-                                    Some(body) => {
-                                        let (_recv_send_confirmation, header_req) =
-                                            HeaderRequest::new(
-                                                stream_id,
-                                                &scid,
-                                                headers.clone(),
-                                                false,
-                                                Some(body),
-                                                header_sender,
-                                                crate::request_response::HeaderPriority::SendHeader,
-                                            );
-                                        if let Err(_) = chunk_dispatch_channel
-                                            .send_to_high_priority_queue(
-                                                stream_id,
-                                                &scid,
-                                                QueuedRequest::new_header(header_req),
-                                            )
-                                        {
-                                            error!("Failed to send header_req")
-                                        }
-                                    }
-                                    None => {
-                                        let (_recv_send_confirmation, header_req) =
-                                            HeaderRequest::new(
-                                                stream_id,
-                                                &scid,
-                                                headers.clone(),
-                                                is_end,
-                                                None,
-                                                header_sender,
-                                                crate::request_response::HeaderPriority::SendHeader,
-                                            );
-                                        if let Err(_) = chunk_dispatch_channel
-                                            .send_to_high_priority_queue(
-                                                stream_id,
-                                                &scid,
-                                                QueuedRequest::new_header(header_req),
-                                            )
-                                        {
-                                            error!("Failed to send header_req")
-                                        }
-
-                                        /*
-                                                                                quiche_http3_server::send_response(
-                                                                                    client,
-                                                                                    stream_id,
-                                                                                    headers,
-                                                                                    vec![],
-                                                                                    is_end,
-                                                                                );
-                                        */
-                                    }
-                                }
-                            }
-                        }
-                        H3Method::POST => { /*create entry in handler state*/ }
-                        _ => {}
-                    }
-                }
-            }
+                HeaderPriority::SendHeader,
+            );
         }
         pub fn get_routes_from_path_and_method_and_request_type(
             &self,
@@ -585,7 +525,7 @@ mod request_hndlr {
         ///Attach a channel sender to the body that corresponds to the associated client.
         ///Sender can be build with :
         ///client.get_response_sender()
-        fn attach_chunk_sender(&mut self, sndr: ChunkSender) {
+        pub fn attach_chunk_sender(&mut self, sndr: ChunkSender) {
             match self.body_as_mut() {
                 crate::request_response::BodyType::Data {
                     stream_id,
@@ -608,6 +548,264 @@ mod request_hndlr {
                     *sender = Some(sndr);
                 }
                 crate::request_response::BodyType::None => {}
+            }
+        }
+    }
+}
+
+mod route_handle_implementation {
+    use std::sync::MutexGuard;
+
+    use quiche::h3;
+
+    use crate::{
+        request_response::{ChunkingStation, ChunksDispatchChannel, HeaderPriority, HeaderRequest},
+        route_events::EventType,
+        route_manager::{ErrorType, RouteManagerInner},
+        server_init::QClient as Client,
+    };
+
+    use super::*;
+
+    pub fn send_404<S: Send + Sync + 'static>(
+        req_path: &str,
+        guard: &RouteManagerInner<S>,
+        client: &mut Client,
+        waker: &mio::Waker,
+        chunk_dispatch_channel: &ChunksDispatchChannel,
+        chunking_station: &ChunkingStation,
+        scid: &[u8],
+        stream_id: u64,
+        event_type: EventType,
+        header_priority: HeaderPriority,
+    ) {
+        if let Some((mut headers, body)) = guard.get_error_response(ErrorType::Error404) {
+            headers.push(h3::Header::new(b"x-wrong-path", req_path.as_bytes()));
+            chunk_dispatch_channel.insert_new_channel(stream_id, &scid);
+            info!("found errror response is nose[{}] ", body.is_some());
+            let header_sender = chunk_dispatch_channel.get_high_priority_sender(stream_id, &scid);
+            let body_sender = chunk_dispatch_channel.get_low_priority_sender(stream_id, &scid);
+            match body {
+                Some(body) => {
+                    if !client.headers_send(stream_id) {
+                        let (_recv_send_confirmation, header_req) = HeaderRequest::new(
+                            stream_id,
+                            &scid,
+                            headers.clone(),
+                            false,
+                            Some(body),
+                            header_sender,
+                            header_priority,
+                        );
+
+                        if let Err(_) = chunk_dispatch_channel.send_to_high_priority_queue(
+                            stream_id,
+                            &scid,
+                            QueuedRequest::new_header(header_req),
+                        ) {
+                            error!("Failed to send header_req")
+                        }
+                        if let Err(e) = waker.wake() {
+                            error!("Failed to wake poll [{:?}]", e);
+                        };
+                    } else {
+                        chunking_station.send_response(body);
+                        if let Err(e) = waker.wake() {
+                            error!("Failed to wake poll [{:?}]", e);
+                        };
+                    }
+                }
+                None => {
+                    let (_recv_send_confirmation, header_req) = HeaderRequest::new(
+                        stream_id,
+                        &scid,
+                        headers.clone(),
+                        true,
+                        None,
+                        header_sender,
+                        header_priority,
+                    );
+                    if let Err(_) = chunking_station
+                        .get_chunking_dispatch_channel()
+                        .send_to_high_priority_queue(
+                            stream_id,
+                            &scid,
+                            QueuedRequest::new_header(header_req),
+                        )
+                    {
+                        error!("Failed to send header_req")
+                    }
+                }
+            }
+        }
+    }
+    pub fn response_preparation<S: Send + Sync + 'static>(
+        guard: &RouteManagerInner<S>,
+        client: &mut Client,
+        waker: &mio::Waker,
+        chunk_dispatch_channel: &ChunksDispatchChannel,
+        chunking_station: &ChunkingStation,
+        conn_id: &str,
+        scid: &[u8],
+        stream_id: u64,
+        event_type: EventType,
+        header_priority: HeaderPriority,
+    ) {
+        if let Ok(route_event) = guard
+            .routes_states()
+            .build_route_event(conn_id, scid, stream_id, event_type)
+        {
+            chunk_dispatch_channel.insert_new_channel(stream_id, &scid);
+            let header_sender = chunk_dispatch_channel.get_high_priority_sender(stream_id, &scid);
+            let body_sender = chunk_dispatch_channel.get_low_priority_sender(stream_id, &scid);
+            let is_end = route_event.is_end();
+            if let Some((route_form, _)) =
+                guard.get_routes_from_path_and_method(route_event.path(), route_event.method())
+            {
+                match route_form.method() {
+                    H3Method::GET => {
+                        /*stream shutdown send response*/
+
+                        let mut response =
+                            if let Some(event_subscriber) = route_form.event_subscriber() {
+                                event_subscriber.on_event(route_event)
+                            } else {
+                                error!("no event subscribre");
+                                None
+                            };
+
+                        if let Some(resp) = &mut response {
+                            resp.attach_chunk_sender(body_sender.unwrap());
+                        }
+                        /*
+                                                    client
+                                                        .conn()
+                                                        .stream_shutdown(stream_id, quiche::Shutdown::Read, 0)
+                                                        .unwrap();
+                        */
+                        if let Ok((headers, body)) =
+                            route_form.build_response(stream_id, &scid, conn_id, response)
+                        {
+                            match body {
+                                Some(body) => {
+                                    let (_recv_send_confirmation, header_req) = HeaderRequest::new(
+                                        stream_id,
+                                        &scid,
+                                        headers.clone(),
+                                        false,
+                                        Some(body),
+                                        header_sender,
+                                        header_priority,
+                                    );
+                                    if let Err(_) = chunk_dispatch_channel
+                                        .send_to_high_priority_queue(
+                                            stream_id,
+                                            &scid,
+                                            QueuedRequest::new_header(header_req),
+                                        )
+                                    {
+                                        error!("Failed to send header_req")
+                                    }
+                                }
+                                None => {
+                                    let (_recv_send_confirmation, header_req) = HeaderRequest::new(
+                                        stream_id,
+                                        &scid,
+                                        headers.clone(),
+                                        is_end,
+                                        None,
+                                        header_sender,
+                                        header_priority,
+                                    );
+                                    if let Err(_) = chunk_dispatch_channel
+                                        .send_to_high_priority_queue(
+                                            stream_id,
+                                            &scid,
+                                            QueuedRequest::new_header(header_req),
+                                        )
+                                    {
+                                        error!("Failed to send header_req")
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    H3Method::POST => {
+                        chunk_dispatch_channel.insert_new_channel(stream_id, scid);
+                        let body_sender =
+                            chunk_dispatch_channel.get_low_priority_sender(stream_id, scid);
+                        let header_sender =
+                            chunk_dispatch_channel.get_high_priority_sender(stream_id, scid);
+                        let mut response =
+                            if let Some(event_subscriber) = route_form.event_subscriber() {
+                                event_subscriber.on_event(route_event)
+                            } else {
+                                None
+                            };
+                        if let Some(resp) = &mut response {
+                            resp.attach_chunk_sender(body_sender.unwrap())
+                        }
+                        if let Ok((headers, body)) =
+                            route_form.build_response(stream_id, scid, conn_id, response)
+                        {
+                            match body {
+                                Some(body) => {
+                                    if !client.headers_send(stream_id) {
+                                        let (_recv_send_confirmation, header_req) = HeaderRequest::new(
+                                                  stream_id,
+                                                   &scid,
+                                                 headers.clone(),
+                                               false,
+                                                Some(body),
+                                                header_sender,
+                                                   crate::request_response::HeaderPriority::SendAdditionnalHeader,
+                                                 );
+
+                                        if let Err(_) = chunk_dispatch_channel
+                                            .send_to_high_priority_queue(
+                                                stream_id,
+                                                &scid,
+                                                QueuedRequest::new_header(header_req),
+                                            )
+                                        {
+                                            error!("Failed to send header_req")
+                                        }
+                                        if let Err(e) = waker.wake() {
+                                            error!("Failed to wake poll [{:?}]", e);
+                                        };
+                                    } else {
+                                        chunking_station.send_response(body);
+                                        if let Err(e) = waker.wake() {
+                                            error!("Failed to wake poll [{:?}]", e);
+                                        };
+                                    }
+                                }
+                                None => {
+                                    let (_recv_send_confirmation, header_req) = HeaderRequest::new(
+                                                  stream_id,
+                                                   &scid,
+                                                 headers.clone(),
+                                               true,
+                                            None,
+                                            header_sender,
+                                                   crate::request_response::HeaderPriority::SendAdditionnalHeader,
+                                                 );
+                                    if let Err(_) = chunking_station
+                                        .get_chunking_dispatch_channel()
+                                        .send_to_high_priority_queue(
+                                            stream_id,
+                                            &scid,
+                                            QueuedRequest::new_header(header_req),
+                                        )
+                                    {
+                                        error!("Failed to send header_req")
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
             }
         }
     }

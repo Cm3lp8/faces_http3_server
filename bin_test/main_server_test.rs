@@ -5,13 +5,14 @@ use std::sync::Arc;
 use std::{thread, usize};
 
 use faces_quic_server::{
-    BodyStorage, ContentType, DataEvent, DataManagement, EventLoop, EventResponseChannel,
-    FinishedEvent, H3Method, HeadersColl, Http3Server, MiddleWare, MiddleWareResult,
-    RequestResponse, Response, ResponseBuilderSender, RouteConfig, RouteEvent, RouteEventListener,
-    RouteForm, RouteHandle, RouteResponse,
+    BodyStorage, ContentType, DataEvent, DataManagement, ErrorType, EventLoop,
+    EventResponseChannel, FinishedEvent, H3Method, HeadersColl, Http3Server, MiddleWare,
+    MiddleWareResult, RequestResponse, Response, ResponseBuilderSender, RouteConfig, RouteEvent,
+    RouteEventListener, RouteForm, RouteHandle, RouteResponse,
 };
 use faces_quic_server::{RequestType, RouteManager, RouteManagerBuilder, ServerConfig};
 use log::{error, info, warn};
+use quiche::h3;
 fn main() {
     env_logger::init();
     let addr = "192.168.1.22:3000";
@@ -40,7 +41,7 @@ fn main() {
                 event.path()
             );
 
-            Response::ok_200_with_data(event, vec![0; 135])
+            Response::ok_200(event)
         }
     }
     pub struct AppStateTest;
@@ -94,6 +95,9 @@ fn main() {
         route_builder.middleware(Arc::new(MyMiddleWareTest));
     });
 
+    router.set_error_handler(ErrorType::Error404, |error_buidler| {
+        error_buidler.header(&[h3::Header::new(b"type", b"bad request")]);
+    });
     let _server = Http3Server::new(addr)
         .add_key_path("/home/camille/Documents/rust/faces_http3_server/key.pem")
         .add_cert_path("/home/camille/Documents/rust/faces_http3_server/cert.pem")

@@ -10,7 +10,7 @@ pub use route_events::{
     DataEvent, EventResponseChannel, EventResponseWaiter, FinishedEvent, ResponseBuilderSender,
     RouteEvent,
 };
-pub use route_manager::DataManagement;
+pub use route_manager::{DataManagement, ErrorType};
 pub use server_config::{
     BodyStorage, H3Method, RequestType, RouteConfig, RouteForm, RouteHandler, RouteManager,
     RouteManagerBuilder, ServerConfig,

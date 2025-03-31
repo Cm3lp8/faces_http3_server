@@ -1,8 +1,10 @@
 pub use crate::route_handler::RouteHandler;
+
 pub use crate::route_manager::route_mngr::RouteManagerInner;
 pub use route_config::{BodyStorage, DataManagement, RouteConfig};
 pub use route_mngr::{
-    H3Method, RequestType, RouteForm, RouteFormBuilder, RouteManager, RouteManagerBuilder,
+    ErrorType, H3Method, RequestType, RouteForm, RouteFormBuilder, RouteManager,
+    RouteManagerBuilder,
 };
 
 mod route_config {
@@ -95,6 +97,7 @@ mod route_mngr {
         pub fn new_with_app_state(app_state: S) -> RouteManagerBuilder<S> {
             RouteManagerBuilder {
                 routes_formats: HashMap::new(),
+                error_formats: HashMap::new(),
                 app_state: Some(app_state),
                 global_middlewares: vec![],
             }
@@ -126,6 +129,7 @@ mod route_mngr {
 
     pub struct RouteManagerInner<S> {
         routes_formats: HashMap<ReqPath, Vec<RouteForm<S>>>,
+        error_formats: HashMap<ErrorType, ErrorForm>,
         app_state: S,
         route_states: RequestsTable, //trace_id of the Connection as
                                      //key value is HashMap
@@ -142,6 +146,7 @@ mod route_mngr {
         pub fn new() -> RouteManagerBuilder<S> {
             RouteManagerBuilder {
                 routes_formats: HashMap::new(),
+                error_formats: HashMap::new(),
                 app_state: None,
                 global_middlewares: vec![],
             }
@@ -151,6 +156,15 @@ mod route_mngr {
         }
         pub fn routes_states(&self) -> &RequestsTable {
             &self.route_states
+        }
+        pub fn get_error_response(
+            &self,
+            error: ErrorType,
+        ) -> Option<(Vec<h3::Header>, Option<BodyType>)> {
+            if let Some(entry) = self.error_formats.get(&error) {
+                return Some((entry.headers(), entry.body()));
+            }
+            None
         }
         pub fn routes_formats(&self) -> &HashMap<ReqPath, Vec<RouteForm<S>>> {
             &self.routes_formats
@@ -177,6 +191,10 @@ mod route_mngr {
         }
         /// Search for the corresponding request format that contains the
         /// associated callback.
+        ///
+        /// # If no route found with path
+        ///
+        /// Then return a 400 error Status !
         pub fn get_routes_from_path_and_method<'b>(
             &self,
             path: &'b str,
@@ -208,6 +226,7 @@ mod route_mngr {
 
     pub struct RouteManagerBuilder<S> {
         routes_formats: HashMap<ReqPath, Vec<RouteForm<S>>>,
+        error_formats: HashMap<ErrorType, ErrorForm>,
         app_state: Option<S>,
         global_middlewares: Vec<Arc<dyn MiddleWare<S> + Send + Sync + 'static>>,
     }
@@ -215,6 +234,7 @@ mod route_mngr {
         pub fn build(&mut self) -> RouteManager<S> {
             let request_manager_inner = RouteManagerInner {
                 routes_formats: std::mem::replace(&mut self.routes_formats, HashMap::new()),
+                error_formats: std::mem::replace(&mut self.error_formats, HashMap::new()),
                 app_state: self.app_state.take().unwrap(),
                 route_states: RequestsTable::new(),
             };
@@ -247,6 +267,18 @@ mod route_mngr {
         ) -> &mut Self {
             self.global_middlewares.push(entry);
             self
+        }
+        pub fn set_error_handler(
+            &mut self,
+            error_type: ErrorType,
+            cb: impl FnOnce(&mut ErrorFormBuilder),
+        ) {
+            let mut error_form_builder = ErrorForm::new(error_type);
+            cb(&mut error_form_builder);
+            let error_form: ErrorForm = error_form_builder.build();
+            self.error_formats
+                .entry(error_type)
+                .insert_entry(error_form);
         }
         pub fn route_post(
             &mut self,
@@ -349,6 +381,60 @@ mod route_mngr {
         File(String),
     }
 
+    #[derive(Eq, Hash, Clone, Copy, Debug, PartialEq)]
+    pub enum ErrorType {
+        Error404,
+    }
+    impl ErrorType {
+        pub fn to_header(&self) -> h3::Header {
+            match self {
+                Self::Error404 => h3::Header::new(b":status", b"404"),
+            }
+        }
+    }
+    pub struct ErrorForm {
+        error_type: ErrorType,
+        scheme: &'static str,
+        authority: Option<&'static str>,
+        headers: Vec<h3::Header>,
+        body: Option<BodyType>,
+    }
+    impl Debug for ErrorForm {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(
+                f,
+                "error  [{:?}] path : [{:?}] , route_configuration [{:?}]",
+                self.error_type,
+                self.headers,
+                self.body.is_some()
+            )
+        }
+    }
+
+    impl PartialEq for ErrorForm {
+        fn eq(&self, other: &Self) -> bool {
+            self.error_type() == other.error_type()
+        }
+    }
+    impl ErrorForm {
+        pub fn error_type(&self) -> ErrorType {
+            self.error_type
+        }
+        pub fn new(error_type: ErrorType) -> ErrorFormBuilder {
+            let mut builder = ErrorFormBuilder::new();
+            builder.set_error_type(error_type);
+            builder.set_scheme("https");
+            builder.response_header = Some(vec![error_type.to_header()]);
+            builder
+        }
+        pub fn headers(&self) -> Vec<h3::Header> {
+            self.headers.clone()
+        }
+        pub fn body(&self) -> Option<BodyType> {
+            self.body.clone()
+        }
+    }
+
     pub struct RouteForm<S> {
         method: H3Method,
         event_subscriber: Option<Arc<dyn RouteEventListener + 'static + Send + Sync>>,
@@ -444,6 +530,49 @@ mod route_mngr {
             let default = RequestResponse::new_ok_200(stream_id, scid, conn_id);
             let headers = default.get_headers();
             Ok((headers, None))
+        }
+    }
+
+    pub struct ErrorFormBuilder {
+        error_type: Option<ErrorType>,
+        scheme: Option<&'static str>,
+        authority: Option<&'static str>,
+        response_header: Option<Vec<h3::Header>>,
+        body: Option<BodyType>,
+    }
+    impl ErrorFormBuilder {
+        pub fn build(&mut self) -> ErrorForm {
+            ErrorForm {
+                error_type: self.error_type.take().unwrap(),
+                scheme: self.scheme.take().unwrap(),
+                authority: self.authority.take(),
+                headers: self.response_header.take().unwrap(),
+                body: self.body.take(),
+            }
+        }
+        pub fn new() -> Self {
+            Self {
+                error_type: None,
+                scheme: None,
+                authority: None,
+                response_header: None,
+                body: None,
+            }
+        }
+        pub fn set_error_type(&mut self, error_type: ErrorType) -> &mut Self {
+            self.error_type = Some(error_type);
+            self
+        }
+        pub fn set_scheme(&mut self, scheme: &'static str) -> &mut Self {
+            self.scheme = Some(scheme);
+            self
+        }
+        pub fn header(&mut self, headers: &[h3::Header]) -> &mut Self {
+            self.response_header
+                .as_mut()
+                .unwrap()
+                .extend_from_slice(headers);
+            self
         }
     }
 

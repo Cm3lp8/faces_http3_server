@@ -838,7 +838,6 @@ mod quiche_implementation {
                                         b,
                                         false,
                                     ) {
-                                        warn!("content [{:?}]", String::from_utf8_lossy(&p[..]));
                                         client.pending_body_queue.push_item_on_front(request_chunk);
                                         info!("pushed [[{}]]", p_id);
                                     }
@@ -847,8 +846,6 @@ mod quiche_implementation {
                                     let headers = content.get_headers().to_vec();
                                     let is_end = content.is_end();
                                     let attached_body_len = content.attached_body_len();
-
-                                    warn!("header [{:?}]", content.get_headers());
 
                                     match content.priority_mode() {
                                         HeaderPriority::SendHeader => {
@@ -1130,7 +1127,6 @@ mod quiche_implementation {
                             }
                             Err(e) => {
                                 error!("{} send failed: {:?}", client.conn.trace_id(), e);
-                                warn!("{} send failed: {:?}", client.conn.trace_id(), e);
                                 client.conn.close(false, 0x1, b"fail").ok();
                                 break;
                             }
@@ -1326,7 +1322,6 @@ mod quiche_implementation {
                     written: 0,
                 };
                 client.partial_responses.insert(stream_id, response);
-                warn!("streamblocked [{stream_id}]");
                 return Ok(0);
             }
             Err(e) => {
@@ -1571,7 +1566,7 @@ mod quiche_implementation {
     fn build_response<S>(
         root: &str,
         request: &[quiche::h3::Header],
-        request_handler: &RouteHandler<S>,
+        _request_handler: &RouteHandler<S>,
     ) -> (Vec<quiche::h3::Header>, Vec<u8>) {
         let mut file_path = std::path::PathBuf::from(root);
         let mut path = std::path::Path::new("");
@@ -1653,8 +1648,6 @@ mod quiche_implementation {
         };
         resp.written += written;
         if resp.written == resp.body.len() {
-            let len = resp.body.len();
-            let written_total = resp.written;
             {
                 debug!("{}/{}", written + amount_written.0, total_to_write);
                 if written + amount_written.0 == total_to_write {
@@ -1706,180 +1699,5 @@ mod quiche_implementation {
                 (name, value)
             })
             .collect()
-    }
-    pub fn purge_connexion(client: &mut Client, socket: &mut UdpSocket) {
-        let mut out = [0; 65535];
-        let mut buf = [0; 65535];
-        let pacing = Duration::from_micros(120);
-
-        warn!("purge_connexion for client [{}]", client.conn.trace_id());
-        //   handler_incoming_packet(socket, clients, config, &mut out, &mut buf);
-        loop {
-            let (write, send_info) = match client.conn.send(&mut out) {
-                Ok(v) => v,
-                Err(quiche::Error::Done) => {
-                    break;
-                }
-                Err(e) => {
-                    error!("{} send failed: {:?}", client.conn.trace_id(), e);
-                    warn!("{} send failed: {:?}", client.conn.trace_id(), e);
-                    client.conn.close(false, 0x1, b"fail").ok();
-                    break;
-                }
-            };
-            if let Err(e) = socket.send_to(&out[..write], send_info.to) {
-                if e.kind() == std::io::ErrorKind::WouldBlock {
-                    debug!("send() would block, [{:?}]", e);
-                    break;
-                }
-                panic!("send() failed: {:?}", e);
-            }
-            debug!("\n{} written {} bytes", client.conn.trace_id(), write);
-            //  println!("{} written {} bytes", client.conn.trace_id(), write);
-
-            /*
-            while send_duration.elapsed() < pacing_delay {
-                std::thread::yield_now();
-            }*/
-
-            std::thread::sleep(pacing);
-        }
-    }
-
-    pub fn handler_incoming_packet(
-        socket: &mut UdpSocket,
-        clients: &mut HashMap<ConnectionId, Client>,
-        config: &mut quiche::Config,
-        out: &mut [u8],
-        buf: &mut [u8],
-    ) {
-        let local_addr = socket.local_addr();
-        let rng = SystemRandom::new();
-        let conn_id_seed = ring::hmac::Key::generate(ring::hmac::HMAC_SHA256, &rng).unwrap();
-        let pacing = Duration::from_micros(120);
-        'read: loop {
-            let (len, from) = match socket.recv_from(buf) {
-                Ok(v) => v,
-                Err(e) => {
-                    // There are no more UDP packets to read, so end the read
-                    // loop.
-                    if e.kind() == std::io::ErrorKind::WouldBlock {
-                        debug!("recv() would block");
-                        break 'read;
-                    }
-                    panic!("recv() failed: {:?}", e);
-                }
-            };
-            debug!("got {} bytes", len);
-            let pkt_buf = &mut buf[..len];
-            // Parse the QUIC packet's header.
-            let hdr = match quiche::Header::from_slice(pkt_buf, quiche::MAX_CONN_ID_LEN) {
-                Ok(v) => v,
-                Err(e) => {
-                    error!("Parsing packet header failed: {:?}", e);
-                    continue 'read;
-                }
-            };
-            trace!("got packet {:?}", hdr);
-            let conn_id = ring::hmac::sign(&conn_id_seed, &hdr.dcid);
-            let conn_id = &conn_id.as_ref()[..quiche::MAX_CONN_ID_LEN];
-            let conn_id = conn_id.to_vec().into();
-            // Lookup a connection based on the packet's connection ID. If there
-            // is no connection matching, create a new one.
-            let client = if !clients.contains_key(&hdr.dcid) && !clients.contains_key(&conn_id) {
-                if hdr.ty != quiche::Type::Initial {
-                    error!("Packet is not Initial");
-                    continue 'read;
-                }
-                if !quiche::version_is_supported(hdr.version) {
-                    debug!("Doing version negotiation");
-                    let len = quiche::negotiate_version(&hdr.scid, &hdr.dcid, out).unwrap();
-                    let out = &out[..len];
-                    if let Err(e) = socket.send_to(out, from) {
-                        if e.kind() == std::io::ErrorKind::WouldBlock {
-                            debug!("send() would block");
-                            break;
-                        }
-                        panic!("send() failed: {:?}", e);
-                    }
-                    continue 'read;
-                }
-                let mut scid = [0; quiche::MAX_CONN_ID_LEN];
-                scid.copy_from_slice(&conn_id);
-                let scid = quiche::ConnectionId::from_ref(&scid);
-                // Token is always present in Initial packets.
-                let token = hdr.token.as_ref().unwrap();
-                // Do stateless retry if the client didn't send a token.
-                if token.is_empty() {
-                    debug!("Doing stateless retry");
-                    let new_token = mint_token(&hdr, &from);
-                    let len =
-                        quiche::retry(&hdr.scid, &hdr.dcid, &scid, &new_token, hdr.version, out)
-                            .unwrap();
-                    let out = &out[..len];
-                    if let Err(e) = socket.send_to(out, from) {
-                        if e.kind() == std::io::ErrorKind::WouldBlock {
-                            debug!("send() would block");
-                            break;
-                        }
-                        panic!("send() failed: {:?}", e);
-                    }
-                    continue 'read;
-                }
-                let odcid = validate_token(&from, token);
-                // The token was not valid, meaning the retry failed, so
-                // drop the packet.
-                if odcid.is_none() {
-                    error!("Invalid address validation token");
-                    continue 'read;
-                }
-                if scid.len() != hdr.dcid.len() {
-                    error!("Invalid destination connection ID");
-                    continue 'read;
-                }
-                // Reuse the source connection ID we sent in the Retry packet,
-                // instead of changing it again.
-                let scid = hdr.dcid.clone();
-                //debug!("New connection: dcid={:?} scid={:?}", hdr.dcid, scid);
-                debug!("New connection: dcid={:?} scid={:?}", hdr.dcid, scid);
-                let conn = quiche::accept(
-                    &scid,
-                    odcid.as_ref(),
-                    *local_addr.as_ref().unwrap(),
-                    from,
-                    config,
-                )
-                .unwrap();
-                let client = Client {
-                    conn,
-                    http3_conn: None,
-                    partial_responses: HashMap::new(),
-                    progress_status_requests: HashMap::new(),
-                    headers_sending_tracker: HashMap::new(),
-                    body_sending_tracker: HashMap::new(),
-                    pending_body_queue: BodyReqQueue::<QueuedRequest>::new(scid.as_ref()),
-                    conn_stats: ConnStats::new(),
-                };
-                clients.insert(scid.clone(), client);
-                clients.get_mut(&scid).unwrap()
-            } else {
-                match clients.get_mut(&hdr.dcid) {
-                    Some(v) => v,
-                    None => clients.get_mut(&conn_id).unwrap(),
-                }
-            };
-            let recv_info = quiche::RecvInfo {
-                to: socket.local_addr().unwrap(),
-                from,
-            };
-            // Process potentially coalesced packets.
-            let read = match client.conn.recv(pkt_buf, recv_info) {
-                Ok(v) => v,
-                Err(e) => {
-                    error!("{} recv failed: {:?}", client.conn.trace_id(), e);
-                    continue 'read;
-                }
-            };
-        }
     }
 }

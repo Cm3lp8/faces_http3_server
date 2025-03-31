@@ -253,7 +253,7 @@ mod response_queue {
         pub fn set_pending_buffers_usage(&self, map: HashMap<Vec<u8>, HashMap<u64, usize>>) {
             *self.pending_buffer_usage_map.lock().unwrap() = map;
         }
-        pub fn send_response(&self, msg: BodyType, last_time_spend: &Arc<Mutex<Duration>>) {
+        pub fn send_response(&self, msg: BodyType) {
             match msg {
                 BodyType::Data {
                     stream_id,
@@ -477,7 +477,7 @@ mod response_queue {
             let body_option = self.attached_body.take();
             if let Some(mut body) = body_option {
                 body.attach_conn_stats(conn_stats);
-                chunking_station.send_response(body, last_time_spend);
+                chunking_station.send_response(body);
             }
         }
         pub fn get_headers_len(&self) -> usize {
