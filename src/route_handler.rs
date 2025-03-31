@@ -148,30 +148,13 @@ mod request_hndlr {
                         ];
 
                         if !header_send {
+                            return Err(());
                             /*
                                                         guard
                                                             .routes_states()
                                                             .set_intermediate_headers_send(stream_id, conn_id.to_string());
                             */
 
-                            let sender =
-                                chunk_dispatch_channel.insert_new_channel(stream_id, &scid);
-                            let (_recv_send_confirmation, header_req) = HeaderRequest::new(
-                                stream_id,
-                                &scid,
-                                headers.clone(),
-                                false,
-                                None,
-                                None,
-                                crate::request_response::HeaderPriority::SendHeader100,
-                            );
-                            if let Err(_) = chunk_dispatch_channel.send_to_high_priority_queue(
-                                stream_id,
-                                &scid,
-                                QueuedRequest::new_header(header_req),
-                            ) {
-                                error!("Failed to send header_req")
-                            }
                             /*
                                                         return quiche_http3_server::send_header(
                                                             client, stream_id, headers, false,
@@ -180,7 +163,11 @@ mod request_hndlr {
                         }
                         {
                             if let Some(body) = reception_status.body() {
-                                chunk_dispatch_channel.send_to_queue(
+                                warn!(
+                                    "sending rec status [{:?}]",
+                                    String::from_utf8_lossy(&body[..])
+                                );
+                                chunk_dispatch_channel.send_to_high_priority_queue(
                                     stream_id,
                                     &scid,
                                     QueuedRequest::BodyProgression(BodyRequest::new(

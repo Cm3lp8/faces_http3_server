@@ -830,12 +830,15 @@ mod quiche_implementation {
                                     if let Err(_e) = waker_clone.wake() {}
                                 }
                                 QueuedRequest::BodyProgression(ref mut content) => {
-                                    if let Err(_e) = send_body_response(
+                                    let b = content.take_data();
+                                    let p = b.clone();
+                                    if let Err(_e) = send_body_response_progression(
                                         client,
                                         content.stream_id(),
-                                        content.take_data(),
+                                        b,
                                         false,
                                     ) {
+                                        warn!("content [{:?}]", String::from_utf8_lossy(&p[..]));
                                         client.pending_body_queue.push_item_on_front(request_chunk);
                                         info!("pushed [[{}]]", p_id);
                                     }
@@ -844,6 +847,8 @@ mod quiche_implementation {
                                     let headers = content.get_headers().to_vec();
                                     let is_end = content.is_end();
                                     let attached_body_len = content.attached_body_len();
+
+                                    warn!("header [{:?}]", content.get_headers());
 
                                     match content.priority_mode() {
                                         HeaderPriority::SendHeader => {
@@ -1417,6 +1422,48 @@ mod quiche_implementation {
             };
             client.partial_responses.insert(stream_id, response);
         }
+        /*
+         *
+         * Send reponse to the client
+         *
+         * */
+        Ok(written)
+    }
+    fn send_body_response_progression(
+        client: &mut Client,
+        stream_id: u64,
+        data: Vec<u8>,
+        is_end: bool,
+    ) -> Result<usize, ()> {
+        debug!("sending body [{}] bytes", data.len());
+        let (already_written, total_len) = client.get_written(stream_id);
+        let http3_conn = &mut client.http3_conn.as_mut().unwrap();
+        let conn = &mut client.conn;
+
+        let written = match http3_conn.send_body(conn, stream_id, &data, false) {
+            Ok(v) => v,
+            Err(quiche::h3::Error::Done) => 0,
+            Err(e) => {
+                error!(
+                    " stramcap [{:?} ]is_end [{:?}]  ...{} [{}] Dsend failed {:?}",
+                    conn.stream_capacity(stream_id),
+                    is_end,
+                    conn.trace_id(),
+                    stream_id,
+                    e
+                );
+                return Err(());
+            }
+        };
+        if written < data.len() {
+            let response = PartialResponse {
+                headers: None,
+                body: data,
+                written,
+            };
+            client.partial_responses.insert(stream_id, response);
+        }
+        client.set_written_to_body_sending_tracker(stream_id, written);
         /*
          *
          * Send reponse to the client
