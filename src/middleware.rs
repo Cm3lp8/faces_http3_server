@@ -12,9 +12,11 @@ mod middleware_trait {
 }
 
 mod middleware_state {
+    use crate::{ErrorResponse, Response};
+
     pub enum MiddleWareResult {
         Continue,
-        Abort(()),
+        Abort(ErrorResponse),
     }
 }
 

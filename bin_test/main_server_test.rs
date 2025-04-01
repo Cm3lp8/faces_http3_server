@@ -41,7 +41,7 @@ fn main() {
                 event.path()
             );
 
-            Response::ok_200(event)
+            Response::ok_200_with_data(event, vec![0; 10_000_000])
         }
     }
     pub struct AppStateTest;
@@ -53,6 +53,17 @@ fn main() {
     impl MyGlobalMiddleWare {
         fn inform(headers: &HeadersColl) {
             //  info!("[This is a global_middleware]");
+        }
+    }
+    struct MiddleWareForcedError;
+    impl MiddleWare<AppStateTest> for MiddleWareForcedError {
+        fn on_header<'a>(
+            &self,
+            headers: &HeadersColl<'a>,
+            app_stat: &AppStateTest,
+        ) -> MiddleWareResult {
+            info!("Sending unauthorized request ! ");
+            MiddleWareResult::Abort(faces_quic_server::ErrorResponse::Error401(None))
         }
     }
     struct MyMiddleWareTest;
@@ -92,7 +103,9 @@ fn main() {
     });
     router.route_get("/test_mini", RouteConfig::default(), |route_builder| {
         route_builder.handler(Arc::new(HandlerTestMini));
-        route_builder.middleware(Arc::new(MyMiddleWareTest));
+        route_builder
+            .middleware(Arc::new(MyMiddleWareTest))
+            .middleware(Arc::new(MiddleWareForcedError));
     });
 
     router.set_error_handler(ErrorType::Error404, |error_buidler| {

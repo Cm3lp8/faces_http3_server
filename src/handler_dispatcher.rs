@@ -1,6 +1,8 @@
 pub use dispatcher::{Response, RouteEventDispatcher};
+pub use error_response::ErrorResponse;
 pub use handler_trait::RouteHandle;
 pub use route_response::RouteResponse;
+
 mod handler_trait {
     use crate::route_events::FinishedEvent;
 
@@ -25,6 +27,18 @@ mod handler_trait {
         fn call(&self, event: FinishedEvent, status_response: RouteResponse) -> Response {
             Response::ok_200(event)
         }
+    }
+}
+mod error_response {
+
+    use std::path::PathBuf;
+    pub enum ErrorResponse {
+        /// Unauthorize
+        Error401(Option<Vec<u8>>),
+        /// Forbidden
+        Error403(Option<Vec<u8>>),
+        /// Unsupported media type
+        Error415(Option<Vec<u8>>),
     }
 }
 mod route_response {

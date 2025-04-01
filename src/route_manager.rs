@@ -69,7 +69,7 @@ mod route_mngr {
         request_response::{BodyType, RequestResponse},
         route_events::RouteEvent,
         route_handler::RequestsTable,
-        HeadersColl, RouteEventListener,
+        ErrorResponse, HeadersColl, RouteEventListener,
     };
 
     use self::route_config::DataManagement;
@@ -507,10 +507,20 @@ mod route_mngr {
                 None
             }
         }
-        pub fn process_middlewares(&self, headers: &HeadersColl, app_state: &S) {
+        pub fn process_middlewares(
+            &self,
+            headers: &HeadersColl,
+            app_state: &S,
+        ) -> Result<(), ErrorResponse> {
             for mdw in &self.middlewares {
-                mdw.on_header(headers, app_state);
+                if let crate::MiddleWareResult::Abort(error_type) =
+                    mdw.on_header(headers, app_state)
+                {
+                    return Err(error_type);
+                }
             }
+
+            Ok(())
         }
         pub fn build_response(
             &self,
@@ -610,6 +620,10 @@ mod route_mngr {
                 body_cb: None,
             }
         }
+        ///____________________________
+        ///# Registration of a new handle for this route
+        ///
+        ///RouteHandle trait implementation is required, as well as an Arc encapsulation.
         pub fn handler(
             &mut self,
             handler: Arc<dyn RouteHandle + Send + Sync + 'static>,
@@ -625,6 +639,31 @@ mod route_mngr {
             self.event_subscriber = Some(event_listener);
             self
         }
+        ///___________________________
+        ///
+        ///
+        ///# Add a Middleware in the collection.
+        ///
+        ///The chaining order here reflects the order of the middleware collection that will be processed by
+        ///the server.
+        ///
+        ///# Trait implementation
+        ///
+        ///Your middleware has to implement MiddleWare<S> trait. Then to be accepted by this method, it
+        ///has to be
+        ///wrapped it in an Arc.
+        ///
+        ///# Where is it called and what does it do
+        ///
+        ///A middleware is called on a new header reception, extracts it and procedes to compute some logic with it as argument.
+        ///(for auth verification,or any other condition checking).
+        ///It returns an enum that tells if the request is accepted here and can continue or if the
+        ///request does'nt meet the condition and has to abort.
+        ///
+        ///# In case of abortion
+        ///
+        ///The abort variant encapsulates the error response that will be returned to the peer.
+        ///
         pub fn middleware(
             &mut self,
             middleware: Arc<dyn MiddleWare<S> + Send + Sync + 'static>,
