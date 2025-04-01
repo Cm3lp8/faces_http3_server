@@ -440,6 +440,7 @@ mod request_hndlr {
             None
         }
     }
+
     impl RequestResponse {
         ///________________________________________
         ///Attach a channel sender to the body that corresponds to the associated client.
