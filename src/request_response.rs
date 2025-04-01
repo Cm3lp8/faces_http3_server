@@ -213,6 +213,7 @@ mod response_queue {
 
     ///____________________________________
     ///Channel to send a body to be chunked before sending to peer.
+    #[derive(Clone)]
     pub struct ChunkingStation {
         station_channel: (
             crossbeam_channel::Sender<ChunkableBody>,
@@ -222,6 +223,7 @@ mod response_queue {
         pending_buffer_usage_map: Arc<Mutex<HashMap<Scid, HashMap<StreamId, usize>>>>,
         chunk_dispatch_channel: ChunksDispatchChannel,
     }
+
     impl ChunkingStation {
         pub fn new(waker: Arc<Waker>, last_time_spend: Arc<Mutex<Duration>>) -> Self {
             let pending_buffer_usage_map = Arc::new(Mutex::new(HashMap::new()));

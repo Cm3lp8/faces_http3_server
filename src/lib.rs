@@ -28,6 +28,7 @@ mod server_init;
 pub use server_init::Http3Server;
 mod conn_statistics;
 mod handler_dispatcher;
+mod header_queue_processing;
 #[cfg(test)]
 mod tests {
     use super::*;

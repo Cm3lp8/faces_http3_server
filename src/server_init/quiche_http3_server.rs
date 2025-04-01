@@ -181,6 +181,7 @@ mod quiche_implementation {
 
     use crate::{
         file_writer::{FileWriter, WritableItem},
+        header_queue_processing::{self, HeaderProcessing},
         request_response::{
             BodyRequest, ChunkingStation, ChunksDispatchChannel, HeaderPriority, ResponseQueue,
         },
@@ -226,8 +227,20 @@ mod quiche_implementation {
         let mut socket_time = Duration::from_micros(33);
         let chunking_station = ChunkingStation::new(waker_clone.clone(), last_time_spend.clone());
         let chunk_dispatch_channel = chunking_station.get_chunking_dispatch_channel();
+
+        let header_queue_processing = HeaderProcessing::new(
+            route_manager.routes_handler(),
+            server_config.clone(),
+            chunking_station.clone(),
+            waker.clone(),
+            file_writer_channel.clone(),
+        );
+
+        header_queue_processing.run();
+
         // Create the configuration for the QUIC connections.
         let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
+
         config
             .load_cert_chain_from_pem_file(server_config.cert_path())
             .unwrap();
@@ -452,6 +465,15 @@ mod quiche_implementation {
                         match http3_conn.poll(&mut client.conn) {
                             Ok((stream_id, quiche::h3::Event::Headers { list, more_frames })) => {
                                 let scid = client.conn.source_id().as_ref().to_vec();
+                                let conn_id = client.conn.trace_id().to_string();
+                                header_queue_processing.process_header(
+                                    stream_id,
+                                    scid,
+                                    conn_id,
+                                    list.clone(),
+                                    more_frames,
+                                );
+                                let scid = client.conn.source_id().as_ref().to_vec();
                                 route_manager.routes_handler().parse_headers(
                                     &server_config,
                                     &chunk_dispatch_channel,
@@ -472,10 +494,8 @@ mod quiche_implementation {
 
                                 if let Err(_) =
                                     route_manager.routes_handler().send_reception_status_first(
-                                        client,
-                                        response_queue.get_high_priority_sender(),
-                                        response_queue.get_low_priority_sender(),
                                         stream_id,
+                                        &scid,
                                         trace_id.as_str(),
                                         &chunk_dispatch_channel,
                                     )
