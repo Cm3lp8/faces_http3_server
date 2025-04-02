@@ -1,5 +1,8 @@
 #![allow(warnings)]
 pub use header_reception::{HeaderMessage, HeaderProcessing};
+pub use middleware_worker::MiddleWareJob;
+
+mod middleware_worker;
 mod header_reception {
     use std::{sync::Arc, task::Wake};
 
@@ -12,8 +15,12 @@ mod header_reception {
         route_handler, RouteHandler, ServerConfig,
     };
 
-    use super::workers::run_prime_processor;
+    use super::{
+        middleware_worker::ThreadPool,
+        workers::{self, run_prime_processor},
+    };
 
+    #[derive(Clone)]
     pub struct HeaderMessage {
         stream_id: u64,
         scid: Vec<u8>,
@@ -65,6 +72,7 @@ mod header_reception {
             crossbeam_channel::Receiver<HeaderMessage>,
         ),
         file_writer_channel: FileWriterChannel,
+        workers: Arc<ThreadPool>,
     }
 
     impl<S: Send + Sync + 'static> HeaderProcessing<S> {
@@ -75,6 +83,7 @@ mod header_reception {
             waker: Arc<Waker>,
             file_writer_channel: FileWriterChannel,
         ) -> Self {
+            let workers = Arc::new(ThreadPool::new(8));
             Self {
                 server_config,
                 route_handler,
@@ -82,6 +91,7 @@ mod header_reception {
                 file_writer_channel,
                 chunking_station,
                 waker,
+                workers,
             }
         }
         pub fn process_header(
@@ -90,7 +100,6 @@ mod header_reception {
             scid: Vec<u8>,
             conn_id: String,
             header: Vec<h3::Header>,
-
             more_frames: bool,
         ) {
             let header_message = HeaderMessage::new(stream_id, scid, conn_id, more_frames, header);
@@ -99,9 +108,14 @@ mod header_reception {
             }
         }
         pub fn run(&self) {
-            run_prime_processor(self.incoming_header_channel.1.clone());
+            run_prime_processor(
+                self.incoming_header_channel.1.clone(),
+                &self.route_handler,
+                &self.workers,
+            );
         }
     }
+    /*
     impl<S: Send + Sync + 'static> Clone for HeaderProcessing<S> {
         fn clone(&self) -> Self {
             Self {
@@ -111,9 +125,10 @@ mod header_reception {
                 file_writer_channel: self.file_writer_channel.clone(),
                 chunking_station: self.chunking_station.clone(),
                 waker: self.waker.clone(),
+                workers: self.workers.clone(),
             }
         }
-    }
+    }*/
 }
 
 mod middleware_process {
@@ -210,22 +225,32 @@ mod middleware_process {
 }
 
 mod workers {
-    use std::time::Duration;
+    use std::{sync::Arc, time::Duration};
 
     use quiche::h3::{self, NameValue};
 
-    use crate::H3Method;
+    use crate::{
+        header_queue_processing::middleware_worker::MiddleWareJob, route_handler, H3Method,
+        RouteHandler,
+    };
 
     use super::{
         middleware_process::{ConfirmationRoom, MiddleWareProcess},
+        middleware_worker::ThreadPool,
         HeaderMessage,
     };
 
-    pub fn run_prime_processor(receiver: crossbeam_channel::Receiver<HeaderMessage>) {
+    pub fn run_prime_processor<S: Send + Sync + 'static>(
+        receiver: crossbeam_channel::Receiver<HeaderMessage>,
+        route_handler: &RouteHandler<S>,
+        header_workers_pool: &Arc<ThreadPool>,
+    ) {
         let waker = crossbeam_channel::unbounded::<()>();
         let waker_clone = waker.clone();
         let confirmation_room = ConfirmationRoom::new(waker.0.clone());
         let confirmation_room_clone = confirmation_room.clone();
+        let route_handler = route_handler.clone();
+        let header_workers_pool = header_workers_pool.clone();
         std::thread::spawn(move || {
             let middleware_process = MiddleWareProcess::new();
 
@@ -236,6 +261,10 @@ mod workers {
                     extract_method_path_content_length(header_msg.headers());
                 if method.is_none() || path.is_none() {
                     continue;
+                }
+
+                if let Some(middleware_job) = route_handler.send_header_work(header_msg.clone()) {
+                    header_workers_pool.execute(middleware_job);
                 }
 
                 let confirmation = middleware_process.extract_header(header_msg);

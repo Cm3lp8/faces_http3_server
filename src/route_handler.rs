@@ -19,6 +19,7 @@ mod request_hndlr {
 
     use crate::{
         file_writer::{FileWritable, FileWriterChannel},
+        header_queue_processing::{HeaderMessage, MiddleWareJob},
         request_response::{
             BodyRequest, ChunkSender, ChunkingStation, ChunksDispatchChannel, HeaderPriority,
             HeaderRequest,
@@ -58,6 +59,14 @@ mod request_hndlr {
             RouteHandler {
                 inner: route_mngr_inner,
             }
+        }
+        pub fn send_header_work(&self, msg: HeaderMessage) -> Option<MiddleWareJob> {
+            None
+            //let headers_coll: HeadersColl = method.get_headers_for_middleware(&mut headers);
+
+            //Iteration on the middleware collection.
+            //if let Err(error_type) =
+            //  route_form.process_middlewares(&headers_coll, &guard.app_state())
         }
         pub fn set_intermediate_headers_send(&self, stream_id: u64, client: &Client) {
             let guard = &*self.inner.lock().unwrap();
