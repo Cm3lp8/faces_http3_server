@@ -1,4 +1,5 @@
 pub use request_hndlr::RouteHandler;
+pub use route_handle_implementation::{send_404, send_error};
 
 use crate::request_response::QueuedRequest;
 pub use crate::route_manager::{
@@ -28,7 +29,8 @@ mod request_hndlr {
         route_manager::{DataManagement, RouteManagerInner},
         server_config,
         server_init::quiche_http3_server::{self, Client},
-        BodyStorage, HeadersColl, RequestResponse, RouteEventListener, ServerConfig,
+        BodyStorage, HeadersColl, MiddleWareResult, RequestResponse, RouteEventListener,
+        ServerConfig,
     };
     use mio::{net::UdpSocket, Waker};
     use quiche::{
@@ -60,7 +62,11 @@ mod request_hndlr {
                 inner: route_mngr_inner,
             }
         }
-        pub fn send_header_work(&self, msg: HeaderMessage) -> Option<MiddleWareJob> {
+        pub fn send_header_work(
+            &self,
+            msg: HeaderMessage,
+            middleware_result_sender: crossbeam_channel::Sender<MiddleWareResult>,
+        ) -> Option<MiddleWareJob> {
             None
             //let headers_coll: HeadersColl = method.get_headers_for_middleware(&mut headers);
 
@@ -393,6 +399,10 @@ mod request_hndlr {
                 EventType::OnFinished,
                 HeaderPriority::SendHeader,
             );
+        }
+        pub fn inner_mut(&self, cb: impl FnOnce(&mut RouteManagerInner<S>)) {
+            let guard = &mut *self.inner.lock().unwrap();
+            cb(guard);
         }
         pub fn get_routes_from_path_and_method_and_request_type(
             &self,

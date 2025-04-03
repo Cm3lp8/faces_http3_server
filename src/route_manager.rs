@@ -513,8 +513,7 @@ mod route_mngr {
             app_state: &S,
         ) -> Result<(), ErrorResponse> {
             for mdw in &self.middlewares {
-                if let crate::MiddleWareResult::Abort(error_type) =
-                    mdw.on_header(headers, app_state)
+                if let crate::MiddleWareFlow::Abort(error_type) = mdw.on_header(headers, app_state)
                 {
                     return Err(error_type);
                 }

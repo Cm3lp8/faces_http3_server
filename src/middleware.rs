@@ -1,22 +1,87 @@
-pub use middleware_state::MiddleWareResult;
+pub use middleware_state::{MiddleWareFlow, MiddleWareResult};
 pub use middleware_trait::MiddleWare;
 pub use middleware_types::HeadersColl;
 mod middleware_trait {
-    use super::{middleware_state::MiddleWareResult, middleware_types::HeadersColl};
+    use super::{
+        middleware_state::{MiddleWareFlow, MiddleWareResult},
+        middleware_types::HeadersColl,
+    };
 
     pub trait MiddleWare<S> {
-        fn on_header<'a>(&self, headers: &HeadersColl<'a>, app_stat: &S) -> MiddleWareResult {
-            MiddleWareResult::Continue
+        fn on_header<'a>(&self, headers: &HeadersColl<'a>, app_stat: &S) -> MiddleWareFlow {
+            MiddleWareFlow::Continue
         }
     }
 }
 
 mod middleware_state {
+    use quiche::h3;
+
     use crate::{ErrorResponse, Response};
 
-    pub enum MiddleWareResult {
+    pub enum MiddleWareFlow {
         Continue,
         Abort(ErrorResponse),
+    }
+
+    pub enum MiddleWareResult {
+        /// Direcly send it to the response queue
+        Abort {
+            error_response: ErrorResponse,
+            stream_id: u64,
+            scid: Vec<u8>,
+        },
+        Success {
+            headers: Vec<h3::Header>,
+            stream_id: u64,
+            scid: Vec<u8>,
+        },
+    }
+    impl MiddleWareResult {
+        pub fn abort(error_response: ErrorResponse, stream_id: u64, scid: &[u8]) -> Self {
+            Self::Abort {
+                error_response,
+                stream_id,
+                scid: scid.to_vec(),
+            }
+        }
+        pub fn succest(headers: Vec<h3::Header>, stream_id: u64, scid: &[u8]) -> Self {
+            Self::Success {
+                headers,
+                stream_id,
+                scid: scid.to_vec(),
+            }
+        }
+        pub fn stream_id(&self) -> Result<u64, ()> {
+            match self {
+                Self::Success {
+                    headers: _,
+                    stream_id,
+                    scid: _,
+                } => Ok(*stream_id),
+                Self::Abort {
+                    error_response: _,
+                    stream_id,
+                    scid: _,
+                } => Ok(*stream_id),
+                _ => Err(()),
+            }
+        }
+        pub fn scid(&self) -> Result<Vec<u8>, ()> {
+            match self {
+                Self::Success {
+                    headers: _,
+                    stream_id: _,
+                    scid,
+                } => Ok(scid.to_vec()),
+                Self::Abort {
+                    error_response: _,
+                    stream_id: _,
+                    scid,
+                } => Ok(scid.to_vec()),
+                _ => Err(()),
+            }
+        }
     }
 }
 

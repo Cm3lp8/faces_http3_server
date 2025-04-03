@@ -112,23 +112,11 @@ mod header_reception {
                 self.incoming_header_channel.1.clone(),
                 &self.route_handler,
                 &self.workers,
+                &self.chunking_station,
+                &self.waker,
             );
         }
     }
-    /*
-    impl<S: Send + Sync + 'static> Clone for HeaderProcessing<S> {
-        fn clone(&self) -> Self {
-            Self {
-                server_config: self.server_config.clone(),
-                route_handler: self.route_handler.clone(),
-                incoming_header_channel: self.incoming_header_channel.clone(),
-                file_writer_channel: self.file_writer_channel.clone(),
-                chunking_station: self.chunking_station.clone(),
-                waker: self.waker.clone(),
-                workers: self.workers.clone(),
-            }
-        }
-    }*/
 }
 
 mod middleware_process {
@@ -230,8 +218,11 @@ mod workers {
     use quiche::h3::{self, NameValue};
 
     use crate::{
-        header_queue_processing::middleware_worker::MiddleWareJob, route_handler, H3Method,
-        RouteHandler,
+        header_queue_processing::middleware_worker::MiddleWareJob,
+        request_response::{ChunkingStation, ChunksDispatchChannel, HeaderPriority},
+        route_events::EventType,
+        route_handler::{self, send_error},
+        H3Method, MiddleWareResult, RouteHandler,
     };
 
     use super::{
@@ -244,13 +235,19 @@ mod workers {
         receiver: crossbeam_channel::Receiver<HeaderMessage>,
         route_handler: &RouteHandler<S>,
         header_workers_pool: &Arc<ThreadPool>,
+        chunking_station: &ChunkingStation,
+        mio_waker: &Arc<mio::Waker>,
     ) {
         let waker = crossbeam_channel::unbounded::<()>();
         let waker_clone = waker.clone();
         let confirmation_room = ConfirmationRoom::new(waker.0.clone());
         let confirmation_room_clone = confirmation_room.clone();
         let route_handler = route_handler.clone();
+        let route_handler_clone = route_handler.clone();
         let header_workers_pool = header_workers_pool.clone();
+        let middleware_result_chan = crossbeam_channel::unbounded::<MiddleWareResult>();
+        let chunking_station = chunking_station.clone();
+        let mio_waker = mio_waker.clone();
         std::thread::spawn(move || {
             let middleware_process = MiddleWareProcess::new();
 
@@ -263,7 +260,9 @@ mod workers {
                     continue;
                 }
 
-                if let Some(middleware_job) = route_handler.send_header_work(header_msg.clone()) {
+                if let Some(middleware_job) = route_handler
+                    .send_header_work(header_msg.clone(), middleware_result_chan.0.clone())
+                {
                     header_workers_pool.execute(middleware_job);
                 }
 
@@ -273,12 +272,39 @@ mod workers {
         });
 
         std::thread::spawn(move || {
-            while let Ok(()) = waker_clone.1.recv() {
-                confirmation_room_clone.check_for_completes(|res| {
-                    std::thread::sleep(Duration::from_micros(200));
-                    /*
-                     * */
-                });
+            let route_handler = route_handler_clone;
+            let chunk_dispatch_channel = chunking_station.get_chunking_dispatch_channel();
+
+            while let Ok(middleware_process_result) = middleware_result_chan.1.recv() {
+                match middleware_process_result {
+                    MiddleWareResult::Abort {
+                        error_response,
+                        stream_id,
+                        scid,
+                    } => {
+                        route_handler.inner_mut(|guard| {
+                            send_error(
+                                error_response,
+                                guard,
+                                &mio_waker,
+                                &chunk_dispatch_channel,
+                                &chunking_station,
+                                &scid,
+                                stream_id,
+                                EventType::OnFinished,
+                                HeaderPriority::SendHeader,
+                            );
+                        });
+                    }
+                    MiddleWareResult::Success {
+                        headers,
+                        stream_id,
+                        scid,
+                    } => {}
+                    _ => {}
+                }
+                /*
+                 * */
             }
         });
     }
