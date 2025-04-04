@@ -20,7 +20,7 @@ mod thread_pool {
             let mut workers = Vec::with_capacity(amount);
             let job_channel = crossbeam_channel::unbounded::<MiddleWareJob<S>>();
 
-            for i in 0..workers.len() {
+            for i in 0..amount {
                 workers.push(Worker::new(i, job_channel.1.clone(), app_state.clone()));
             }
             Self {
@@ -50,6 +50,8 @@ mod thread_pool {
                         let mut headers = middleware_job.take_headers();
                         let stream_id = middleware_job.stream_id();
                         let scid = middleware_job.scid();
+                        let path = middleware_job.path();
+                        let method = middleware_job.method();
 
                         for mdw in &mut middleware_job.middleware_collection() {
                             if let MiddleWareFlow::Abort(error_response) =
@@ -69,6 +71,8 @@ mod thread_pool {
 
                         // Every middleware have been processed successfully
                         if let Err(r) = middleware_job.send_done(MiddleWareResult::Success {
+                            path,
+                            method,
                             headers,
                             stream_id,
                             scid,
@@ -85,9 +89,11 @@ mod thread_pool {
 mod job {
     use quiche::h3::{self, Header};
 
-    use crate::{HeadersColl, MiddleWare, MiddleWareFlow, MiddleWareResult};
+    use crate::{H3Method, HeadersColl, MiddleWare, MiddleWareFlow, MiddleWareResult};
 
     pub struct MiddleWareJob<S: Send + Clone + Sync + 'static> {
+        path: String,
+        method: H3Method,
         stream_id: u64,
         scid: Vec<u8>,
         headers: Vec<h3::Header>,
@@ -98,6 +104,8 @@ mod job {
 
     impl<S: Send + Sync + 'static + Clone> MiddleWareJob<S> {
         pub fn new(
+            path: &str,
+            method: H3Method,
             stream_id: u64,
             scid: Vec<u8>,
             headers: Vec<h3::Header>,
@@ -107,12 +115,20 @@ mod job {
             task_done_sender: crossbeam_channel::Sender<MiddleWareResult>,
         ) -> Self {
             Self {
+                path: path.to_string(),
+                method,
                 stream_id,
                 scid,
                 headers,
                 middleware_collection,
                 task_done_sender,
             }
+        }
+        pub fn path(&self) -> String {
+            self.path.to_string()
+        }
+        pub fn method(&self) -> H3Method {
+            self.method
         }
         pub fn stream_id(&self) -> u64 {
             self.stream_id

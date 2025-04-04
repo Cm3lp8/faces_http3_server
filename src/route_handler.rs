@@ -69,6 +69,8 @@ mod request_hndlr {
         }
         pub fn send_header_work(
             &self,
+            path: &str,
+            method: H3Method,
             middleware_collection: Vec<
                 Box<dyn FnMut(&mut [h3::Header], &S) -> MiddleWareFlow + Send + Sync + 'static>,
             >,
@@ -81,6 +83,8 @@ mod request_hndlr {
             let scid = msg.scid();
             let headers = msg.headers();
             let middleware_job = MiddleWareJob::new(
+                path,
+                method,
                 stream_id,
                 scid.to_vec(),
                 headers.to_vec(),

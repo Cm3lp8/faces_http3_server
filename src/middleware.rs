@@ -20,7 +20,7 @@ mod middleware_trait {
 mod middleware_state {
     use quiche::h3;
 
-    use crate::{ErrorResponse, Response};
+    use crate::{ErrorResponse, H3Method, Response};
 
     pub enum MiddleWareFlow {
         Continue,
@@ -35,6 +35,8 @@ mod middleware_state {
             scid: Vec<u8>,
         },
         Success {
+            path: String,
+            method: H3Method,
             headers: Vec<h3::Header>,
             stream_id: u64,
             scid: Vec<u8>,
@@ -48,8 +50,16 @@ mod middleware_state {
                 scid: scid.to_vec(),
             }
         }
-        pub fn succest(headers: Vec<h3::Header>, stream_id: u64, scid: &[u8]) -> Self {
+        pub fn succest(
+            path: &str,
+            method: H3Method,
+            headers: Vec<h3::Header>,
+            stream_id: u64,
+            scid: &[u8],
+        ) -> Self {
             Self::Success {
+                path: path.to_string(),
+                method,
                 headers,
                 stream_id,
                 scid: scid.to_vec(),
@@ -58,6 +68,8 @@ mod middleware_state {
         pub fn stream_id(&self) -> Result<u64, ()> {
             match self {
                 Self::Success {
+                    path: _,
+                    method: _,
                     headers: _,
                     stream_id,
                     scid: _,
@@ -73,6 +85,8 @@ mod middleware_state {
         pub fn scid(&self) -> Result<Vec<u8>, ()> {
             match self {
                 Self::Success {
+                    path: _,
+                    method: _,
                     headers: _,
                     stream_id: _,
                     scid,

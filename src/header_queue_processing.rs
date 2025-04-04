@@ -12,6 +12,7 @@ mod header_reception {
     use crate::{
         file_writer::FileWriterChannel,
         request_response::{ChunkingStation, ChunksDispatchChannel},
+        response_queue_processing::ResponsePoolProcessingSender,
         route_handler, RouteHandler, ServerConfig,
     };
 
@@ -73,6 +74,7 @@ mod header_reception {
         ),
         file_writer_channel: FileWriterChannel,
         workers: Arc<ThreadPool<S>>,
+        response_processing_pool_injector: ResponsePoolProcessingSender,
     }
 
     impl<S: Send + Sync + 'static + Clone> HeaderProcessing<S> {
@@ -83,6 +85,7 @@ mod header_reception {
             waker: Arc<Waker>,
             file_writer_channel: FileWriterChannel,
             app_state: S,
+            response_processing_pool_injector: ResponsePoolProcessingSender,
         ) -> Self {
             let workers = Arc::new(ThreadPool::new(8, app_state));
             Self {
@@ -93,6 +96,7 @@ mod header_reception {
                 chunking_station,
                 waker,
                 workers,
+                response_processing_pool_injector,
             }
         }
         pub fn process_header(
@@ -116,6 +120,7 @@ mod header_reception {
                 &self.workers,
                 &self.chunking_station,
                 &self.waker,
+                &self.response_processing_pool_injector,
             );
         }
     }
@@ -222,6 +227,7 @@ mod workers {
     use crate::{
         header_queue_processing::middleware_worker::MiddleWareJob,
         request_response::{ChunkingStation, ChunksDispatchChannel, HeaderPriority},
+        response_queue_processing::{self, ResponsePoolProcessingSender},
         route_events::EventType,
         route_handler::{self, send_error},
         H3Method, MiddleWareResult, RouteHandler,
@@ -239,6 +245,7 @@ mod workers {
         header_workers_pool: &Arc<ThreadPool<S>>,
         chunking_station: &ChunkingStation,
         mio_waker: &Arc<mio::Waker>,
+        response_processing_pool_sender: &ResponsePoolProcessingSender,
     ) {
         let route_handler = route_handler.clone();
         let route_handler_clone = route_handler.clone();
@@ -246,6 +253,7 @@ mod workers {
         let middleware_result_chan = crossbeam_channel::unbounded::<MiddleWareResult>();
         let chunking_station = chunking_station.clone();
         let mio_waker = mio_waker.clone();
+        let response_processing_pool_injector = response_processing_pool_sender.clone();
         std::thread::spawn(move || {
             while let Ok(header_msg) = receiver.recv() {
                 warn!("new header in the zone !");
@@ -262,12 +270,15 @@ mod workers {
                     continue;
                 };
 
+                let path = path.unwrap();
                 if let Some((route_form, _)) = route_handler
                     .mutex_guard()
-                    .get_routes_from_path_and_method(path.unwrap().as_str(), method)
+                    .get_routes_from_path_and_method(path.as_str(), method)
                 {
                     let middleware_coll = route_form.to_middleware_coll();
                     if let Some(middleware_job) = route_handler.send_header_work(
+                        path.as_str(),
+                        method,
                         vec![],
                         header_msg.clone(),
                         middleware_result_chan.0.clone(),
@@ -280,6 +291,7 @@ mod workers {
             }
         });
 
+        // On  middleware handled
         std::thread::spawn(move || {
             let route_handler = route_handler_clone;
             let chunk_dispatch_channel = chunking_station.get_chunking_dispatch_channel();
@@ -306,10 +318,20 @@ mod workers {
                         });
                     }
                     MiddleWareResult::Success {
-                        headers,
+                        path,
+                        method,
+                        mut headers,
                         stream_id,
                         scid,
-                    } => {}
+                    } => {
+                        response_processing_pool_injector.send(
+                            &path,
+                            method,
+                            &mut headers,
+                            stream_id,
+                            &scid,
+                        );
+                    }
                     _ => {}
                 }
                 /*

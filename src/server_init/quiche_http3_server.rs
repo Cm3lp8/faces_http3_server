@@ -185,6 +185,7 @@ mod quiche_implementation {
         request_response::{
             BodyRequest, ChunkingStation, ChunksDispatchChannel, HeaderPriority, ResponseQueue,
         },
+        response_queue_processing::{self, ResponsePoolProcessing},
         route_handler,
         server_config::{self, RouteHandler},
         server_init::quiche_http3_server,
@@ -228,7 +229,7 @@ mod quiche_implementation {
         let chunking_station = ChunkingStation::new(waker_clone.clone(), last_time_spend.clone());
         let chunk_dispatch_channel = chunking_station.get_chunking_dispatch_channel();
 
-        let header_queue_processing = HeaderProcessing::new(
+        let response_pool_processing = ResponsePoolProcessing::new(
             route_manager.routes_handler(),
             server_config.clone(),
             chunking_station.clone(),
@@ -237,7 +238,18 @@ mod quiche_implementation {
             route_manager.routes_handler().app_state(),
         );
 
+        let header_queue_processing = HeaderProcessing::new(
+            route_manager.routes_handler(),
+            server_config.clone(),
+            chunking_station.clone(),
+            waker.clone(),
+            file_writer_channel.clone(),
+            route_manager.routes_handler().app_state(),
+            response_pool_processing.get_response_pool_processing_sender(),
+        );
+
         header_queue_processing.run();
+        response_pool_processing.run(|response_injection| {});
 
         // Create the configuration for the QUIC connections.
         let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
