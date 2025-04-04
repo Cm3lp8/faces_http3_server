@@ -7,8 +7,8 @@ use std::{thread, usize};
 use faces_quic_server::{
     BodyStorage, ContentType, DataEvent, DataManagement, ErrorType, EventLoop,
     EventResponseChannel, FinishedEvent, H3Method, HeadersColl, Http3Server, MiddleWare,
-    MiddleWareResult, RequestResponse, Response, ResponseBuilderSender, RouteConfig, RouteEvent,
-    RouteEventListener, RouteForm, RouteHandle, RouteResponse,
+    MiddleWareFlow, MiddleWareResult, RequestResponse, Response, ResponseBuilderSender,
+    RouteConfig, RouteEvent, RouteEventListener, RouteForm, RouteHandle, RouteResponse,
 };
 use faces_quic_server::{RequestType, RouteManager, RouteManagerBuilder, ServerConfig};
 use log::{error, info, warn};
@@ -62,9 +62,15 @@ fn main() {
             &self,
             headers: &HeadersColl<'a>,
             app_stat: &AppStateTest,
-        ) -> MiddleWareResult {
+        ) -> MiddleWareFlow {
             info!("Sending unauthorized request ! ");
-            MiddleWareResult::Abort(faces_quic_server::ErrorResponse::Error401(None))
+            MiddleWareFlow::Abort(faces_quic_server::ErrorResponse::Error401(None))
+        }
+        fn callback(&self) -> Box<dyn FnMut(&mut [h3::Header], &AppStateTest) -> MiddleWareFlow> {
+            let cb = Box::new(|headers: &mut [h3::Header], app_state: &AppStateTest| {
+                MiddleWareFlow::Continue
+            });
+            cb
         }
     }
     struct MyMiddleWareTest;
@@ -77,16 +83,28 @@ fn main() {
         }
     }
     impl MiddleWare<AppStateTest> for MyGlobalMiddleWare {
-        fn on_header(&self, headers: &HeadersColl, app_stat: &AppStateTest) -> MiddleWareResult {
+        fn on_header(&self, headers: &HeadersColl, app_stat: &AppStateTest) -> MiddleWareFlow {
             Self::inform(headers);
-            MiddleWareResult::Continue
+            MiddleWareFlow::Continue
+        }
+        fn callback(&self) -> Box<dyn FnMut(&mut [h3::Header], &AppStateTest) -> MiddleWareFlow> {
+            let cb = Box::new(|headers: &mut [h3::Header], app_state: &AppStateTest| {
+                MiddleWareFlow::Continue
+            });
+            cb
         }
     }
 
     impl MiddleWare<AppStateTest> for MyMiddleWareTest {
-        fn on_header(&self, headers: &HeadersColl, app_stat: &AppStateTest) -> MiddleWareResult {
+        fn on_header(&self, headers: &HeadersColl, app_stat: &AppStateTest) -> MiddleWareFlow {
             Self::inform(headers);
-            MiddleWareResult::Continue
+            MiddleWareFlow::Continue
+        }
+        fn callback(&self) -> Box<dyn FnMut(&mut [h3::Header], &AppStateTest) -> MiddleWareFlow> {
+            let cb = Box::new(|headers: &mut [h3::Header], app_state: &AppStateTest| {
+                MiddleWareFlow::Continue
+            });
+            cb
         }
     }
 

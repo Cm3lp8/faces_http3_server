@@ -104,6 +104,7 @@ mod header_reception {
             more_frames: bool,
         ) {
             let header_message = HeaderMessage::new(stream_id, scid, conn_id, more_frames, header);
+
             if let Err(e) = self.incoming_header_channel.0.send(header_message) {
                 error!("Failed to send new incoming header");
             }
@@ -239,10 +240,6 @@ mod workers {
         chunking_station: &ChunkingStation,
         mio_waker: &Arc<mio::Waker>,
     ) {
-        let waker = crossbeam_channel::unbounded::<()>();
-        let waker_clone = waker.clone();
-        let confirmation_room = ConfirmationRoom::new(waker.0.clone());
-        let confirmation_room_clone = confirmation_room.clone();
         let route_handler = route_handler.clone();
         let route_handler_clone = route_handler.clone();
         let header_workers_pool = header_workers_pool.clone();
@@ -250,8 +247,6 @@ mod workers {
         let chunking_station = chunking_station.clone();
         let mio_waker = mio_waker.clone();
         std::thread::spawn(move || {
-            let middleware_process = MiddleWareProcess::new();
-
             while let Ok(header_msg) = receiver.recv() {
                 warn!("new header in the zone !");
 
@@ -261,12 +256,26 @@ mod workers {
                     continue;
                 }
 
-                if let Some(middleware_job) = route_handler.send_header_work(
-                    vec![],
-                    header_msg.clone(),
-                    middleware_result_chan.0.clone(),
-                ) {
-                    header_workers_pool.execute(middleware_job);
+                let method = if let Ok(method) = H3Method::parse(&method.unwrap()) {
+                    method
+                } else {
+                    continue;
+                };
+
+                if let Some((route_form, _)) = route_handler
+                    .mutex_guard()
+                    .get_routes_from_path_and_method(path.unwrap().as_str(), method)
+                {
+                    let middleware_coll = route_form.to_middleware_coll();
+                    if let Some(middleware_job) = route_handler.send_header_work(
+                        vec![],
+                        header_msg.clone(),
+                        middleware_result_chan.0.clone(),
+                    ) {
+                        header_workers_pool.execute(middleware_job);
+                    }
+                } else {
+                    //error
                 }
             }
         });

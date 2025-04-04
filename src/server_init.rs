@@ -123,7 +123,7 @@ mod server_initiation {
             thread::park();
             server
         }
-        pub fn run<S: 'static + Send + Sync>(
+        pub fn run<S: 'static + Send + Sync + Clone>(
             &mut self,
             route_manager: RouteManager<S>,
         ) -> Http3Server {

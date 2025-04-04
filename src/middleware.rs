@@ -2,6 +2,8 @@ pub use middleware_state::{MiddleWareFlow, MiddleWareResult};
 pub use middleware_trait::MiddleWare;
 pub use middleware_types::HeadersColl;
 mod middleware_trait {
+    use quiche::h3;
+
     use super::{
         middleware_state::{MiddleWareFlow, MiddleWareResult},
         middleware_types::HeadersColl,
@@ -11,6 +13,7 @@ mod middleware_trait {
         fn on_header<'a>(&self, headers: &HeadersColl<'a>, app_stat: &S) -> MiddleWareFlow {
             MiddleWareFlow::Continue
         }
+        fn callback(&self) -> Box<dyn FnMut(&mut [h3::Header], &S) -> MiddleWareFlow>;
     }
 }
 

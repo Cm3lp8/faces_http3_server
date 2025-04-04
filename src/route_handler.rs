@@ -14,7 +14,7 @@ mod request_hndlr {
         collections::HashMap,
         env::args,
         fmt::Pointer,
-        sync::{Arc, Mutex},
+        sync::{Arc, Mutex, MutexGuard},
         time::Duration,
     };
 
@@ -446,38 +446,8 @@ mod request_hndlr {
                 }
             });
         }
-        /// Search for the corresponding request format to build the response and send it by triggering the
-        /// associated callback.
-        pub fn get_routes_from_path_and_method<'b>(
-            &self,
-            path: &'b str,
-            methode: H3Method,
-        ) -> Option<(&RouteForm<S>, Option<Vec<&'b str>>)> {
-            //if param in path
-
-            /*
-                        let mut path_s = path.to_string();
-                        let mut param_trail: Option<Vec<&str>> = None;
-
-                        if let Some((path, id)) = path.split_once("?") {
-                            path_s = path.to_string();
-
-                            let args_it: Vec<&str> = id.split("&").collect();
-                            param_trail = Some(args_it);
-                        }
-
-                        if let Some(request_coll) = self.get_requests_from_path(path_s.as_str()) {
-                            if let Some(found_request) =
-                                request_coll.iter().find(|item| item.method() == &methode)
-                            {
-                                return Some((found_request, param_trail));
-                            }
-                            None
-                        } else {
-                            None
-                        }
-            */
-            None
+        pub fn mutex_guard(&self) -> MutexGuard<RouteManagerInner<S>> {
+            self.inner.lock().unwrap()
         }
     }
 

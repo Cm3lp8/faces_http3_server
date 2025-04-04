@@ -60,7 +60,7 @@ mod route_mngr {
         sync::{Arc, Mutex},
     };
 
-    use quiche::h3;
+    use quiche::h3::{self, Header};
 
     use crate::{
         event_listener,
@@ -69,7 +69,7 @@ mod route_mngr {
         request_response::{BodyType, RequestResponse},
         route_events::RouteEvent,
         route_handler::RequestsTable,
-        ErrorResponse, HeadersColl, RouteEventListener,
+        ErrorResponse, HeadersColl, MiddleWareFlow, RouteEventListener,
     };
 
     use self::route_config::DataManagement;
@@ -481,6 +481,16 @@ mod route_mngr {
         }
         pub fn path(&self) -> &'static str {
             self.path
+        }
+        pub fn to_middleware_coll(
+            &self,
+        ) -> Vec<Box<dyn FnMut(&mut [h3::Header], &S) -> MiddleWareFlow>> {
+            let mut vec: Vec<Box<dyn FnMut(&mut [Header], &S) -> MiddleWareFlow>> = vec![];
+
+            for mdw in &self.middlewares {
+                vec.push(mdw.callback())
+            }
+            vec
         }
         pub fn method(&self) -> &H3Method {
             &self.method
