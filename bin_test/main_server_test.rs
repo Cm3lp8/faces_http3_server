@@ -44,6 +44,7 @@ fn main() {
             Response::ok_200_with_data(event, vec![0; 10_000_000])
         }
     }
+    #[derive(Clone)]
     pub struct AppStateTest;
     let mut router = RouteManager::new_with_app_state(AppStateTest);
 

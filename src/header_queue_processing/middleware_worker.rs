@@ -7,28 +7,28 @@ mod thread_pool {
 
     use super::job::MiddleWareJob;
 
-    pub struct ThreadPool {
+    pub struct ThreadPool<S: Send + Sync + 'static + Clone> {
         workers: Vec<Worker>,
         job_channel: (
-            crossbeam_channel::Sender<MiddleWareJob>,
-            crossbeam_channel::Receiver<MiddleWareJob>,
+            crossbeam_channel::Sender<MiddleWareJob<S>>,
+            crossbeam_channel::Receiver<MiddleWareJob<S>>,
         ),
     }
 
-    impl ThreadPool {
-        pub fn new(amount: usize) -> Self {
+    impl<S: Send + Sync + 'static + Clone> ThreadPool<S> {
+        pub fn new(amount: usize, app_state: S) -> Self {
             let mut workers = Vec::with_capacity(amount);
-            let job_channel = crossbeam_channel::unbounded::<MiddleWareJob>();
+            let job_channel = crossbeam_channel::unbounded::<MiddleWareJob<S>>();
 
             for i in 0..workers.len() {
-                workers.push(Worker::new(i, job_channel.1.clone()));
+                workers.push(Worker::new(i, job_channel.1.clone(), app_state.clone()));
             }
             Self {
                 workers,
                 job_channel,
             }
         }
-        pub fn execute(&self, middleware_job: MiddleWareJob) {
+        pub fn execute(&self, middleware_job: MiddleWareJob<S>) {
             let _ = self.job_channel.0.send(middleware_job);
         }
     }
@@ -38,7 +38,11 @@ mod thread_pool {
         thread: JoinHandle<()>,
     }
     impl Worker {
-        fn new(id: usize, receiver: crossbeam_channel::Receiver<MiddleWareJob>) -> Self {
+        fn new<S: Send + Sync + 'static + Clone>(
+            id: usize,
+            receiver: crossbeam_channel::Receiver<MiddleWareJob<S>>,
+            app_state: S,
+        ) -> Self {
             Self {
                 id,
                 thread: std::thread::spawn(move || {
@@ -48,7 +52,9 @@ mod thread_pool {
                         let scid = middleware_job.scid();
 
                         for mdw in &mut middleware_job.middleware_collection() {
-                            if let MiddleWareFlow::Abort(error_response) = mdw(&mut headers) {
+                            if let MiddleWareFlow::Abort(error_response) =
+                                mdw(&mut headers, &app_state)
+                            {
                                 if let Err(r) = middleware_job.send_done(MiddleWareResult::Abort {
                                     error_response,
                                     stream_id,
@@ -81,22 +87,22 @@ mod job {
 
     use crate::{HeadersColl, MiddleWare, MiddleWareFlow, MiddleWareResult};
 
-    pub struct MiddleWareJob {
+    pub struct MiddleWareJob<S: Send + Clone + Sync + 'static> {
         stream_id: u64,
         scid: Vec<u8>,
         headers: Vec<h3::Header>,
         middleware_collection:
-            Vec<Box<dyn FnMut(&mut [Header]) -> MiddleWareFlow + Send + Sync + 'static>>,
+            Vec<Box<dyn FnMut(&mut [Header], &S) -> MiddleWareFlow + Send + Sync + 'static>>,
         task_done_sender: crossbeam_channel::Sender<MiddleWareResult>,
     }
 
-    impl MiddleWareJob {
+    impl<S: Send + Sync + 'static + Clone> MiddleWareJob<S> {
         pub fn new(
             stream_id: u64,
             scid: Vec<u8>,
             headers: Vec<h3::Header>,
             middleware_collection: Vec<
-                Box<dyn FnMut(&mut [Header]) -> MiddleWareFlow + Send + Sync + 'static>,
+                Box<dyn FnMut(&mut [Header], &S) -> MiddleWareFlow + Send + Sync + 'static>,
             >,
             task_done_sender: crossbeam_channel::Sender<MiddleWareResult>,
         ) -> Self {
@@ -125,7 +131,8 @@ mod job {
         }
         pub fn middleware_collection(
             &mut self,
-        ) -> Vec<Box<dyn FnMut(&mut [Header]) -> MiddleWareFlow + Send + Sync + 'static>> {
+        ) -> Vec<Box<dyn FnMut(&mut [Header], &S) -> MiddleWareFlow + Send + Sync + 'static>>
+        {
             std::mem::replace(&mut self.middleware_collection, vec![])
         }
     }

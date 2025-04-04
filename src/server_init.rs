@@ -87,7 +87,7 @@ mod server_initiation {
                     self
                 }
         */
-        pub fn run_blocking<S: 'static + Send + Sync>(
+        pub fn run_blocking<S: 'static + Send + Sync + Clone>(
             &mut self,
             mut route_manager_builder: RouteManagerBuilder<S>,
         ) -> Http3Server {

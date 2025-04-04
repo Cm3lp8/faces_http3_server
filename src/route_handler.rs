@@ -21,6 +21,7 @@ mod request_hndlr {
     use crate::{
         file_writer::{FileWritable, FileWriterChannel},
         header_queue_processing::{HeaderMessage, MiddleWareJob},
+        middleware,
         request_response::{
             BodyRequest, ChunkSender, ChunkingStation, ChunksDispatchChannel, HeaderPriority,
             HeaderRequest,
@@ -29,8 +30,8 @@ mod request_hndlr {
         route_manager::{DataManagement, RouteManagerInner},
         server_config,
         server_init::quiche_http3_server::{self, Client},
-        BodyStorage, HeadersColl, MiddleWareResult, RequestResponse, RouteEventListener,
-        ServerConfig,
+        BodyStorage, HeadersColl, MiddleWareFlow, MiddleWareResult, RequestResponse,
+        RouteEventListener, ServerConfig,
     };
     use mio::{net::UdpSocket, Waker};
     use quiche::{
@@ -56,17 +57,37 @@ mod request_hndlr {
         }
     }
 
-    impl<S: Send + Sync + 'static> RouteHandler<S> {
+    impl<S: Send + Sync + 'static + Clone> RouteHandler<S> {
         pub fn new(route_mngr_inner: Arc<Mutex<RouteManagerInner<S>>>) -> Self {
             RouteHandler {
                 inner: route_mngr_inner,
             }
         }
+        pub fn app_state(&self) -> S {
+            let guard = &*self.inner.lock().unwrap();
+            guard.app_state().clone()
+        }
         pub fn send_header_work(
             &self,
+            middleware_collection: Vec<
+                Box<dyn FnMut(&mut [h3::Header], &S) -> MiddleWareFlow + Send + Sync + 'static>,
+            >,
             msg: HeaderMessage,
             middleware_result_sender: crossbeam_channel::Sender<MiddleWareResult>,
-        ) -> Option<MiddleWareJob> {
+        ) -> Option<MiddleWareJob<S>> {
+            let guard = &*self.inner.lock().unwrap();
+
+            let stream_id = msg.stream_id();
+            let scid = msg.scid();
+            let headers = msg.headers();
+            let middleware_job = MiddleWareJob::new(
+                stream_id,
+                scid.to_vec(),
+                headers.to_vec(),
+                middleware_collection,
+                middleware_result_sender,
+            );
+
             None
             //let headers_coll: HeadersColl = method.get_headers_for_middleware(&mut headers);
 
@@ -538,7 +559,7 @@ mod route_handle_implementation {
         }
     }
 
-    pub fn send_error<S: Send + Sync + 'static>(
+    pub fn send_error<S: Send + Sync + 'static + Clone>(
         error_type: ErrorResponse,
         guard: &RouteManagerInner<S>,
         waker: &mio::Waker,
@@ -644,7 +665,7 @@ mod route_handle_implementation {
             }
         }
     }
-    pub fn send_404<S: Send + Sync + 'static>(
+    pub fn send_404<S: Send + Sync + 'static + Clone>(
         req_path: &str,
         guard: &RouteManagerInner<S>,
         waker: &mio::Waker,
@@ -708,7 +729,7 @@ mod route_handle_implementation {
             }
         }
     }
-    pub fn response_preparation<S: Send + Sync + 'static>(
+    pub fn response_preparation<S: Send + Sync + 'static + Clone>(
         guard: &RouteManagerInner<S>,
         waker: &mio::Waker,
         chunk_dispatch_channel: &ChunksDispatchChannel,

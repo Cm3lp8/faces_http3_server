@@ -114,7 +114,7 @@ mod dispatcher {
                 inner: Arc::new(Mutex::new(HashMap::new())),
             }
         }
-        pub fn set_handles<S: Sync + Send + 'static>(
+        pub fn set_handles<S: Sync + Send + 'static + Clone>(
             &mut self,
             routes_formats: &HashMap<ReqPath, Vec<RouteForm<S>>>,
         ) {

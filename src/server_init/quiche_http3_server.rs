@@ -193,7 +193,7 @@ mod quiche_implementation {
 
     use super::*;
 
-    pub fn run<S: Send + Sync + 'static>(
+    pub fn run<S: Send + Sync + 'static + Clone>(
         server_config: Arc<ServerConfig>,
         route_manager: RouteManager<S>,
     ) {
@@ -234,6 +234,7 @@ mod quiche_implementation {
             chunking_station.clone(),
             waker.clone(),
             file_writer_channel.clone(),
+            route_manager.routes_handler().app_state(),
         );
 
         header_queue_processing.run();

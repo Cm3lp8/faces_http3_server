@@ -88,7 +88,7 @@ mod route_mngr {
             }
         }
     }
-    impl<S: Send + Sync + 'static> RouteManager<S> {
+    impl<S: Send + Sync + 'static + Clone> RouteManager<S> {
         ///
         ///___________________________
         ///Create a new Router with a concrete S as generic for an app state.
@@ -135,7 +135,7 @@ mod route_mngr {
                                      //key value is HashMap
                                      //for stream_id u64
     }
-    impl<S: Send + Sync + 'static> RouteManagerInner<S> {
+    impl<S: Send + Sync + 'static + Clone> RouteManagerInner<S> {
         ///
         ///Init the request manager builder.
         ///You can add new request forms with add_new_request_form();
@@ -230,7 +230,7 @@ mod route_mngr {
         app_state: Option<S>,
         global_middlewares: Vec<Arc<dyn MiddleWare<S> + Send + Sync + 'static>>,
     }
-    impl<S: Send + Sync + 'static> RouteManagerBuilder<S> {
+    impl<S: Send + Sync + 'static + Clone> RouteManagerBuilder<S> {
         pub fn build(&mut self) -> RouteManager<S> {
             let request_manager_inner = RouteManagerInner {
                 routes_formats: std::mem::replace(&mut self.routes_formats, HashMap::new()),
@@ -447,7 +447,7 @@ mod route_mngr {
         body_cb:
             Option<Box<dyn Fn(RouteEvent) -> Result<RequestResponse, ()> + Send + Sync + 'static>>,
     }
-    impl<S: Send + Sync + 'static> Debug for RouteForm<S> {
+    impl<S: Send + Sync + 'static + Clone> Debug for RouteForm<S> {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             write!(
                 f,
@@ -457,7 +457,7 @@ mod route_mngr {
         }
     }
 
-    impl<S: Send + Sync + 'static> PartialEq for RouteForm<S> {
+    impl<S: Send + Sync + 'static + Clone> PartialEq for RouteForm<S> {
         fn eq(&self, other: &Self) -> bool {
             self.method() == other.method()
                 && self.path() == self.path()
@@ -466,7 +466,7 @@ mod route_mngr {
         }
     }
 
-    impl<S: Send + Sync + 'static> RouteForm<S> {
+    impl<S: Send + Sync + 'static + Clone> RouteForm<S> {
         pub fn new(
             path: &'static str,
             method: H3Method,
@@ -605,7 +605,7 @@ mod route_mngr {
         >,
     }
 
-    impl<S: Send + Sync + 'static> RouteFormBuilder<S> {
+    impl<S: Send + Sync + 'static + Clone> RouteFormBuilder<S> {
         pub fn new() -> Self {
             Self {
                 method: None,

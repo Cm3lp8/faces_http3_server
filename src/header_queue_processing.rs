@@ -62,7 +62,7 @@ mod header_reception {
     }
 
     /// Processing headers asyncronously
-    pub struct HeaderProcessing<S> {
+    pub struct HeaderProcessing<S: Send + Sync + 'static + Clone> {
         route_handler: RouteHandler<S>,
         server_config: Arc<ServerConfig>,
         chunking_station: ChunkingStation,
@@ -72,18 +72,19 @@ mod header_reception {
             crossbeam_channel::Receiver<HeaderMessage>,
         ),
         file_writer_channel: FileWriterChannel,
-        workers: Arc<ThreadPool>,
+        workers: Arc<ThreadPool<S>>,
     }
 
-    impl<S: Send + Sync + 'static> HeaderProcessing<S> {
+    impl<S: Send + Sync + 'static + Clone> HeaderProcessing<S> {
         pub fn new(
             route_handler: RouteHandler<S>,
             server_config: Arc<ServerConfig>,
             chunking_station: ChunkingStation,
             waker: Arc<Waker>,
             file_writer_channel: FileWriterChannel,
+            app_state: S,
         ) -> Self {
-            let workers = Arc::new(ThreadPool::new(8));
+            let workers = Arc::new(ThreadPool::new(8, app_state));
             Self {
                 server_config,
                 route_handler,
@@ -231,10 +232,10 @@ mod workers {
         HeaderMessage,
     };
 
-    pub fn run_prime_processor<S: Send + Sync + 'static>(
+    pub fn run_prime_processor<S: Send + Sync + 'static + Clone>(
         receiver: crossbeam_channel::Receiver<HeaderMessage>,
         route_handler: &RouteHandler<S>,
-        header_workers_pool: &Arc<ThreadPool>,
+        header_workers_pool: &Arc<ThreadPool<S>>,
         chunking_station: &ChunkingStation,
         mio_waker: &Arc<mio::Waker>,
     ) {
@@ -260,14 +261,13 @@ mod workers {
                     continue;
                 }
 
-                if let Some(middleware_job) = route_handler
-                    .send_header_work(header_msg.clone(), middleware_result_chan.0.clone())
-                {
+                if let Some(middleware_job) = route_handler.send_header_work(
+                    vec![],
+                    header_msg.clone(),
+                    middleware_result_chan.0.clone(),
+                ) {
                     header_workers_pool.execute(middleware_job);
                 }
-
-                let confirmation = middleware_process.extract_header(header_msg);
-                confirmation_room.push_back(confirmation);
             }
         });
 
