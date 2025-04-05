@@ -268,6 +268,7 @@ mod quiche_implementation {
                 &chunking_station_clone,
                 &waker_clone_2,
             );
+            warn!("resp prep done");
         });
 
         // Create the configuration for the QUIC connections.
@@ -1429,7 +1430,7 @@ mod quiche_implementation {
         {
             data_management = route_form.data_management_type();
             event_subscriber = route_form.event_subscriber();
-            event_subscriber.as_ref().unwrap().on_header();
+            //   event_subscriber.as_ref().unwrap().on_header();
         }
         if !route_handler.is_request_set_in_table(stream_id, conn_id.as_str()) {
             route_handler
@@ -1469,6 +1470,7 @@ mod quiche_implementation {
         }
 
         ////// response prep
+        warn!("route prpation to send data");
         response_preparation_with_route_handler(
             route_handler,
             &waker,

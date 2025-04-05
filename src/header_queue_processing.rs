@@ -328,6 +328,7 @@ mod workers {
                         has_more_frames,
                         content_length,
                     } => {
+                        warn!("succes !!");
                         response_processing_pool_injector.send(
                             &path,
                             method,

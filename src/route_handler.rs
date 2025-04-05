@@ -35,7 +35,7 @@ mod request_hndlr {
         server_config,
         server_init::quiche_http3_server::{self, Client},
         BodyStorage, FinishedEvent, HeadersColl, MiddleWareFlow, MiddleWareResult, RequestResponse,
-        RouteEventListener, ServerConfig,
+        RouteEventListener, RouteResponse, ServerConfig,
     };
     use mio::{net::UdpSocket, Waker};
     use quiche::{
@@ -111,10 +111,23 @@ mod request_hndlr {
                 .routes_states()
                 .set_intermediate_headers_send(stream_id, conn_id.to_string());
         }
-        pub fn process_handler(&self, event: FinishedEvent) -> Option<RequestResponse> {
+        pub fn process_handler(
+            &self,
+            stream_id: u64,
+            conn_id: &str,
+            scid: &[u8],
+            event: FinishedEvent,
+        ) -> Option<RequestResponse> {
             let guard = self.inner.lock().unwrap();
-            guard.route_event_dispatcher().dispatch_finished(event);
-            None
+            match guard.route_event_dispatcher().dispatch_finished(event) {
+                RouteResponse::OK200 => Some(RequestResponse::new_ok_200(stream_id, scid, conn_id)),
+                RouteResponse::OK200_FILE(path) => Some(RequestResponse::new_200_with_file(
+                    stream_id, scid, conn_id, path,
+                )),
+                RouteResponse::OK200_DATA(buf) => Some(RequestResponse::new_200_with_data(
+                    stream_id, scid, conn_id, buf,
+                )),
+            }
         }
         pub fn send_reception_status_first(
             &self,
@@ -817,7 +830,7 @@ mod route_handle_implementation {
             match route_event {
                 RouteEvent::OnFinished(event) => {
                     is_end = event.is_end();
-                    route_handler.process_handler(event)
+                    route_handler.process_handler(stream_id, conn_id, scid, event)
                 }
                 _ => None,
             }

@@ -41,7 +41,7 @@ fn main() {
                 event.path()
             );
 
-            Response::ok_200_with_data(event, vec![0; 10_000_000])
+            Response::ok_200_with_data(event, vec![0; 100_000_000])
         }
     }
     #[derive(Clone)]
