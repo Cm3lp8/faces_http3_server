@@ -69,7 +69,7 @@ mod route_mngr {
         request_response::{BodyType, RequestResponse},
         route_events::RouteEvent,
         route_handler::RequestsTable,
-        ErrorResponse, HeadersColl, MiddleWareFlow, RouteEventListener,
+        ErrorResponse, HeadersColl, MiddleWareFlow, Response, RouteEventListener,
     };
 
     use self::route_config::DataManagement;
@@ -105,7 +105,7 @@ mod route_mngr {
         pub fn get_routes_from_path(
             &self,
             path: &str,
-            cb: impl FnOnce(Option<&Vec<RouteForm<S>>>),
+            cb: impl FnOnce(Option<&Vec<Arc<RouteForm<S>>>>),
         ) {
             let guard = &*self.inner.lock().unwrap();
 
@@ -128,9 +128,10 @@ mod route_mngr {
     }
 
     pub struct RouteManagerInner<S> {
-        routes_formats: HashMap<ReqPath, Vec<RouteForm<S>>>,
+        routes_formats: HashMap<ReqPath, Vec<Arc<RouteForm<S>>>>,
         error_formats: HashMap<ErrorType, ErrorForm>,
         app_state: S,
+        route_event_dispatcher: RouteEventDispatcher,
         route_states: RequestsTable, //trace_id of the Connection as
                                      //key value is HashMap
                                      //for stream_id u64
@@ -157,6 +158,9 @@ mod route_mngr {
         pub fn routes_states(&self) -> &RequestsTable {
             &self.route_states
         }
+        pub fn route_event_dispatcher(&self) -> &RouteEventDispatcher {
+            &self.route_event_dispatcher
+        }
         pub fn get_error_response(
             &self,
             error: ErrorType,
@@ -166,11 +170,11 @@ mod route_mngr {
             }
             None
         }
-        pub fn routes_formats(&self) -> &HashMap<ReqPath, Vec<RouteForm<S>>> {
+        pub fn routes_formats(&self) -> &HashMap<ReqPath, Vec<Arc<RouteForm<S>>>> {
             &self.routes_formats
         }
 
-        pub fn get_routes_from_path(&self, path: &str) -> Option<&Vec<RouteForm<S>>> {
+        pub fn get_routes_from_path(&self, path: &str) -> Option<&Vec<Arc<RouteForm<S>>>> {
             self.routes_formats.get(path)
         }
         pub fn get_routes_from_path_and_method_b(
@@ -199,7 +203,7 @@ mod route_mngr {
             &self,
             path: &'b str,
             methode: H3Method,
-        ) -> Option<(&RouteForm<S>, Option<Vec<&'b str>>)> {
+        ) -> Option<(Arc<RouteForm<S>>, Option<Vec<&'b str>>)> {
             //if param in path
 
             let mut path_s = path.to_string();
@@ -215,7 +219,7 @@ mod route_mngr {
             if let Some(route_coll) = self.get_routes_from_path(path_s.as_str()) {
                 if let Some(found_route) = route_coll.iter().find(|item| item.method() == &methode)
                 {
-                    return Some((found_route, param_trail));
+                    return Some((found_route.clone(), param_trail));
                 }
                 None
             } else {
@@ -225,18 +229,20 @@ mod route_mngr {
     }
 
     pub struct RouteManagerBuilder<S> {
-        routes_formats: HashMap<ReqPath, Vec<RouteForm<S>>>,
+        routes_formats: HashMap<ReqPath, Vec<Arc<RouteForm<S>>>>,
         error_formats: HashMap<ErrorType, ErrorForm>,
         app_state: Option<S>,
         global_middlewares: Vec<Arc<dyn MiddleWare<S> + Send + Sync + 'static>>,
     }
     impl<S: Send + Sync + 'static + Clone> RouteManagerBuilder<S> {
         pub fn build(&mut self) -> RouteManager<S> {
+            let handle_dispatcher = self.build_route_event_dispatcher();
             let request_manager_inner = RouteManagerInner {
                 routes_formats: std::mem::replace(&mut self.routes_formats, HashMap::new()),
                 error_formats: std::mem::replace(&mut self.error_formats, HashMap::new()),
                 app_state: self.app_state.take().unwrap(),
                 route_states: RequestsTable::new(),
+                route_event_dispatcher: handle_dispatcher,
             };
 
             RouteManager {
@@ -252,11 +258,12 @@ mod route_mngr {
             &mut self,
             event_loop: Arc<dyn RouteEventListener + Send + Sync + 'static>,
         ) {
+            /*
             for route_coll in self.routes_formats.values_mut() {
                 for route in route_coll {
                     route.set_event_subscriber(&event_loop);
                 }
-            }
+            }*/
         }
         ///___________________________
         ///Add a middleware that will affect all routes.
@@ -321,19 +328,20 @@ mod route_mngr {
         fn add_new_route(&mut self, route_form: RouteForm<S>) -> &mut Self {
             let path = route_form.path();
 
+            let route_form_boxed = Arc::new(route_form);
             if !self.routes_formats.contains_key(path) {
-                self.routes_formats.insert(path, vec![route_form]);
+                self.routes_formats.insert(path, vec![route_form_boxed]);
             } else {
                 assert!(!self
                     .routes_formats
                     .get(path)
                     .as_ref()
                     .unwrap()
-                    .contains(&route_form));
+                    .contains(&route_form_boxed));
                 self.routes_formats
                     .get_mut(path)
                     .expect(&format!("can't access value for {:?}", path))
-                    .push(route_form);
+                    .push(route_form_boxed);
             }
             self
         }
@@ -484,8 +492,11 @@ mod route_mngr {
         }
         pub fn to_middleware_coll(
             &self,
-        ) -> Vec<Box<dyn FnMut(&mut [h3::Header], &S) -> MiddleWareFlow>> {
-            let mut vec: Vec<Box<dyn FnMut(&mut [Header], &S) -> MiddleWareFlow>> = vec![];
+        ) -> Vec<Box<dyn FnMut(&mut [h3::Header], &S) -> MiddleWareFlow + Send + Sync + 'static>>
+        {
+            let mut vec: Vec<
+                Box<dyn FnMut(&mut [Header], &S) -> MiddleWareFlow + Send + Sync + 'static>,
+            > = vec![];
 
             for mdw in &self.middlewares {
                 vec.push(mdw.callback())

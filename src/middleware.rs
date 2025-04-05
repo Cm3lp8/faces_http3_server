@@ -13,7 +13,9 @@ mod middleware_trait {
         fn on_header<'a>(&self, headers: &HeadersColl<'a>, app_stat: &S) -> MiddleWareFlow {
             MiddleWareFlow::Continue
         }
-        fn callback(&self) -> Box<dyn FnMut(&mut [h3::Header], &S) -> MiddleWareFlow>;
+        fn callback(
+            &self,
+        ) -> Box<dyn FnMut(&mut [h3::Header], &S) -> MiddleWareFlow + Send + Sync + 'static>;
     }
 }
 
@@ -40,6 +42,9 @@ mod middleware_state {
             headers: Vec<h3::Header>,
             stream_id: u64,
             scid: Vec<u8>,
+            conn_id: String,
+            has_more_frames: bool,
+            content_length: Option<usize>,
         },
     }
     impl MiddleWareResult {
@@ -50,12 +55,15 @@ mod middleware_state {
                 scid: scid.to_vec(),
             }
         }
-        pub fn succest(
+        pub fn success(
             path: &str,
             method: H3Method,
             headers: Vec<h3::Header>,
             stream_id: u64,
             scid: &[u8],
+            conn_id: &str,
+            has_more_frames: bool,
+            content_length: Option<usize>,
         ) -> Self {
             Self::Success {
                 path: path.to_string(),
@@ -63,6 +71,9 @@ mod middleware_state {
                 headers,
                 stream_id,
                 scid: scid.to_vec(),
+                conn_id: conn_id.to_string(),
+                has_more_frames,
+                content_length,
             }
         }
         pub fn stream_id(&self) -> Result<u64, ()> {
@@ -73,6 +84,9 @@ mod middleware_state {
                     headers: _,
                     stream_id,
                     scid: _,
+                    conn_id: _,
+                    has_more_frames: _,
+                    content_length: _,
                 } => Ok(*stream_id),
                 Self::Abort {
                     error_response: _,
@@ -90,6 +104,9 @@ mod middleware_state {
                     headers: _,
                     stream_id: _,
                     scid,
+                    conn_id: _,
+                    has_more_frames: _,
+                    content_length: _,
                 } => Ok(scid.to_vec()),
                 Self::Abort {
                     error_response: _,

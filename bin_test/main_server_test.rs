@@ -66,7 +66,11 @@ fn main() {
             info!("Sending unauthorized request ! ");
             MiddleWareFlow::Abort(faces_quic_server::ErrorResponse::Error401(None))
         }
-        fn callback(&self) -> Box<dyn FnMut(&mut [h3::Header], &AppStateTest) -> MiddleWareFlow> {
+        fn callback(
+            &self,
+        ) -> Box<
+            dyn FnMut(&mut [h3::Header], &AppStateTest) -> MiddleWareFlow + Send + Sync + 'static,
+        > {
             let cb = Box::new(|headers: &mut [h3::Header], app_state: &AppStateTest| {
                 MiddleWareFlow::Continue
             });
@@ -87,7 +91,11 @@ fn main() {
             Self::inform(headers);
             MiddleWareFlow::Continue
         }
-        fn callback(&self) -> Box<dyn FnMut(&mut [h3::Header], &AppStateTest) -> MiddleWareFlow> {
+        fn callback(
+            &self,
+        ) -> Box<
+            dyn FnMut(&mut [h3::Header], &AppStateTest) -> MiddleWareFlow + Send + Sync + 'static,
+        > {
             let cb = Box::new(|headers: &mut [h3::Header], app_state: &AppStateTest| {
                 MiddleWareFlow::Continue
             });
@@ -100,7 +108,11 @@ fn main() {
             Self::inform(headers);
             MiddleWareFlow::Continue
         }
-        fn callback(&self) -> Box<dyn FnMut(&mut [h3::Header], &AppStateTest) -> MiddleWareFlow> {
+        fn callback(
+            &self,
+        ) -> Box<
+            dyn FnMut(&mut [h3::Header], &AppStateTest) -> MiddleWareFlow + Send + Sync + 'static,
+        > {
             let cb = Box::new(|headers: &mut [h3::Header], app_state: &AppStateTest| {
                 MiddleWareFlow::Continue
             });

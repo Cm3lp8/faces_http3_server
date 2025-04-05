@@ -279,7 +279,8 @@ mod workers {
                     if let Some(middleware_job) = route_handler.send_header_work(
                         path.as_str(),
                         method,
-                        vec![],
+                        content_length,
+                        middleware_coll,
                         header_msg.clone(),
                         middleware_result_chan.0.clone(),
                     ) {
@@ -323,6 +324,9 @@ mod workers {
                         mut headers,
                         stream_id,
                         scid,
+                        conn_id,
+                        has_more_frames,
+                        content_length,
                     } => {
                         response_processing_pool_injector.send(
                             &path,
@@ -330,6 +334,9 @@ mod workers {
                             &mut headers,
                             stream_id,
                             &scid,
+                            conn_id.as_str(),
+                            has_more_frames,
+                            content_length,
                         );
                     }
                     _ => {}

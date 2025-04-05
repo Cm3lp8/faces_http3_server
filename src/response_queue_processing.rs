@@ -1,10 +1,13 @@
-pub use response_pool_processing::{ResponsePoolProcessing, ResponsePoolProcessingSender};
+pub use response_pool_processing::{
+    ResponseInjection, ResponsePoolProcessing, ResponsePoolProcessingSender,
+};
 mod response_worker;
 mod response_pool_processing {
     use std::sync::Arc;
 
     use mio::Waker;
     use quiche::h3;
+    use rusqlite::ToSql;
 
     use crate::{
         file_writer::{FileWriter, FileWriterChannel},
@@ -20,6 +23,9 @@ mod response_pool_processing {
         headers: Vec<h3::Header>,
         stream_id: u64,
         scid: Vec<u8>,
+        conn_id: String,
+        has_more_frames: bool,
+        content_length: Option<usize>,
     }
     impl ResponseInjection {
         pub fn new(
@@ -28,6 +34,9 @@ mod response_pool_processing {
             headers: &mut [h3::Header],
             stream_id: u64,
             scid: &[u8],
+            conn_id: &str,
+            has_more_frames: bool,
+            content_length: Option<usize>,
         ) -> Self {
             Self {
                 path: path.to_string(),
@@ -35,7 +44,34 @@ mod response_pool_processing {
                 headers: headers.to_vec(),
                 stream_id,
                 scid: scid.to_vec(),
+                conn_id: conn_id.to_string(),
+                has_more_frames,
+                content_length,
             }
+        }
+        pub fn content_length(&self) -> Option<usize> {
+            self.content_length
+        }
+        pub fn headers(&self) -> &[h3::Header] {
+            &self.headers
+        }
+        pub fn stream_id(&self) -> u64 {
+            self.stream_id
+        }
+        pub fn conn_id(&self) -> String {
+            self.conn_id.clone()
+        }
+        pub fn scid(&self) -> Vec<u8> {
+            self.scid.to_vec()
+        }
+        pub fn path(&self) -> String {
+            self.path.to_string()
+        }
+        pub fn method(&self) -> H3Method {
+            self.method
+        }
+        pub fn has_more_frames(&self) -> bool {
+            self.has_more_frames
         }
     }
     pub struct ResponsePoolProcessing<S> {
@@ -98,7 +134,22 @@ mod response_pool_processing {
             headers: &mut [h3::Header],
             stream_id: u64,
             scid: &[u8],
-        ) {
+            conn_id: &str,
+            has_more_frames: bool,
+            content_length: Option<usize>,
+        ) -> Result<(), crossbeam_channel::SendError<ResponseInjection>> {
+            let response_injection = ResponseInjection::new(
+                path,
+                method,
+                headers,
+                stream_id,
+                scid,
+                conn_id,
+                has_more_frames,
+                content_length,
+            );
+
+            self.sender.send(response_injection)
         }
     }
 }

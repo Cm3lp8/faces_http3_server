@@ -50,6 +50,10 @@ mod thread_pool {
                         let mut headers = middleware_job.take_headers();
                         let stream_id = middleware_job.stream_id();
                         let scid = middleware_job.scid();
+                        let conn_id: String = middleware_job.conn_id();
+                        let has_more_frames: bool = middleware_job.has_more_frames();
+                        let content_length: Option<usize> = middleware_job.content_length();
+
                         let path = middleware_job.path();
                         let method = middleware_job.method();
 
@@ -76,6 +80,9 @@ mod thread_pool {
                             headers,
                             stream_id,
                             scid,
+                            conn_id,
+                            has_more_frames,
+                            content_length,
                         }) {
                             error!("Failed sending MiddleWareResult Success")
                         }
@@ -95,6 +102,9 @@ mod job {
         path: String,
         method: H3Method,
         stream_id: u64,
+        conn_id: String,
+        has_more_frames: bool,
+        content_length: Option<usize>,
         scid: Vec<u8>,
         headers: Vec<h3::Header>,
         middleware_collection:
@@ -108,6 +118,9 @@ mod job {
             method: H3Method,
             stream_id: u64,
             scid: Vec<u8>,
+            conn_id: String,
+            has_more_frames: bool,
+            content_length: Option<usize>,
             headers: Vec<h3::Header>,
             middleware_collection: Vec<
                 Box<dyn FnMut(&mut [Header], &S) -> MiddleWareFlow + Send + Sync + 'static>,
@@ -119,6 +132,9 @@ mod job {
                 method,
                 stream_id,
                 scid,
+                conn_id,
+                has_more_frames,
+                content_length,
                 headers,
                 middleware_collection,
                 task_done_sender,
@@ -135,6 +151,15 @@ mod job {
         }
         pub fn scid(&self) -> Vec<u8> {
             self.scid.to_vec()
+        }
+        pub fn conn_id(&self) -> String {
+            self.conn_id.to_string()
+        }
+        pub fn has_more_frames(&self) -> bool {
+            self.has_more_frames
+        }
+        pub fn content_length(&self) -> Option<usize> {
+            self.content_length.clone()
         }
         pub fn take_headers(&mut self) -> Vec<h3::Header> {
             std::mem::replace(&mut self.headers, vec![])

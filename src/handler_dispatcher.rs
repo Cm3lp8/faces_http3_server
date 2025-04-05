@@ -116,7 +116,7 @@ mod dispatcher {
         }
         pub fn set_handles<S: Sync + Send + 'static + Clone>(
             &mut self,
-            routes_formats: &HashMap<ReqPath, Vec<RouteForm<S>>>,
+            routes_formats: &HashMap<ReqPath, Vec<Arc<RouteForm<S>>>>,
         ) {
             let guard = &mut *self.inner.lock().unwrap();
 
