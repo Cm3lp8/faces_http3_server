@@ -114,6 +114,69 @@ mod req_temp_table {
                 entry.progress_header_sent = true;
             }
         }
+        pub fn complete_request_entry_in_table(
+            &self,
+            stream_id: u64,
+            conn_id: &str,
+            method: H3Method,
+            path: &str,
+            headers: &[h3::Header],
+            content_length: Option<usize>,
+            data_management_type: Option<DataManagement>,
+            event_subscriber: Option<Arc<dyn RouteEventListener + 'static + Send + Sync>>,
+        ) {
+            self.table
+                .lock()
+                .unwrap()
+                .entry((conn_id.to_string(), stream_id))
+                .and_modify(|entry| {
+                    entry.method = Some(method);
+                    entry.path = Some(path.to_string());
+                    entry.event_subscriber = event_subscriber;
+                    entry.data_management_type = data_management_type;
+                    entry.content_length = content_length;
+                    entry.headers = Some(headers.to_vec());
+                });
+        }
+        pub fn is_entry_partial_reponse_set(&self, stream_id: u64, conn_id: &str) -> bool {
+            if let Some(entry) = self
+                .table
+                .lock()
+                .unwrap()
+                .get(&(conn_id.to_string(), stream_id))
+            {
+                true
+            } else {
+                false
+            }
+        }
+        pub fn get_path_and_method_and_content_length(
+            &self,
+            stream_id: u64,
+            conn_id: &str,
+        ) -> Option<(String, H3Method, Vec<h3::Header>, Option<usize>)> {
+            let mut path_and_method: Option<(String, H3Method, Vec<h3::Header>, Option<usize>)> =
+                None;
+            if let Some(entry) = self
+                .table
+                .lock()
+                .unwrap()
+                .get_mut(&(conn_id.to_string(), stream_id))
+            {
+                if entry.path.is_none() || entry.headers.is_none() || entry.method.is_none() {
+                    return None;
+                }
+                if let Some(headers) = &entry.headers {
+                    path_and_method = Some((
+                        entry.path.as_ref().unwrap().clone(),
+                        entry.method.unwrap(),
+                        headers.to_vec(),
+                        entry.content_length(),
+                    ));
+                }
+            };
+            path_and_method
+        }
         pub fn get_reception_status_infos(
             &self,
             stream_id: u64,
@@ -244,7 +307,79 @@ mod req_temp_table {
             }
             total_written
         }
+        pub fn add_partial_request_before_header_treatment(
+            &self,
+            server_config: &Arc<ServerConfig>,
+            conn_id: String,
+            stream_id: u64,
+            data_management_type: Option<DataManagement>,
+            event_subscriber: Option<Arc<dyn RouteEventListener + 'static + Send + Sync>>,
+            is_end: bool,
+            file_writer_channel: FileWriterChannel,
+        ) {
+            if let Some(_entry) = self
+                .table
+                .lock()
+                .unwrap()
+                .get(&(conn_id.to_string(), stream_id))
+            {
+                return;
+            }
+            let mut file_opened: Option<Arc<Mutex<BufWriter<File>>>> = None;
+            let storage_path = if let Some(data_management_type) = data_management_type.as_ref() {
+                if let Some(body_storage) = data_management_type.is_body_storage() {
+                    if let BodyStorage::File = body_storage {
+                        let mut path = server_config.get_storage_path();
+
+                        let mut extension: Option<String> = None;
+
+                        let uuid = Uuid::new_v4();
+                        let mut uuid = uuid.to_string();
+
+                        if let Some(ext) = extension {
+                            uuid = format!("{}{}", uuid, ext);
+                        }
+
+                        path.push(uuid);
+
+                        if let Ok(file) = File::create(path.clone()) {
+                            file_opened = Some(Arc::new(Mutex::new(BufWriter::new(file))));
+                        } else {
+                            error!("Failed creating [{:?}] file", path);
+                        }
+
+                        Some(path)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            let partial_request = PartialReq::new(
+                conn_id.clone(),
+                stream_id,
+                None, //method
+                data_management_type,
+                event_subscriber,
+                storage_path,
+                file_opened,
+                file_writer_channel,
+                None, //header
+                None, //path
+                None, //content_length
+                is_end,
+            );
+            self.table
+                .lock()
+                .unwrap()
+                .insert((conn_id, stream_id), partial_request);
+        }
         /// Keep track of a client request based on unique connexion_id and stream_id
+        /// If the entry already exists, does nothing.
         pub fn add_partial_request(
             &self,
             server_config: &Arc<ServerConfig>,
@@ -259,6 +394,14 @@ mod req_temp_table {
             is_end: bool,
             file_writer_channel: FileWriterChannel,
         ) {
+            if let Some(_entry) = self
+                .table
+                .lock()
+                .unwrap()
+                .get(&(conn_id.to_string(), stream_id))
+            {
+                return;
+            }
             let mut file_opened: Option<Arc<Mutex<BufWriter<File>>>> = None;
             let storage_path = if let Some(data_management_type) = data_management_type.as_ref() {
                 if let Some(body_storage) = data_management_type.is_body_storage() {
@@ -307,14 +450,14 @@ mod req_temp_table {
             let partial_request = PartialReq::new(
                 conn_id.clone(),
                 stream_id,
-                method,
+                Some(method),
                 data_management_type,
                 event_subscriber,
                 storage_path,
                 file_opened,
                 file_writer_channel,
-                headers,
-                path,
+                Some(headers),
+                Some(path),
                 content_length,
                 is_end,
             );
@@ -328,12 +471,12 @@ mod req_temp_table {
         conn_id: String,
         stream_id: u64,
         headers: Option<Vec<h3::Header>>,
-        method: H3Method,
+        method: Option<H3Method>,
         data_management_type: Option<DataManagement>,
         event_subscriber: Option<Arc<dyn RouteEventListener + 'static + Send + Sync>>,
         storage_path: Option<PathBuf>,
         file_opened: Option<Arc<Mutex<BufWriter<File>>>>,
-        path: String,
+        path: Option<String>,
         args: Option<Vec<ReqArgs>>,
         body_written_size: usize,
         content_length: Option<usize>,
@@ -356,38 +499,62 @@ mod req_temp_table {
         pub fn new(
             conn_id: String,
             stream_id: u64,
-            method: H3Method,
+            method: Option<H3Method>,
             data_management_type: Option<DataManagement>,
             event_subscriber: Option<Arc<dyn RouteEventListener + Send + 'static + Sync>>,
             storage_path: Option<PathBuf>,
             file_opened: Option<Arc<Mutex<BufWriter<File>>>>,
             file_writer_channel: FileWriterChannel,
-            headers: &[h3::Header],
-            path: &str,
+            headers: Option<&[h3::Header]>,
+            path: Option<&str>,
             content_length: Option<usize>,
             is_end: bool,
         ) -> Self {
-            let (path, args) = ReqArgs::parse_args(path);
-
-            Self {
-                conn_id,
-                stream_id,
-                headers: Some(headers.to_vec()),
-                method,
-                data_management_type,
-                event_subscriber,
-                storage_path,
-                file_opened,
-                path,
-                args,
-                body_written_size: 0,
-                content_length,
-                precedent_percentage_written: None,
-                progress_header_sent: false,
-                body: vec![],
-                file_writer_channel,
-                is_end,
+            if let Some(path) = path {
+                let (path, args) = ReqArgs::parse_args(path);
+                Self {
+                    conn_id,
+                    stream_id,
+                    headers: Some(headers.unwrap().to_vec()),
+                    method,
+                    data_management_type,
+                    event_subscriber,
+                    storage_path,
+                    file_opened,
+                    path: Some(path),
+                    args,
+                    body_written_size: 0,
+                    content_length,
+                    precedent_percentage_written: None,
+                    progress_header_sent: false,
+                    body: vec![],
+                    file_writer_channel,
+                    is_end,
+                }
+            } else {
+                Self {
+                    conn_id,
+                    stream_id,
+                    headers: None,
+                    method: None,
+                    data_management_type,
+                    event_subscriber,
+                    storage_path,
+                    file_opened,
+                    path: None,
+                    args: None,
+                    body_written_size: 0,
+                    content_length,
+                    precedent_percentage_written: None,
+                    progress_header_sent: false,
+                    body: vec![],
+                    file_writer_channel,
+                    is_end,
+                }
             }
+        }
+        pub fn content_length(&self) -> Option<usize> {
+            self.content_length.clone()
         }
         pub fn write_file(&mut self, packet: &[u8], packet_id: usize, is_end: bool) {
             self.is_end = is_end;
@@ -438,14 +605,17 @@ mod req_temp_table {
             event_type: EventType,
         ) -> Option<RouteEvent> {
             let file_path = self.close_file();
+            if self.method.is_none() || self.headers.is_none() || self.path.is_none() {
+                return None;
+            }
             if let Some(headers) = self.headers.as_ref() {
                 match event_type {
                     EventType::OnHeader => Some(RouteEvent::new_header(HeaderEvent::new(
                         stream_id,
                         conn_id,
                         scid,
-                        self.path.as_str(),
-                        self.method,
+                        self.path.as_ref().unwrap().as_str(),
+                        self.method.unwrap(),
                         headers.clone(),
                         self.args.take(),
                     ))),
@@ -453,8 +623,8 @@ mod req_temp_table {
                         stream_id,
                         conn_id,
                         scid,
-                        self.path.as_str(),
-                        self.method,
+                        self.path.as_ref().unwrap().as_str(),
+                        self.method.unwrap(),
                         headers.clone(),
                         self.args.take(),
                         file_path,

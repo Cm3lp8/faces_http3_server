@@ -31,7 +31,7 @@ mod response_pool_processing {
         pub fn new(
             path: &str,
             method: H3Method,
-            headers: &mut [h3::Header],
+            headers: &[h3::Header],
             stream_id: u64,
             scid: &[u8],
             conn_id: &str,
@@ -131,7 +131,7 @@ mod response_pool_processing {
             &self,
             path: &str,
             method: H3Method,
-            headers: &mut [h3::Header],
+            headers: &[h3::Header],
             stream_id: u64,
             scid: &[u8],
             conn_id: &str,

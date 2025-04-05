@@ -240,6 +240,8 @@ mod quiche_implementation {
             route_manager.routes_handler().app_state(),
         );
 
+        let response_injection = response_pool_processing.get_response_pool_processing_sender();
+
         let header_queue_processing = HeaderProcessing::new(
             route_manager.routes_handler(),
             server_config.clone(),
@@ -504,6 +506,7 @@ mod quiche_implementation {
                                     more_frames,
                                 );
                                 let scid = client.conn.source_id().as_ref().to_vec();
+                                /*
                                 route_manager.routes_handler().parse_headers(
                                     &server_config,
                                     &chunk_dispatch_channel,
@@ -518,7 +521,7 @@ mod quiche_implementation {
                                     &waker_clone,
                                     &last_time_spend,
                                     file_writer_channel.clone(),
-                                );
+                                );*/
                                 req_recvd += 1;
                                 let trace_id = client.conn.trace_id().to_string();
 
@@ -537,6 +540,19 @@ mod quiche_implementation {
                                 while let Ok(read) =
                                     http3_conn.recv_body(&mut client.conn, stream_id, &mut out)
                                 {
+                                    let trace_id = client.conn.trace_id().to_string();
+                                    let scid = client.conn.source_id().to_vec();
+                                    if !route_manager
+                                        .is_request_set_in_table(stream_id, trace_id.as_str())
+                                    {
+                                        route_manager.set_request_in_table(
+                                            stream_id,
+                                            trace_id.as_str(),
+                                            &scid,
+                                            &server_config,
+                                            &file_writer_channel,
+                                        );
+                                    }
                                     let scid = client.conn.source_id().as_ref().to_vec();
                                     if let Err(_) =
                                         route_manager.routes_handler().write_body_packet(
@@ -583,6 +599,7 @@ mod quiche_implementation {
                                     &chunking_station,
                                     &waker_clone,
                                     &last_time_spend,
+                                    &response_injection,
                                 );
                                 ()
                             }
@@ -1414,22 +1431,38 @@ mod quiche_implementation {
             event_subscriber = route_form.event_subscriber();
             event_subscriber.as_ref().unwrap().on_header();
         }
-        route_handler
-            .mutex_guard()
-            .routes_states()
-            .add_partial_request(
-                server_config,
-                conn_id.clone(),
-                stream_id,
-                method,
-                data_management,
-                event_subscriber.clone(),
-                &headers,
-                path.as_str(),
-                content_length,
-                !more_frames,
-                file_writer_channel,
-            );
+        if !route_handler.is_request_set_in_table(stream_id, conn_id.as_str()) {
+            route_handler
+                .mutex_guard()
+                .routes_states()
+                .add_partial_request(
+                    server_config,
+                    conn_id.clone(),
+                    stream_id,
+                    method,
+                    data_management,
+                    event_subscriber.clone(),
+                    &headers,
+                    path.as_str(),
+                    content_length,
+                    !more_frames,
+                    file_writer_channel,
+                );
+        } else {
+            route_handler
+                .mutex_guard()
+                .routes_states()
+                .complete_request_entry_in_table(
+                    stream_id,
+                    conn_id.as_str(),
+                    method,
+                    path.as_str(),
+                    headers,
+                    content_length,
+                    data_management,
+                    event_subscriber,
+                );
+        }
 
         if more_frames {
             return;

@@ -8,6 +8,7 @@ pub use route_mngr::{
 };
 
 mod route_config {
+    use std::default;
 
     #[derive(Clone, Copy, Debug)]
     pub enum DataManagement {
@@ -24,9 +25,16 @@ mod route_config {
         }
     }
 
-    #[derive(Clone, Copy, Debug)]
+    impl Default for DataManagement {
+        fn default() -> Self {
+            Self::Storage(BodyStorage::default())
+        }
+    }
+
+    #[derive(Clone, Default, Copy, Debug)]
     pub enum BodyStorage {
         InMemory,
+        #[default]
         File,
     }
     #[derive(Debug)]
@@ -68,8 +76,9 @@ mod route_mngr {
         middleware::MiddleWare,
         request_response::{BodyType, RequestResponse},
         route_events::RouteEvent,
-        route_handler::RequestsTable,
-        ErrorResponse, HeadersColl, MiddleWareFlow, Response, RouteEventListener,
+        route_handler::{self, RequestsTable},
+        server_config, ErrorResponse, HeadersColl, MiddleWareFlow, Response, RouteEventListener,
+        ServerConfig,
     };
 
     use self::route_config::DataManagement;
@@ -125,6 +134,40 @@ mod route_mngr {
         pub fn routes_handler(&self) -> RouteHandler<S> {
             RouteHandler::new(self.inner.clone())
         }
+        pub fn is_request_set_in_table(&self, stream_id: u64, conn_id: &str) -> bool {
+            let guard = &self.inner.lock().unwrap();
+
+            guard
+                .routes_states()
+                .is_entry_partial_reponse_set(stream_id, conn_id)
+        }
+        pub fn set_request_in_table(
+            &self,
+            stream_id: u64,
+            conn_id: &str,
+            scid: &[u8],
+            server_config: &Arc<ServerConfig>,
+            file_writer_channel: &crate::file_writer::FileWriterChannel,
+        ) {
+            let route_handler = self.routes_handler();
+            let guard = &mut *route_handler.mutex_guard();
+            let mut data_management: Option<DataManagement> = Some(DataManagement::default());
+            let mut event_subscriber: Option<Arc<dyn RouteEventListener + Send + Sync + 'static>> =
+                None;
+
+            route_handler
+                .mutex_guard()
+                .routes_states()
+                .add_partial_request_before_header_treatment(
+                    server_config,
+                    conn_id.to_string(),
+                    stream_id,
+                    data_management,
+                    event_subscriber.clone(),
+                    !true,
+                    file_writer_channel.clone(),
+                );
+        }
     }
 
     pub struct RouteManagerInner<S> {
@@ -154,6 +197,10 @@ mod route_mngr {
         }
         pub fn app_state(&self) -> &S {
             &self.app_state
+        }
+        pub fn is_request_set_in_table(&self, stream_id: u64, conn_id: &str) -> bool {
+            self.routes_states()
+                .is_entry_partial_reponse_set(stream_id, conn_id)
         }
         pub fn routes_states(&self) -> &RequestsTable {
             &self.route_states

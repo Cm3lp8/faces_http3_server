@@ -29,6 +29,7 @@ mod request_hndlr {
             BodyRequest, ChunkSender, ChunkingStation, ChunksDispatchChannel, HeaderPriority,
             HeaderRequest,
         },
+        response_queue_processing::{ResponseInjection, ResponsePoolProcessingSender},
         route_events::{self, EventType, RouteEvent},
         route_manager::{DataManagement, RouteManagerInner},
         server_config,
@@ -284,10 +285,29 @@ mod request_hndlr {
             chunking_station: &ChunkingStation,
             waker: &Arc<Waker>,
             last_time: &Arc<Mutex<Duration>>,
+            response_injection_sender: &ResponsePoolProcessingSender,
         ) {
             let guard = &*self.inner.lock().unwrap();
-            let chunk_dispatch_channel = chunking_station.get_chunking_dispatch_channel();
+            //            let chunk_dispatch_channel = chunking_station.get_chunking_dispatch_channel();
+            if let Some((path, method, headers, content_length)) = guard
+                .routes_states()
+                .get_path_and_method_and_content_length(stream_id, conn_id)
+            {
+                if let Err(e) = response_injection_sender.send(
+                    path.as_str(),
+                    method,
+                    &headers[..],
+                    stream_id,
+                    scid,
+                    conn_id,
+                    false,
+                    content_length,
+                ) {
+                    error!("failed response injection on handle finished stream send ");
+                }
+            }
 
+            /*
             response_preparation(
                 guard,
                 waker,
@@ -297,7 +317,7 @@ mod request_hndlr {
                 stream_id,
                 EventType::OnFinished,
                 HeaderPriority::SendAdditionnalHeader,
-            );
+            );*/
         }
         pub fn parse_headers(
             &self,
@@ -493,6 +513,13 @@ mod request_hndlr {
         }
         pub fn mutex_guard(&self) -> MutexGuard<RouteManagerInner<S>> {
             self.inner.lock().unwrap()
+        }
+        pub fn is_request_set_in_table(&self, stream_id: u64, conn_id: &str) -> bool {
+            let guard = &self.inner.lock().unwrap();
+
+            guard
+                .routes_states()
+                .is_entry_partial_reponse_set(stream_id, conn_id)
         }
     }
 
