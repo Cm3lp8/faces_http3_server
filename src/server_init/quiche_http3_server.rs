@@ -268,7 +268,6 @@ mod quiche_implementation {
                 &chunking_station_clone,
                 &waker_clone_2,
             );
-            warn!("resp prep done");
         });
 
         // Create the configuration for the QUIC connections.
@@ -526,6 +525,7 @@ mod quiche_implementation {
                                 req_recvd += 1;
                                 let trace_id = client.conn.trace_id().to_string();
 
+                                /*
                                 if let Err(_) =
                                     route_manager.routes_handler().send_reception_status_first(
                                         stream_id,
@@ -535,7 +535,7 @@ mod quiche_implementation {
                                     )
                                 {
                                     error!("Failed to send progress response status")
-                                }
+                                }*/
                             }
                             Ok((stream_id, quiche::h3::Event::Data)) => {
                                 while let Ok(read) =
@@ -711,6 +711,7 @@ mod quiche_implementation {
                                     let headers = content.get_headers().to_vec();
                                     let is_end = content.is_end();
                                     let attached_body_len = content.attached_body_len();
+                                    info!("new header");
 
                                     match content.priority_mode() {
                                         HeaderPriority::SendHeader => {
@@ -1466,11 +1467,18 @@ mod quiche_implementation {
         }
 
         if more_frames {
+            if let Err(_) = route_handler.send_reception_status_first(
+                stream_id,
+                &scid,
+                conn_id.as_str(),
+                &chunking_station.get_chunking_dispatch_channel(),
+            ) {
+                error!("Failed to send progress response status")
+            }
             return;
         }
 
         ////// response prep
-        warn!("route prpation to send data");
         response_preparation_with_route_handler(
             route_handler,
             &waker,
@@ -1484,5 +1492,14 @@ mod quiche_implementation {
             EventType::OnFinished,
             HeaderPriority::SendHeader,
         );
+
+        if let Err(_) = route_handler.send_reception_status_first(
+            stream_id,
+            &scid,
+            conn_id.as_str(),
+            &chunking_station.get_chunking_dispatch_channel(),
+        ) {
+            error!("Failed to send progress response status")
+        }
     }
 }

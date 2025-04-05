@@ -300,12 +300,15 @@ mod request_hndlr {
             last_time: &Arc<Mutex<Duration>>,
             response_injection_sender: &ResponsePoolProcessingSender,
         ) {
+            info!("finushed");
             let guard = &*self.inner.lock().unwrap();
             //            let chunk_dispatch_channel = chunking_station.get_chunking_dispatch_channel();
+
             if let Some((path, method, headers, content_length)) = guard
                 .routes_states()
                 .get_path_and_method_and_content_length(stream_id, conn_id)
             {
+                info!("inject ");
                 if let Err(e) = response_injection_sender.send(
                     path.as_str(),
                     method,
@@ -315,9 +318,12 @@ mod request_hndlr {
                     conn_id,
                     false,
                     content_length,
+                    waker,
                 ) {
                     error!("failed response injection on handle finished stream send ");
                 }
+            } else {
+                info!("nothing found");
             }
 
             /*
@@ -525,7 +531,8 @@ mod request_hndlr {
             });
         }
         pub fn mutex_guard(&self) -> MutexGuard<RouteManagerInner<S>> {
-            self.inner.lock().unwrap()
+            let a = self.inner.lock().unwrap();
+            a
         }
         pub fn is_request_set_in_table(&self, stream_id: u64, conn_id: &str) -> bool {
             let guard = &self.inner.lock().unwrap();
@@ -866,6 +873,9 @@ mod route_handle_implementation {
                                 ) {
                                     error!("Failed to send header_req")
                                 }
+                                if let Err(e) = waker.wake() {
+                                    error!("Failed to wake poll [{:?}]", e);
+                                };
                             }
                             None => {
                                 let (_recv_send_confirmation, header_req) = HeaderRequest::new(
@@ -884,6 +894,9 @@ mod route_handle_implementation {
                                 ) {
                                     error!("Failed to send header_req")
                                 }
+                                if let Err(e) = waker.wake() {
+                                    error!("Failed to wake poll [{:?}]", e);
+                                };
                             }
                         }
                     }
@@ -943,6 +956,9 @@ mod route_handle_implementation {
                                 {
                                     error!("Failed to send header_req")
                                 }
+                                if let Err(e) = waker.wake() {
+                                    error!("Failed to wake poll [{:?}]", e);
+                                };
                             }
                         }
                     }

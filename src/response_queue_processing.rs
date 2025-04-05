@@ -26,6 +26,7 @@ mod response_pool_processing {
         conn_id: String,
         has_more_frames: bool,
         content_length: Option<usize>,
+        mio_waker: Arc<mio::Waker>,
     }
     impl ResponseInjection {
         pub fn new(
@@ -37,6 +38,7 @@ mod response_pool_processing {
             conn_id: &str,
             has_more_frames: bool,
             content_length: Option<usize>,
+            mio_waker: Arc<mio::Waker>,
         ) -> Self {
             Self {
                 path: path.to_string(),
@@ -47,7 +49,11 @@ mod response_pool_processing {
                 conn_id: conn_id.to_string(),
                 has_more_frames,
                 content_length,
+                mio_waker,
             }
+        }
+        pub fn wake(&self) {
+            let _ = self.mio_waker.wake();
         }
         pub fn content_length(&self) -> Option<usize> {
             self.content_length
@@ -137,7 +143,9 @@ mod response_pool_processing {
             conn_id: &str,
             has_more_frames: bool,
             content_length: Option<usize>,
+            mio_waker: &Arc<mio::Waker>,
         ) -> Result<(), crossbeam_channel::SendError<ResponseInjection>> {
+            let mio_waker = mio_waker.clone();
             let response_injection = ResponseInjection::new(
                 path,
                 method,
@@ -147,6 +155,7 @@ mod response_pool_processing {
                 conn_id,
                 has_more_frames,
                 content_length,
+                mio_waker,
             );
 
             self.sender.send(response_injection)

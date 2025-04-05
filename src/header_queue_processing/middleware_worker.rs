@@ -94,6 +94,9 @@ mod thread_pool {
 }
 
 mod job {
+    use std::sync::Arc;
+
+    use mio::Waker;
     use quiche::h3::{self, Header};
 
     use crate::{H3Method, HeadersColl, MiddleWare, MiddleWareFlow, MiddleWareResult};

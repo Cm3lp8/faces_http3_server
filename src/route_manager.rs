@@ -150,7 +150,6 @@ mod route_mngr {
             file_writer_channel: &crate::file_writer::FileWriterChannel,
         ) {
             let route_handler = self.routes_handler();
-            let guard = &mut *route_handler.mutex_guard();
             let mut data_management: Option<DataManagement> = Some(DataManagement::default());
             let mut event_subscriber: Option<Arc<dyn RouteEventListener + Send + Sync + 'static>> =
                 None;
@@ -252,6 +251,7 @@ mod route_mngr {
             methode: H3Method,
         ) -> Option<(Arc<RouteForm<S>>, Option<Vec<&'b str>>)> {
             //if param in path
+            //
 
             let mut path_s = path.to_string();
             let mut param_trail: Option<Vec<&str>> = None;

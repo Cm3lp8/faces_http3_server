@@ -328,7 +328,6 @@ mod workers {
                         has_more_frames,
                         content_length,
                     } => {
-                        warn!("succes !!");
                         response_processing_pool_injector.send(
                             &path,
                             method,
@@ -338,6 +337,7 @@ mod workers {
                             conn_id.as_str(),
                             has_more_frames,
                             content_length,
+                            &mio_waker,
                         );
                     }
                     _ => {}

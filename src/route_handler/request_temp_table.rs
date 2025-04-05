@@ -139,7 +139,7 @@ mod req_temp_table {
                 });
         }
         pub fn is_entry_partial_reponse_set(&self, stream_id: u64, conn_id: &str) -> bool {
-            if let Some(entry) = self
+            if let Some(_entry) = self
                 .table
                 .lock()
                 .unwrap()

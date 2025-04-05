@@ -29,6 +29,7 @@ fn main() {
             );
 
             Response::ok_200_with_data(event, vec![0; 135])
+            //Response::ok_200(event)
         }
     }
 
@@ -41,7 +42,8 @@ fn main() {
                 event.path()
             );
 
-            Response::ok_200_with_data(event, vec![0; 100_000_000])
+            //            Response::ok_200_with_data(event, vec![0; 10000000])
+            Response::ok_200(event)
         }
     }
     #[derive(Clone)]
@@ -63,7 +65,6 @@ fn main() {
             headers: &HeadersColl<'a>,
             app_stat: &AppStateTest,
         ) -> MiddleWareFlow {
-            info!("Sending unauthorized request ! ");
             MiddleWareFlow::Abort(faces_quic_server::ErrorResponse::Error401(None))
         }
         fn callback(
