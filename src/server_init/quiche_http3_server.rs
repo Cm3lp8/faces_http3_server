@@ -185,8 +185,10 @@ mod quiche_implementation {
         request_response::{
             BodyRequest, ChunkingStation, ChunksDispatchChannel, HeaderPriority, ResponseQueue,
         },
-        response_queue_processing::{self, ResponseInjection, ResponsePoolProcessing},
-        route_events::EventType,
+        response_queue_processing::{
+            self, ResponseInjection, ResponseInjectionBuffer, ResponsePoolProcessing,
+        },
+        route_events::{self, EventType},
         route_handler::{self, response_preparation_with_route_handler},
         server_config::{self, RouteHandler},
         server_init::quiche_http3_server,
@@ -231,6 +233,13 @@ mod quiche_implementation {
         let chunking_station = ChunkingStation::new(waker_clone.clone(), last_time_spend.clone());
         let chunk_dispatch_channel = chunking_station.get_chunking_dispatch_channel();
 
+        let response_injection_buffer = ResponseInjectionBuffer::new(
+            route_manager.routes_handler(),
+            &server_config,
+            file_writer_channel.clone(),
+            chunking_station.clone(),
+            &waker_clone,
+        );
         let response_pool_processing = ResponsePoolProcessing::new(
             route_manager.routes_handler(),
             server_config.clone(),
@@ -238,6 +247,7 @@ mod quiche_implementation {
             waker.clone(),
             file_writer_channel.clone(),
             route_manager.routes_handler().app_state(),
+            &response_injection_buffer,
         );
 
         let response_injection = response_pool_processing.get_response_pool_processing_sender();
@@ -250,24 +260,12 @@ mod quiche_implementation {
             file_writer_channel.clone(),
             route_manager.routes_handler().app_state(),
             response_pool_processing.get_response_pool_processing_sender(),
+            response_injection_buffer.get_signal_sender(),
         );
 
         header_queue_processing.run();
-        let file_writer_channel_clone = file_writer_worker.get_file_writer_sender();
-        let server_config_clone = server_config.clone();
-        let route_handler_clone = route_manager.routes_handler();
-        let chunking_station_clone = chunking_station.clone();
-        let waker_clone_2 = waker.clone();
-        response_pool_processing.run(move |response_injection| {
-            let file_writer = file_writer_channel_clone.clone();
-            response_prep(
-                response_injection,
-                &route_handler_clone,
-                &server_config_clone,
-                file_writer,
-                &chunking_station_clone,
-                &waker_clone_2,
-            );
+        response_pool_processing.run(move |response_injection, response_injection_buffer| {
+            response_injection_buffer.register(response_injection);
         });
 
         // Create the configuration for the QUIC connections.
@@ -505,37 +503,6 @@ mod quiche_implementation {
                                     list.clone(),
                                     more_frames,
                                 );
-                                let scid = client.conn.source_id().as_ref().to_vec();
-                                /*
-                                route_manager.routes_handler().parse_headers(
-                                    &server_config,
-                                    &chunk_dispatch_channel,
-                                    list,
-                                    stream_id,
-                                    client,
-                                    &mut socket,
-                                    response_queue.get_high_priority_sender(),
-                                    response_queue.get_low_priority_sender(),
-                                    more_frames,
-                                    &chunking_station,
-                                    &waker_clone,
-                                    &last_time_spend,
-                                    file_writer_channel.clone(),
-                                );*/
-                                req_recvd += 1;
-                                let trace_id = client.conn.trace_id().to_string();
-
-                                /*
-                                if let Err(_) =
-                                    route_manager.routes_handler().send_reception_status_first(
-                                        stream_id,
-                                        &scid,
-                                        trace_id.as_str(),
-                                        &chunk_dispatch_channel,
-                                    )
-                                {
-                                    error!("Failed to send progress response status")
-                                }*/
                             }
                             Ok((stream_id, quiche::h3::Event::Data)) => {
                                 while let Ok(read) =
@@ -594,12 +561,7 @@ mod quiche_implementation {
                                     trace_id.as_str(),
                                     &scid,
                                     stream_id,
-                                    client,
-                                    response_queue.get_high_priority_sender(),
-                                    response_queue.get_low_priority_sender(),
-                                    &chunking_station,
                                     &waker_clone,
-                                    &last_time_spend,
                                     &response_injection,
                                 );
                                 ()
@@ -711,7 +673,6 @@ mod quiche_implementation {
                                     let headers = content.get_headers().to_vec();
                                     let is_end = content.is_end();
                                     let attached_body_len = content.attached_body_len();
-                                    info!("new header");
 
                                     match content.priority_mode() {
                                         HeaderPriority::SendHeader => {
@@ -1407,99 +1368,8 @@ mod quiche_implementation {
     }
     pub fn response_prep<S: Send + Sync + 'static + Clone>(
         response_injection: ResponseInjection,
-        route_handler: &RouteHandler<S>,
-        server_config: &Arc<ServerConfig>,
-        file_writer_channel: FileWriterChannel,
-        chunking_station: &ChunkingStation,
-        waker: &Arc<Waker>,
+        response_injection_buffer: &ResponseInjectionBuffer<S>,
     ) {
-        let stream_id: u64 = response_injection.stream_id();
-        let conn_id: String = response_injection.conn_id();
-        let scid = response_injection.scid();
-        let mut headers = response_injection.headers();
-        let path = response_injection.path();
-        let method = response_injection.method();
-        let more_frames = response_injection.has_more_frames();
-        let content_length = response_injection.content_length();
-        let mut data_management: Option<DataManagement> = None;
-        let mut event_subscriber: Option<Arc<dyn RouteEventListener + Send + Sync + 'static>> =
-            None;
-
-        if let Some((route_form, _)) = route_handler
-            .mutex_guard()
-            .get_routes_from_path_and_method(path.as_str(), method)
-        {
-            data_management = route_form.data_management_type();
-            event_subscriber = route_form.event_subscriber();
-            //   event_subscriber.as_ref().unwrap().on_header();
-        }
-        if !route_handler.is_request_set_in_table(stream_id, conn_id.as_str()) {
-            route_handler
-                .mutex_guard()
-                .routes_states()
-                .add_partial_request(
-                    server_config,
-                    conn_id.clone(),
-                    stream_id,
-                    method,
-                    data_management,
-                    event_subscriber.clone(),
-                    &headers,
-                    path.as_str(),
-                    content_length,
-                    !more_frames,
-                    file_writer_channel,
-                );
-        } else {
-            route_handler
-                .mutex_guard()
-                .routes_states()
-                .complete_request_entry_in_table(
-                    stream_id,
-                    conn_id.as_str(),
-                    method,
-                    path.as_str(),
-                    headers,
-                    content_length,
-                    data_management,
-                    event_subscriber,
-                );
-        }
-
-        if more_frames {
-            if let Err(_) = route_handler.send_reception_status_first(
-                stream_id,
-                &scid,
-                conn_id.as_str(),
-                &chunking_station.get_chunking_dispatch_channel(),
-            ) {
-                error!("Failed to send progress response status")
-            }
-            return;
-        }
-
-        ////// response prep
-        response_preparation_with_route_handler(
-            route_handler,
-            &waker,
-            method,
-            chunking_station,
-            headers.to_vec(),
-            path.as_str(),
-            conn_id.as_str(),
-            &scid,
-            stream_id,
-            EventType::OnFinished,
-            HeaderPriority::SendHeader,
-        );
-
-        if let Err(_) = route_handler.send_reception_status_first(
-            stream_id,
-            &scid,
-            conn_id.as_str(),
-            &chunking_station.get_chunking_dispatch_channel(),
-        ) {
-            error!("Failed to send progress response status")
-        }
+        response_injection_buffer.register(response_injection);
     }
 }

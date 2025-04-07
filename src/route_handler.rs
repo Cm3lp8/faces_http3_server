@@ -137,55 +137,46 @@ mod request_hndlr {
             chunk_dispatch_channel: &ChunksDispatchChannel,
         ) -> Result<usize, ()> {
             let guard = &*self.inner.lock().unwrap();
+            let sender = chunk_dispatch_channel.insert_new_channel(stream_id, &scid);
             let reception_status = guard
                 .routes_states()
                 .get_reception_status_infos(stream_id, conn_id.to_owned());
 
-            if let Some((reception_status, header_send)) = reception_status {
-                if reception_status.has_something_to_update() {
-                    if let Some(percentage_written) =
-                        reception_status.get_percentage_written_to_string()
-                    {
-                        let headers = vec![
-                            h3::Header::new(b":status", b"100"),
-                            h3::Header::new(b"x-for", stream_id.to_string().as_bytes()),
-                            h3::Header::new(b"x-progress", percentage_written.as_bytes()),
-                        ];
+            let headers = vec![
+                h3::Header::new(b":status", b"100"),
+                h3::Header::new(b"x-for", stream_id.to_string().as_bytes()),
+                h3::Header::new(b"x-progress", b"0"),
+            ];
 
-                        if !header_send {
-                            /*
-                                                        guard
-                                                            .routes_states()
-                                                            .set_intermediate_headers_send(stream_id, conn_id.to_string());
-                            */
+            //if !header_send {
+            /*
+                                        guard
+                                            .routes_states()
+                                            .set_intermediate_headers_send(stream_id, conn_id.to_string());
+            */
 
-                            let sender =
-                                chunk_dispatch_channel.insert_new_channel(stream_id, &scid);
-                            let (_recv_send_confirmation, header_req) = HeaderRequest::new(
-                                stream_id,
-                                &scid,
-                                headers.clone(),
-                                false,
-                                None,
-                                None,
-                                crate::request_response::HeaderPriority::SendHeader100,
-                            );
-                            if let Err(_) = chunk_dispatch_channel.send_to_high_priority_queue(
-                                stream_id,
-                                &scid,
-                                QueuedRequest::new_header(header_req),
-                            ) {
-                                error!("Failed to send header_req")
-                            }
-                            /*
-                                                        return quiche_http3_server::send_header(
-                                                            client, stream_id, headers, false,
-                                                        );
-                            */
-                        }
-                    };
-                }
+            let (_recv_send_confirmation, header_req) = HeaderRequest::new(
+                stream_id,
+                &scid,
+                headers.clone(),
+                false,
+                None,
+                None,
+                crate::request_response::HeaderPriority::SendHeader100,
+            );
+            if let Err(_) = chunk_dispatch_channel.send_to_high_priority_queue(
+                stream_id,
+                &scid,
+                QueuedRequest::new_header(header_req),
+            ) {
+                error!("Failed to send header_req")
             }
+            /*
+                                        return quiche_http3_server::send_header(
+                                            client, stream_id, headers, false,
+                                        );
+            */
+            //}
             Ok(0)
         }
         ///
@@ -292,51 +283,15 @@ mod request_hndlr {
             conn_id: &str,
             scid: &[u8],
             stream_id: u64,
-            client: &mut quiche_http3_server::QClient,
-            response_sender_high: crossbeam_channel::Sender<QueuedRequest>,
-            response_sender_low: crossbeam_channel::Sender<QueuedRequest>,
-            chunking_station: &ChunkingStation,
             waker: &Arc<Waker>,
-            last_time: &Arc<Mutex<Duration>>,
             response_injection_sender: &ResponsePoolProcessingSender,
         ) {
-            info!("finushed");
-            let guard = &*self.inner.lock().unwrap();
-            //            let chunk_dispatch_channel = chunking_station.get_chunking_dispatch_channel();
-
-            if let Some((path, method, headers, content_length)) = guard
-                .routes_states()
-                .get_path_and_method_and_content_length(stream_id, conn_id)
-            {
-                info!("inject ");
-                if let Err(e) = response_injection_sender.send(
-                    path.as_str(),
-                    method,
-                    &headers[..],
-                    stream_id,
-                    scid,
-                    conn_id,
-                    false,
-                    content_length,
-                    waker,
-                ) {
-                    error!("failed response injection on handle finished stream send ");
-                }
-            } else {
-                info!("nothing found");
-            }
-
-            /*
-            response_preparation(
-                guard,
+            if let Err(e) = response_injection_sender.send(
+                stream_id, scid, conn_id, false, // content_length,
                 waker,
-                chunking_station,
-                conn_id,
-                &scid,
-                stream_id,
-                EventType::OnFinished,
-                HeaderPriority::SendAdditionnalHeader,
-            );*/
+            ) {
+                error!("failed response injection on handle finished stream send ");
+            }
         }
         pub fn parse_headers(
             &self,
@@ -530,9 +485,87 @@ mod request_hndlr {
                 }
             });
         }
+        pub fn get_additionnal_attributes(
+            &self,
+            path: &str,
+            method: H3Method,
+        ) -> (
+            Option<DataManagement>,
+            Option<Arc<dyn RouteEventListener + Send + Sync + 'static>>,
+        ) {
+            let guard = &*self.inner.lock().unwrap();
+
+            if let Some((route_form, _)) = guard.get_routes_from_path_and_method(path, method) {
+                return (
+                    route_form.data_management_type(),
+                    route_form.event_subscriber(),
+                );
+            }
+            (None, None)
+        }
         pub fn mutex_guard(&self) -> MutexGuard<RouteManagerInner<S>> {
             let a = self.inner.lock().unwrap();
             a
+        }
+
+        pub fn complete_request_entry_in_table(
+            &self,
+            stream_id: u64,
+            conn_id: &str,
+            method: H3Method,
+            path: &str,
+            headers: &[h3::Header],
+            content_length: Option<usize>,
+            data_management_type: Option<DataManagement>,
+            event_subscriber: Option<Arc<dyn RouteEventListener + 'static + Send + Sync>>,
+        ) {
+            let guard = &mut *self.inner.lock().unwrap();
+
+            guard.routes_states().complete_request_entry_in_table(
+                stream_id,
+                conn_id,
+                method,
+                path,
+                headers,
+                content_length,
+                data_management_type,
+                event_subscriber,
+            )
+        }
+        pub fn create_new_request_in_table(
+            &self,
+            path: &str,
+            stream_id: u64,
+            conn_id: &str,
+            method: H3Method,
+            headers: &[h3::Header],
+            content_length: Option<usize>,
+            more_frames: bool,
+            server_config: &Arc<ServerConfig>,
+            file_writer_channel: &FileWriterChannel,
+        ) {
+            let guard = &mut *self.inner.lock().unwrap();
+            let mut data_management: Option<DataManagement> = None;
+            let mut event_subscriber: Option<Arc<dyn RouteEventListener + Sync + Send>> = None;
+            if let Some((route_form, _)) = guard.get_routes_from_path_and_method(path, method) {
+                data_management = route_form.data_management_type();
+                event_subscriber = route_form.event_subscriber();
+                //   event_subscriber.as_ref().unwrap().on_header();
+            }
+
+            guard.routes_states().add_partial_request(
+                server_config,
+                conn_id.to_string(),
+                stream_id,
+                method,
+                data_management,
+                event_subscriber.clone(),
+                &headers,
+                path,
+                content_length,
+                !more_frames,
+                file_writer_channel.clone(),
+            );
         }
         pub fn is_request_set_in_table(&self, stream_id: u64, conn_id: &str) -> bool {
             let guard = &self.inner.lock().unwrap();
@@ -677,7 +710,6 @@ mod route_handle_implementation {
         }
         if let Some((mut headers, body)) = guard.get_error_response(ErrorType::Error404) {
             chunk_dispatch_channel.insert_new_channel(stream_id, &scid);
-            info!("found errror response is nose[{}] ", body.is_some());
             let header_sender = chunk_dispatch_channel.get_high_priority_sender(stream_id, &scid);
             let body_sender = chunk_dispatch_channel.get_low_priority_sender(stream_id, &scid);
             match body {
@@ -741,7 +773,6 @@ mod route_handle_implementation {
         if let Some((mut headers, body)) = guard.get_error_response(ErrorType::Error404) {
             headers.push(h3::Header::new(b"x-wrong-path", req_path.as_bytes()));
             chunk_dispatch_channel.insert_new_channel(stream_id, &scid);
-            info!("found errror response is nose[{}] ", body.is_some());
             let header_sender = chunk_dispatch_channel.get_high_priority_sender(stream_id, &scid);
             let body_sender = chunk_dispatch_channel.get_low_priority_sender(stream_id, &scid);
             match body {
@@ -794,10 +825,7 @@ mod route_handle_implementation {
     pub fn response_preparation_with_route_handler<S: Send + Sync + 'static + Clone>(
         route_handler: &RouteHandler<S>,
         waker: &mio::Waker,
-        method: H3Method,
         chunking_station: &ChunkingStation,
-        headers: Vec<h3::Header>,
-        path: &str,
         conn_id: &str,
         scid: &[u8],
         stream_id: u64,

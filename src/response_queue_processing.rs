@@ -1,6 +1,8 @@
+pub use response_buffer_table::{ResponseInjectionBuffer, SignalNewRequest};
 pub use response_pool_processing::{
     ResponseInjection, ResponsePoolProcessing, ResponsePoolProcessingSender,
 };
+mod response_buffer_table;
 mod response_worker;
 mod response_pool_processing {
     use std::sync::Arc;
@@ -15,52 +17,44 @@ mod response_pool_processing {
         H3Method, RouteHandler, ServerConfig,
     };
 
-    use super::response_worker::ResponseThreadPool;
+    use super::{response_worker::ResponseThreadPool, ResponseInjectionBuffer};
 
     pub struct ResponseInjection {
-        path: String,
-        method: H3Method,
-        headers: Vec<h3::Header>,
         stream_id: u64,
         scid: Vec<u8>,
         conn_id: String,
         has_more_frames: bool,
-        content_length: Option<usize>,
         mio_waker: Arc<mio::Waker>,
     }
     impl ResponseInjection {
         pub fn new(
-            path: &str,
-            method: H3Method,
-            headers: &[h3::Header],
             stream_id: u64,
             scid: &[u8],
             conn_id: &str,
             has_more_frames: bool,
-            content_length: Option<usize>,
             mio_waker: Arc<mio::Waker>,
         ) -> Self {
             Self {
-                path: path.to_string(),
-                method,
-                headers: headers.to_vec(),
                 stream_id,
                 scid: scid.to_vec(),
                 conn_id: conn_id.to_string(),
                 has_more_frames,
-                content_length,
                 mio_waker,
             }
+        }
+        pub fn req_id(&self) -> (u64, String) {
+            (self.stream_id, self.conn_id.to_string())
         }
         pub fn wake(&self) {
             let _ = self.mio_waker.wake();
         }
+        /*
         pub fn content_length(&self) -> Option<usize> {
             self.content_length
         }
         pub fn headers(&self) -> &[h3::Header] {
             &self.headers
-        }
+        }*/
         pub fn stream_id(&self) -> u64 {
             self.stream_id
         }
@@ -70,12 +64,13 @@ mod response_pool_processing {
         pub fn scid(&self) -> Vec<u8> {
             self.scid.to_vec()
         }
+        /*
         pub fn path(&self) -> String {
             self.path.to_string()
         }
         pub fn method(&self) -> H3Method {
             self.method
-        }
+        }*/
         pub fn has_more_frames(&self) -> bool {
             self.has_more_frames
         }
@@ -91,6 +86,7 @@ mod response_pool_processing {
         waker: Arc<Waker>,
         file_writer_channel: FileWriterChannel,
         app_state: S,
+        response_injection_table: ResponseInjectionBuffer<S>,
     }
     impl<S: Send + Sync + Clone + 'static> ResponsePoolProcessing<S> {
         pub fn new(
@@ -100,6 +96,7 @@ mod response_pool_processing {
             waker: Arc<Waker>,
             file_writer_channel: FileWriterChannel,
             app_state: S,
+            response_injection_buffer: &ResponseInjectionBuffer<S>,
         ) -> Self {
             Self {
                 injection_channel: crossbeam_channel::unbounded(),
@@ -109,15 +106,20 @@ mod response_pool_processing {
                 waker,
                 file_writer_channel,
                 app_state,
+                response_injection_table: response_injection_buffer.clone(),
             }
         }
-        pub fn run(&self, worker_cb: impl Fn(ResponseInjection) + Send + Sync + 'static) {
+        pub fn run(
+            &self,
+            worker_cb: impl Fn(ResponseInjection, &ResponseInjectionBuffer<S>) + Send + Sync + 'static,
+        ) {
             let worker_cb = Arc::new(worker_cb);
             let _ = ResponseThreadPool::new(
                 8,
                 self.injection_channel.clone(),
                 self.app_state.clone(),
                 worker_cb,
+                &self.response_injection_table,
             );
         }
 
@@ -135,28 +137,15 @@ mod response_pool_processing {
     impl ResponsePoolProcessingSender {
         pub fn send(
             &self,
-            path: &str,
-            method: H3Method,
-            headers: &[h3::Header],
             stream_id: u64,
             scid: &[u8],
             conn_id: &str,
             has_more_frames: bool,
-            content_length: Option<usize>,
             mio_waker: &Arc<mio::Waker>,
         ) -> Result<(), crossbeam_channel::SendError<ResponseInjection>> {
             let mio_waker = mio_waker.clone();
-            let response_injection = ResponseInjection::new(
-                path,
-                method,
-                headers,
-                stream_id,
-                scid,
-                conn_id,
-                has_more_frames,
-                content_length,
-                mio_waker,
-            );
+            let response_injection =
+                ResponseInjection::new(stream_id, scid, conn_id, has_more_frames, mio_waker);
 
             self.sender.send(response_injection)
         }

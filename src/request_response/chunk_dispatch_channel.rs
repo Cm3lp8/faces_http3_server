@@ -59,6 +59,7 @@ mod dispatcher {
 
             if let Some(entry) = guard.map.get(&(stream_id, scid.to_vec())) {
                 if let Err(e) = entry.1.sender.send(msg) {
+                    warn!("errorStatus 100 seding");
                     Err(e.0)
                 } else {
                     Ok(())

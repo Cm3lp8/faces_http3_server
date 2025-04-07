@@ -3,7 +3,8 @@ mod reponse_process_thread_pool {
     use std::{sync::Arc, thread::JoinHandle};
 
     use crate::response_queue_processing::{
-        response_pool_processing::ResponseInjection, ResponsePoolProcessingSender,
+        response_pool_processing::ResponseInjection, ResponseInjectionBuffer,
+        ResponsePoolProcessingSender,
     };
 
     pub struct ResponseThreadPool {
@@ -22,7 +23,10 @@ mod reponse_process_thread_pool {
                 crossbeam_channel::Receiver<ResponseInjection>,
             ),
             app_state: S,
-            worker_cb: Arc<impl Fn(ResponseInjection) + Send + Sync + 'static>,
+            worker_cb: Arc<
+                impl Fn(ResponseInjection, &ResponseInjectionBuffer<S>) + Send + Sync + 'static,
+            >,
+            response_injection_buffer: &ResponseInjectionBuffer<S>,
         ) -> Self {
             let mut workers = Vec::with_capacity(amount);
 
@@ -32,6 +36,7 @@ mod reponse_process_thread_pool {
                     job_channel.1.clone(),
                     app_state.clone(),
                     worker_cb.clone(),
+                    response_injection_buffer,
                 ));
             }
             Self {
@@ -53,11 +58,15 @@ mod reponse_process_thread_pool {
             id: usize,
             injection_channel: crossbeam_channel::Receiver<ResponseInjection>,
             app_state: S,
-            worker_cb: Arc<impl Fn(ResponseInjection) + Send + Sync + 'static>,
+            worker_cb: Arc<
+                impl Fn(ResponseInjection, &ResponseInjectionBuffer<S>) + Send + Sync + 'static,
+            >,
+            response_injection_buffer: &ResponseInjectionBuffer<S>,
         ) -> Self {
+            let response_injection_buffer_clone = response_injection_buffer.clone();
             let worker = std::thread::spawn(move || {
                 while let Ok(response_injection) = injection_channel.recv() {
-                    worker_cb(response_injection);
+                    worker_cb(response_injection, &response_injection_buffer_clone);
                 }
             });
 

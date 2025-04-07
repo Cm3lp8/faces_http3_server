@@ -1,9 +1,16 @@
 pub use job::MiddleWareJob;
 pub use thread_pool::ThreadPool;
 mod thread_pool {
-    use std::thread::JoinHandle;
+    use std::{sync::Arc, thread::JoinHandle};
 
-    use crate::{MiddleWareFlow, MiddleWareResult};
+    use mio::Waker;
+
+    use crate::{
+        file_writer::{self, FileWriterChannel},
+        request_response::ChunkingStation,
+        response_queue_processing::SignalNewRequest,
+        server_config, MiddleWareFlow, MiddleWareResult, RouteHandler, ServerConfig,
+    };
 
     use super::job::MiddleWareJob;
 
@@ -16,12 +23,31 @@ mod thread_pool {
     }
 
     impl<S: Send + Sync + 'static + Clone> ThreadPool<S> {
-        pub fn new(amount: usize, app_state: S) -> Self {
+        pub fn new(
+            amount: usize,
+            app_state: S,
+            route_handler: &RouteHandler<S>,
+            server_config: &Arc<ServerConfig>,
+            file_writer_channel: &FileWriterChannel,
+            response_signal_sender: &SignalNewRequest,
+            chunking_station: &ChunkingStation,
+            waker: &Arc<Waker>,
+        ) -> Self {
             let mut workers = Vec::with_capacity(amount);
             let job_channel = crossbeam_channel::unbounded::<MiddleWareJob<S>>();
 
             for i in 0..amount {
-                workers.push(Worker::new(i, job_channel.1.clone(), app_state.clone()));
+                workers.push(Worker::new(
+                    i,
+                    job_channel.1.clone(),
+                    app_state.clone(),
+                    route_handler,
+                    server_config,
+                    file_writer_channel,
+                    response_signal_sender,
+                    chunking_station.clone(),
+                    waker,
+                ));
             }
             Self {
                 workers,
@@ -42,7 +68,18 @@ mod thread_pool {
             id: usize,
             receiver: crossbeam_channel::Receiver<MiddleWareJob<S>>,
             app_state: S,
+            route_handler: &RouteHandler<S>,
+            server_config: &Arc<ServerConfig>,
+            file_writer_channel: &crate::file_writer::FileWriterChannel,
+            response_signal_sender: &SignalNewRequest,
+            chunking_station: ChunkingStation,
+            waker: &Arc<mio::Waker>,
         ) -> Self {
+            let server_config = server_config.clone();
+            let file_writer_channel = file_writer_channel.clone();
+            let route_handler = route_handler.clone();
+            let response_signal_sender = response_signal_sender.clone();
+            let waker = waker.clone();
             Self {
                 id,
                 thread: std::thread::spawn(move || {
@@ -59,6 +96,7 @@ mod thread_pool {
 
                         for mdw in &mut middleware_job.middleware_collection() {
                             if let MiddleWareFlow::Abort(error_response) =
+                                //middleware execution
                                 mdw(&mut headers, &app_state)
                             {
                                 if let Err(r) = middleware_job.send_done(MiddleWareResult::Abort {
@@ -71,6 +109,51 @@ mod thread_pool {
 
                                 continue 'injection;
                             }
+                        }
+
+                        //if the thread reached here,create an entry in partial response table
+                        if route_handler.is_request_set_in_table(stream_id, conn_id.as_str()) {
+                            let (data_management_type, event_listener) =
+                                route_handler.get_additionnal_attributes(path.as_str(), method);
+                            route_handler.complete_request_entry_in_table(
+                                stream_id,
+                                conn_id.as_str(),
+                                method,
+                                path.as_str(),
+                                &headers,
+                                content_length,
+                                data_management_type,
+                                event_listener,
+                            );
+                        } else {
+                            route_handler.create_new_request_in_table(
+                                path.as_str(),
+                                stream_id,
+                                conn_id.as_str(),
+                                method,
+                                &headers,
+                                content_length,
+                                has_more_frames,
+                                &server_config,
+                                &file_writer_channel,
+                            );
+                        }
+
+                        if let Err(_) = route_handler.send_reception_status_first(
+                            stream_id,
+                            &scid,
+                            conn_id.as_str(),
+                            &chunking_station.get_chunking_dispatch_channel(),
+                        ) {
+                            error!("Failed to send progress response status")
+                        } else {
+                        }
+
+                        let _ = waker.wake();
+                        if let Err(e) =
+                            response_signal_sender.send_signal((stream_id, conn_id.clone()))
+                        {
+                            error!("Failed sending response signal");
                         }
 
                         // Every middleware have been processed successfully

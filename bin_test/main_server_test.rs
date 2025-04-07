@@ -28,7 +28,7 @@ fn main() {
                 event.path()
             );
 
-            Response::ok_200_with_data(event, vec![0; 135])
+            Response::ok_200_with_data(event, vec![0; 1888835])
             //Response::ok_200(event)
         }
     }
@@ -42,8 +42,8 @@ fn main() {
                 event.path()
             );
 
-            //            Response::ok_200_with_data(event, vec![0; 10000000])
-            Response::ok_200(event)
+            Response::ok_200_with_data(event, vec![0; 10000000])
+            // Response::ok_200(event)
         }
     }
     #[derive(Clone)]

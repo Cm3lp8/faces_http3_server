@@ -12,13 +12,13 @@ mod header_reception {
     use crate::{
         file_writer::FileWriterChannel,
         request_response::{ChunkingStation, ChunksDispatchChannel},
-        response_queue_processing::ResponsePoolProcessingSender,
+        response_queue_processing::{ResponsePoolProcessingSender, SignalNewRequest},
         route_handler, RouteHandler, ServerConfig,
     };
 
     use super::{
         middleware_worker::ThreadPool,
-        workers::{self, run_prime_processor},
+        workers::{self, run_header_processor},
     };
 
     #[derive(Clone)]
@@ -86,8 +86,18 @@ mod header_reception {
             file_writer_channel: FileWriterChannel,
             app_state: S,
             response_processing_pool_injector: ResponsePoolProcessingSender,
+            response_signal_sender: SignalNewRequest,
         ) -> Self {
-            let workers = Arc::new(ThreadPool::new(8, app_state));
+            let workers = Arc::new(ThreadPool::new(
+                8,
+                app_state,
+                &route_handler,
+                &server_config,
+                &file_writer_channel,
+                &response_signal_sender,
+                &chunking_station,
+                &waker,
+            ));
             Self {
                 server_config,
                 route_handler,
@@ -114,7 +124,7 @@ mod header_reception {
             }
         }
         pub fn run(&self) {
-            run_prime_processor(
+            run_header_processor(
                 self.incoming_header_channel.1.clone(),
                 &self.route_handler,
                 &self.workers,
@@ -239,7 +249,7 @@ mod workers {
         HeaderMessage,
     };
 
-    pub fn run_prime_processor<S: Send + Sync + 'static + Clone>(
+    pub fn run_header_processor<S: Send + Sync + 'static + Clone>(
         receiver: crossbeam_channel::Receiver<HeaderMessage>,
         route_handler: &RouteHandler<S>,
         header_workers_pool: &Arc<ThreadPool<S>>,
@@ -256,8 +266,6 @@ mod workers {
         let response_processing_pool_injector = response_processing_pool_sender.clone();
         std::thread::spawn(move || {
             while let Ok(header_msg) = receiver.recv() {
-                warn!("new header in the zone !");
-
                 let (method, path, content_length) =
                     extract_method_path_content_length(header_msg.headers());
                 if method.is_none() || path.is_none() {
@@ -328,17 +336,14 @@ mod workers {
                         has_more_frames,
                         content_length,
                     } => {
+                        /*
                         response_processing_pool_injector.send(
-                            &path,
-                            method,
-                            &mut headers,
                             stream_id,
                             &scid,
                             conn_id.as_str(),
                             has_more_frames,
-                            content_length,
                             &mio_waker,
-                        );
+                        );*/
                     }
                     _ => {}
                 }
