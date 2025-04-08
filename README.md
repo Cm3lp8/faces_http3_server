@@ -77,7 +77,7 @@ The `middleware!` macro takes the type registered on the router for the applicat
 Same as the handlers, multiple middlewares can be registered on the same route. They are processed with the same order as their registration order on the route.
 
 ### Define a route with handler(s) and middleware(s)
-Example of for a request `POST`
+Example of for a `POST` request
 ```rust
 router.route_post(
         "/large_data",
