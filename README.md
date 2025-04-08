@@ -4,10 +4,10 @@
 )
 
 ## Purpose 
-Quicsynh3 is a lightweight framework that positions itself as an abstraction layer on top of the Quiche implementation of the QUIC protocol. Written in Rust, it aims to simplify the development of modern networking applications using QUIC and HTTP/3.
+QuicsyncH3 is a lightweight framework that positions itself as an abstraction layer on top of the Quiche implementation of the QUIC protocol. Written in Rust, it aims to simplify the development of modern networking applications using QUIC and HTTP/3.
 
 ### ⚠️ This crate is currently in very early development stage. 
-- It is nowhere ready for real porduction implementation. Use with care.
+- It is nowhere ready for real production implementation. Use with care.
 
 ## 🏹 Goals
 - Providing a simple abstraction on top of Quiche with a quick setup
