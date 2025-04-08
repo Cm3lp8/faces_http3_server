@@ -575,20 +575,6 @@ mod route_mngr {
                 None
             }
         }
-        pub fn process_middlewares(
-            &self,
-            headers: &HeadersColl,
-            app_state: &S,
-        ) -> Result<(), ErrorResponse> {
-            for mdw in &self.middlewares {
-                if let crate::MiddleWareFlow::Abort(error_type) = mdw.on_header(headers, app_state)
-                {
-                    return Err(error_type);
-                }
-            }
-
-            Ok(())
-        }
         pub fn build_response(
             &self,
             stream_id: u64,
@@ -693,9 +679,9 @@ mod route_mngr {
         ///RouteHandle trait implementation is required, as well as an Arc encapsulation.
         pub fn handler(
             &mut self,
-            handler: Arc<dyn RouteHandle + Send + Sync + 'static>,
+            handler: &Arc<dyn RouteHandle + Send + Sync + 'static>,
         ) -> &mut Self {
-            self.handler_subscriber.push(handler);
+            self.handler_subscriber.push(handler.clone());
             self
         }
 
@@ -733,9 +719,9 @@ mod route_mngr {
         ///
         pub fn middleware(
             &mut self,
-            middleware: Arc<dyn MiddleWare<S> + Send + Sync + 'static>,
+            middleware: &Arc<dyn MiddleWare<S> + Send + Sync + 'static>,
         ) -> &mut Self {
-            self.middlewares.push(middleware);
+            self.middlewares.push(middleware.clone());
             self
         }
         fn add_global_middlewares(

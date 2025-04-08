@@ -10,9 +10,6 @@ mod middleware_trait {
     };
 
     pub trait MiddleWare<S> {
-        fn on_header<'a>(&self, headers: &HeadersColl<'a>, app_stat: &S) -> MiddleWareFlow {
-            MiddleWareFlow::Continue
-        }
         fn callback(
             &self,
         ) -> Box<dyn FnMut(&mut [h3::Header], &S) -> MiddleWareFlow + Send + Sync + 'static>;

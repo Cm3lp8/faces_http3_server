@@ -1,14 +1,14 @@
 #![allow(warnings)]
 use std::io::{BufRead, BufReader, Cursor};
 use std::ops::Add;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::{thread, usize};
 
 use faces_quic_server::{
-    BodyStorage, ContentType, DataEvent, DataManagement, ErrorType, EventLoop,
-    EventResponseChannel, FinishedEvent, H3Method, HeadersColl, Http3Server, MiddleWare,
-    MiddleWareFlow, MiddleWareResult, RequestResponse, Response, ResponseBuilderSender,
-    RouteConfig, RouteEvent, RouteEventListener, RouteForm, RouteHandle, RouteResponse,
+    middleware, route_handle, BodyStorage, DataManagement, ErrorType, FinishedEvent, HeadersColl,
+    Http3Server, MiddleWare, MiddleWareFlow, MiddleWareResult, RequestResponse, Response,
+    ResponseBuilderSender, RouteConfig, RouteEvent, RouteEventListener, RouteForm, RouteHandle,
+    RouteResponse,
 };
 use faces_quic_server::{RequestType, RouteManager, RouteManagerBuilder, ServerConfig};
 use log::{error, info, warn};
@@ -19,125 +19,71 @@ fn main() {
 
     let app_state = ();
 
-    struct HandlerTest;
-    impl RouteHandle for HandlerTest {
-        fn call(&self, event: FinishedEvent, current_status_response: RouteResponse) -> Response {
+    let handler = route_handle!(
+        |event: FinishedEvent, current_status_response: RouteResponse| {
             info!(
                 "Received Data on file path [{}] on [{:?}] ",
                 event.bytes_written(),
                 event.path()
             );
-
             Response::ok_200_with_data(event, vec![0; 1888835])
-            //Response::ok_200(event)
         }
+    );
+    let other_handler = route_handle!(|event: FinishedEvent, current_status_response| {
+        info!(
+            "Received Data on file path [{}] on [{:?}] ",
+            event.bytes_written(),
+            event.path()
+        );
+        Response::ok_200_with_data(event, vec![9; 23])
+    });
+
+    struct HandlerTestMini {
+        context: Arc<Mutex<usize>>,
     }
 
-    struct HandlerTestMini;
-    impl RouteHandle for HandlerTestMini {
-        fn call(&self, event: FinishedEvent, current_status_response: RouteResponse) -> Response {
-            info!(
-                "Received Data on file path [{}] on [{:?}] ",
-                event.bytes_written(),
-                event.path()
-            );
+    let handler_mini = HandlerTestMini {
+        context: Arc::new(Mutex::new(0)),
+    };
 
-            Response::ok_200_with_data(event, vec![0; 10000000])
-            // Response::ok_200(event)
+    route_handle!(
+        HandlerTestMini,
+        |context, event, current_status_response| {
+            Response::ok_200_with_data(event, vec![9; 23])
         }
-    }
+    );
     #[derive(Clone)]
     pub struct AppStateTest;
     let mut router = RouteManager::new_with_app_state(AppStateTest);
 
-    router.global_middleware(Arc::new(MyGlobalMiddleWare));
+    let global_middleware = middleware!(AppStateTest, |headers, app_state| {
+        MiddleWareFlow::Continue
+    });
+    router.global_middleware(global_middleware);
 
-    struct MyGlobalMiddleWare;
-    impl MyGlobalMiddleWare {
-        fn inform(headers: &HeadersColl) {
-            //  info!("[This is a global_middleware]");
-        }
-    }
-    struct MiddleWareForcedError;
-    impl MiddleWare<AppStateTest> for MiddleWareForcedError {
-        fn on_header<'a>(
-            &self,
-            headers: &HeadersColl<'a>,
-            app_stat: &AppStateTest,
-        ) -> MiddleWareFlow {
-            MiddleWareFlow::Abort(faces_quic_server::ErrorResponse::Error401(None))
-        }
-        fn callback(
-            &self,
-        ) -> Box<
-            dyn FnMut(&mut [h3::Header], &AppStateTest) -> MiddleWareFlow + Send + Sync + 'static,
-        > {
-            let cb = Box::new(|headers: &mut [h3::Header], app_state: &AppStateTest| {
-                MiddleWareFlow::Continue
-            });
-            cb
-        }
-    }
-    struct MyMiddleWareTest;
-    impl MyMiddleWareTest {
-        fn inform(headers: &HeadersColl) {
-            info!(
-                "\n\n### Incoming request: \n\n|||\n{}|||\n",
-                headers.display()
-            )
-        }
-    }
-    impl MiddleWare<AppStateTest> for MyGlobalMiddleWare {
-        fn on_header(&self, headers: &HeadersColl, app_stat: &AppStateTest) -> MiddleWareFlow {
-            Self::inform(headers);
-            MiddleWareFlow::Continue
-        }
-        fn callback(
-            &self,
-        ) -> Box<
-            dyn FnMut(&mut [h3::Header], &AppStateTest) -> MiddleWareFlow + Send + Sync + 'static,
-        > {
-            let cb = Box::new(|headers: &mut [h3::Header], app_state: &AppStateTest| {
-                MiddleWareFlow::Continue
-            });
-            cb
-        }
-    }
-
-    impl MiddleWare<AppStateTest> for MyMiddleWareTest {
-        fn on_header(&self, headers: &HeadersColl, app_stat: &AppStateTest) -> MiddleWareFlow {
-            Self::inform(headers);
-            MiddleWareFlow::Continue
-        }
-        fn callback(
-            &self,
-        ) -> Box<
-            dyn FnMut(&mut [h3::Header], &AppStateTest) -> MiddleWareFlow + Send + Sync + 'static,
-        > {
-            let cb = Box::new(|headers: &mut [h3::Header], app_state: &AppStateTest| {
-                MiddleWareFlow::Continue
-            });
-            cb
-        }
-    }
+    let middle_ware_0 = middleware!(AppStateTest, |headers, app_state| {
+        MiddleWareFlow::Continue
+    });
+    let middle_ware_error = middleware!(AppStateTest, |headers, app_state| {
+        MiddleWareFlow::Abort(faces_quic_server::ErrorResponse::Error401(None))
+    });
 
     router.route_post(
         "/large_data",
         RouteConfig::new(DataManagement::Storage(BodyStorage::File)),
         |route_builder| {
-            route_builder.middleware(Arc::new(MyMiddleWareTest));
-            route_builder.handler(Arc::new(HandlerTest));
+            route_builder.middleware(&middle_ware_0);
+            route_builder.handler(&other_handler);
         },
     );
     router.route_get("/test", RouteConfig::default(), |route_builder| {
-        route_builder.handler(Arc::new(HandlerTest));
-        route_builder.middleware(Arc::new(MyMiddleWareTest));
+        route_builder.handler(&handler);
+        route_builder.middleware(&middle_ware_0);
     });
     router.route_get("/test_mini", RouteConfig::default(), |route_builder| {
-        route_builder.handler(Arc::new(HandlerTestMini));
-        route_builder
-            .middleware(Arc::new(MyMiddleWareTest))
-            .middleware(Arc::new(MiddleWareForcedError));
+        route_builder.handler(&handler);
+        route_builder.middleware(&middle_ware_0);
+        //            .middleware(Arc::new(MiddleWareForcedError))
     });
 
     router.set_error_handler(ErrorType::Error404, |error_buidler| {
