@@ -30,7 +30,7 @@ cd faces_http3_server && cargo run --release
 
 ```
 ### Instantiate the server
-and attach the created router, alongside the configuration pathes.
+Attach the created router, alongside the configuration paths.
 ```rust
 let _server = Http3Server::new(addr)
         .add_key_path("./key.pem")
