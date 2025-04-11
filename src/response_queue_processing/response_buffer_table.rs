@@ -19,7 +19,7 @@ mod response_buff {
         RouteHandler, ServerConfig,
     };
 
-    pub struct ResponseInjectionBuffer<S> {
+    pub struct ResponseInjectionBuffer<S: Send + Sync + 'static> {
         channel: (
             crossbeam_channel::Sender<ReqId>,
             crossbeam_channel::Receiver<ReqId>,

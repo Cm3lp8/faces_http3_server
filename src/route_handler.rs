@@ -50,7 +50,7 @@ mod request_hndlr {
 
     use super::*;
 
-    pub struct RouteHandler<S> {
+    pub struct RouteHandler<S: Sync + Send + 'static> {
         inner: Arc<Mutex<RouteManagerInner<S>>>,
     }
     impl<S: Sync + Send + 'static> Clone for RouteHandler<S> {
@@ -117,7 +117,10 @@ mod request_hndlr {
             event: FinishedEvent,
         ) -> Option<RequestResponse> {
             let guard = self.inner.lock().unwrap();
-            match guard.route_event_dispatcher().dispatch_finished(event) {
+            match guard
+                .route_event_dispatcher()
+                .dispatch_finished(event, &guard.app_state())
+            {
                 RouteResponse::OK200 => Some(RequestResponse::new_ok_200(stream_id, scid, conn_id)),
                 RouteResponse::OK200_FILE(path) => Some(RequestResponse::new_200_with_file(
                     stream_id, scid, conn_id, path,

@@ -1175,7 +1175,7 @@ mod quiche_implementation {
          * */
         Ok(written)
     }
-    fn handle_request<S>(
+    fn handle_request<S: Send + Sync + 'static>(
         client: &mut Client,
         stream_id: u64,
         headers: &[quiche::h3::Header],
@@ -1229,7 +1229,7 @@ mod quiche_implementation {
         }
     }
     /// Builds an HTTP/3 response given a request.
-    fn build_response<S>(
+    fn build_response<S: Send + Sync + 'static>(
         root: &str,
         request: &[quiche::h3::Header],
         _request_handler: &RouteHandler<S>,

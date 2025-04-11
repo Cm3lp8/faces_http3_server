@@ -13,17 +13,12 @@ fn main() {
 
     let app_state = ();
 
-    let handler = route_handle!(
-        |event: FinishedEvent, current_status_response: RouteResponse| {
-            info!(
-                "Received Data on file path [{}] on [{:?}] ",
-                event.bytes_written(),
-                event.path()
-            );
-            Response::ok_200_with_data(event, vec![0; 1888835])
-        }
-    );
-    let other_handler = route_handle!(|event: FinishedEvent, current_status_response| {
+    #[derive(Clone)]
+    pub struct AppStateTest;
+    let mut router = RouteManager::new_with_app_state(AppStateTest);
+
+    let middle_ware_0 = router.middleware(&|headers, app_state| MiddleWareFlow::Continue(headers));
+    let handler_0 = router.handler(&|event, app_state, current_status_response| {
         info!(
             "Received Data on file path [{}] on [{:?}] ",
             event.bytes_written(),
@@ -32,42 +27,29 @@ fn main() {
         Response::ok_200_with_data(event, vec![9; 23])
     });
 
-    struct HandlerTestMini {
-        context: Arc<Mutex<usize>>,
-    }
-
-    let handler_mini = HandlerTestMini {
-        context: Arc::new(Mutex::new(0)),
-    };
-
-    route_handle!(
-        HandlerTestMini,
-        |context, event, current_status_response| {
-            Response::ok_200_with_data(event, vec![9; 23])
-        }
-    );
-    #[derive(Clone)]
-    pub struct AppStateTest;
-    let mut router = RouteManager::new_with_app_state(AppStateTest);
-
-    let middle_ware_0 = router.middleware(&|headers, app_state| MiddleWareFlow::Continue(headers));
-
+    let handler_1 = router.handler(&|event, app_state, current_status_response| {
+        info!(
+            "Received Data on file path [{}] on [{:?}] ",
+            event.bytes_written(),
+            event.path()
+        );
+        Response::ok_200_with_data(event, vec![0; 1888835])
+    });
     router.route_post(
         "/large_data",
         RouteConfig::new(DataManagement::Storage(BodyStorage::File)),
         |route_builder| {
             route_builder.middleware(&middle_ware_0);
-            route_builder.handler(&other_handler);
+            route_builder.handler(&handler_0);
         },
     );
     router.route_get("/test", RouteConfig::default(), |route_builder| {
-        route_builder.handler(&handler);
+        route_builder.handler(&handler_1);
         route_builder.middleware(&middle_ware_0);
     });
     router.route_get("/test_mini", RouteConfig::default(), |route_builder| {
-        route_builder.handler(&handler);
+        route_builder.handler(&handler_0);
         route_builder.middleware(&middle_ware_0);
-        //            .middleware(Arc::new(MiddleWareForcedError))
     });
 
     router.set_error_handler(ErrorType::Error404, |error_buidler| {

@@ -8,7 +8,7 @@ mod handler_trait {
 
     use super::{dispatcher::Response, route_response::RouteResponse};
 
-    pub trait RouteHandle {
+    pub trait RouteHandle<S: Send + Sync + 'static> {
         ///
         ///___________________
         ///# Taking ownership of Event
@@ -24,7 +24,12 @@ mod handler_trait {
         ///It's the last handler in the iterator that returns the response used to send to the peer.
         ///For each handler, the user can re_use the previous status response or create a new one in
         ///function of the context.
-        fn call(&self, event: FinishedEvent, status_response: RouteResponse) -> Response {
+        fn call(
+            &self,
+            event: FinishedEvent,
+            state: &S,
+            status_response: RouteResponse,
+        ) -> Response {
             Response::ok_200(event)
         }
     }
@@ -102,22 +107,21 @@ mod dispatcher {
         }
     }
 
-    pub struct RouteEventDispatcher {
+    pub struct RouteEventDispatcher<S: Send + Sync + 'static> {
         inner: Arc<
-            Mutex<HashMap<(String, H3Method), Vec<Arc<dyn RouteHandle + Sync + Send + 'static>>>>,
+            Mutex<
+                HashMap<(String, H3Method), Vec<Arc<dyn RouteHandle<S> + Sync + Send + 'static>>>,
+            >,
         >,
     }
     type ReqPath = &'static str;
-    impl RouteEventDispatcher {
+    impl<S: Sync + Send + 'static + Clone> RouteEventDispatcher<S> {
         pub fn new() -> Self {
             Self {
                 inner: Arc::new(Mutex::new(HashMap::new())),
             }
         }
-        pub fn set_handles<S: Sync + Send + 'static + Clone>(
-            &mut self,
-            routes_formats: &HashMap<ReqPath, Vec<Arc<RouteForm<S>>>>,
-        ) {
+        pub fn set_handles(&mut self, routes_formats: &HashMap<ReqPath, Vec<Arc<RouteForm<S>>>>) {
             let guard = &mut *self.inner.lock().unwrap();
 
             for (path, route_coll) in routes_formats.iter() {
@@ -132,13 +136,13 @@ mod dispatcher {
         /// The handlers can be chained when registered on a route.
         /// The intermediate status reponse are given to the next handler in the collection
         /// when the dispatcher iterates on it. The last handler's reponse is send to the peer.
-        pub fn dispatch_finished(&self, mut event: FinishedEvent) -> RouteResponse {
+        pub fn dispatch_finished(&self, mut event: FinishedEvent, app_state: &S) -> RouteResponse {
             let path = event.path();
             let method = event.method();
             let mut status_response: RouteResponse = RouteResponse::OK200;
             if let Some(entry) = self.inner.lock().unwrap().get(&(path.to_string(), method)) {
                 for handle in entry {
-                    let mut response = handle.call(event, status_response).response();
+                    let mut response = handle.call(event, app_state, status_response).response();
 
                     event = response.retake_event();
                     status_response = response.take_status_response();
@@ -147,7 +151,7 @@ mod dispatcher {
             status_response
         }
     }
-    impl Clone for RouteEventDispatcher {
+    impl<S: Send + Sync + 'static> Clone for RouteEventDispatcher<S> {
         fn clone(&self) -> Self {
             Self {
                 inner: self.inner.clone(),

@@ -97,8 +97,9 @@ mod server_initiation {
                 server_config: config_clone.clone(),
             };
 
+            let app_state = route_manager_builder.app_state().expect("no app_state set");
             let route_event_dispatcher = route_manager_builder.build_route_event_dispatcher();
-            let event_loop = EventLoop::new(route_event_dispatcher);
+            let event_loop = EventLoop::new(route_event_dispatcher, app_state);
             route_manager_builder.attach_event_loop(event_loop.clone());
 
             let route_manager = route_manager_builder.build();
@@ -107,19 +108,22 @@ mod server_initiation {
                 quiche_http3_server::run(config_clone, route_manager);
             });
 
-            event_loop.run(|event, handler_dispatcher, response_builder| match event {
-                RouteEvent::OnFinished(event) => {
-                    let handler_dispatcher = handler_dispatcher.clone();
-                    std::thread::spawn(move || {
-                        let response: crate::RouteResponse =
-                            handler_dispatcher.dispatch_finished(event);
+            event_loop.run(
+                |event, app_state, handler_dispatcher, response_builder| match event {
+                    RouteEvent::OnFinished(event) => {
+                        let handler_dispatcher = handler_dispatcher.clone();
+                        let app_state = app_state.clone();
+                        std::thread::spawn(move || {
+                            let response: crate::RouteResponse =
+                                handler_dispatcher.dispatch_finished(event, &app_state);
 
-                        response_builder.build_response(response);
-                    });
-                }
-                RouteEvent::OnData(_data) => {}
-                _ => {}
-            });
+                            response_builder.build_response(response);
+                        });
+                    }
+                    RouteEvent::OnData(_data) => {}
+                    _ => {}
+                },
+            );
             thread::park();
             server
         }

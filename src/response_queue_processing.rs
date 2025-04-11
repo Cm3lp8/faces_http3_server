@@ -75,7 +75,7 @@ mod response_pool_processing {
             self.has_more_frames
         }
     }
-    pub struct ResponsePoolProcessing<S> {
+    pub struct ResponsePoolProcessing<S: Sync + Send + 'static> {
         injection_channel: (
             crossbeam_channel::Sender<ResponseInjection>,
             crossbeam_channel::Receiver<ResponseInjection>,

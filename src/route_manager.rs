@@ -62,6 +62,7 @@ mod route_config {
 mod route_mngr {
     use std::{
         any::Any,
+        borrow::BorrowMut,
         collections::HashMap,
         fmt::Debug,
         hash::Hash,
@@ -77,8 +78,8 @@ mod route_mngr {
         request_response::{BodyType, RequestResponse},
         route_events::RouteEvent,
         route_handler::{self, RequestsTable},
-        server_config, ErrorResponse, HeadersColl, MiddleWareFlow, MiddleWareResult, Response,
-        RouteEventListener, ServerConfig,
+        server_config, ErrorResponse, FinishedEvent, HeadersColl, MiddleWareFlow, MiddleWareResult,
+        Response, RouteEventListener, RouteResponse, ServerConfig,
     };
 
     use self::route_config::DataManagement;
@@ -87,7 +88,7 @@ mod route_mngr {
 
     type ReqPath = &'static str;
 
-    pub struct RouteManager<S> {
+    pub struct RouteManager<S: Send + Sync + 'static> {
         inner: Arc<Mutex<RouteManagerInner<S>>>,
     }
     impl<S: Send + Sync + 'static> Clone for RouteManager<S> {
@@ -169,11 +170,11 @@ mod route_mngr {
         }
     }
 
-    pub struct RouteManagerInner<S> {
+    pub struct RouteManagerInner<S: Send + Sync + 'static> {
         routes_formats: HashMap<ReqPath, Vec<Arc<RouteForm<S>>>>,
         error_formats: HashMap<ErrorType, ErrorForm>,
         app_state: S,
-        route_event_dispatcher: RouteEventDispatcher,
+        route_event_dispatcher: RouteEventDispatcher<S>,
         route_states: RequestsTable, //trace_id of the Connection as
                                      //key value is HashMap
                                      //for stream_id u64
@@ -204,7 +205,7 @@ mod route_mngr {
         pub fn routes_states(&self) -> &RequestsTable {
             &self.route_states
         }
-        pub fn route_event_dispatcher(&self) -> &RouteEventDispatcher {
+        pub fn route_event_dispatcher(&self) -> &RouteEventDispatcher<S> {
             &self.route_event_dispatcher
         }
         pub fn get_error_response(
@@ -296,6 +297,40 @@ mod route_mngr {
                 inner: Arc::new(Mutex::new(request_manager_inner)),
             }
         }
+        pub fn app_state(&self) -> Option<S> {
+            self.app_state.clone()
+        }
+        pub fn handler<
+            F: Fn(FinishedEvent, &S, RouteResponse) -> Response + Sync + Send + 'static,
+        >(
+            &self,
+            cb: &'static F,
+        ) -> Arc<dyn RouteHandle<S> + Send + Sync> {
+            #[derive(Clone)]
+            pub struct Anon<S: 'static>(
+                Arc<
+                    &'static (dyn Fn(FinishedEvent, &S, RouteResponse) -> Response
+                                  + Sync
+                                  + Send
+                                  + 'static),
+                >,
+            );
+
+            impl<S: 'static + Send + Sync> RouteHandle<S> for Anon<S> {
+                fn call(
+                    &self,
+                    event: FinishedEvent,
+                    state: &S,
+                    current_status_response: RouteResponse,
+                ) -> Response {
+                    (*self.0)(event, state, current_status_response)
+                }
+            }
+
+            let anon: Arc<dyn RouteHandle<S> + Send + Sync + 'static> =
+                Arc::new(Anon(Arc::new(cb))) as Arc<dyn RouteHandle<S> + Send + Sync + 'static>;
+            anon
+        }
         pub fn middleware<F: Fn(Vec<h3::Header>, &S) -> MiddleWareFlow + Send + Sync + 'static>(
             &self,
             cb: &'static F,
@@ -322,7 +357,7 @@ mod route_mngr {
             let anon: Arc<dyn MiddleWare<S> + Send + Sync + 'static> = Arc::new(Anon(Arc::new(cb)));
             anon
         }
-        pub fn build_route_event_dispatcher(&self) -> RouteEventDispatcher {
+        pub fn build_route_event_dispatcher(&self) -> RouteEventDispatcher<S> {
             let mut handler_dispatcher = RouteEventDispatcher::new();
             handler_dispatcher.set_handles(&self.routes_formats);
             handler_dispatcher
@@ -519,7 +554,7 @@ mod route_mngr {
     pub struct RouteForm<S> {
         method: H3Method,
         event_subscriber: Option<Arc<dyn RouteEventListener + 'static + Send + Sync>>,
-        handler_subscriber: Vec<Arc<dyn RouteHandle + Send + Sync + 'static>>,
+        handler_subscriber: Vec<Arc<dyn RouteHandle<S> + Send + Sync + 'static>>,
         middlewares: Vec<Arc<dyn MiddleWare<S> + Send + Sync + 'static>>,
         path: &'static str,
         route_configuration: Option<RouteConfig>,
@@ -576,7 +611,7 @@ mod route_mngr {
         pub fn method(&self) -> &H3Method {
             &self.method
         }
-        pub fn handles(&self) -> Vec<Arc<dyn RouteHandle + Sync + Send + 'static>> {
+        pub fn handles(&self) -> Vec<Arc<dyn RouteHandle<S> + Sync + Send + 'static>> {
             self.handler_subscriber.clone()
         }
         pub fn set_event_subscriber(
@@ -665,7 +700,7 @@ mod route_mngr {
     pub struct RouteFormBuilder<S> {
         method: Option<H3Method>,
         event_subscriber: Option<Arc<dyn RouteEventListener + 'static + Send + Sync>>,
-        handler_subscriber: Vec<Arc<dyn RouteHandle + Send + Sync + 'static>>,
+        handler_subscriber: Vec<Arc<dyn RouteHandle<S> + Send + Sync + 'static>>,
         middlewares: Vec<Arc<dyn MiddleWare<S> + Sync + Send + 'static>>,
         route_configuration: Option<RouteConfig>,
         path: Option<&'static str>,
@@ -702,7 +737,7 @@ mod route_mngr {
         ///RouteHandle trait implementation is required, as well as an Arc encapsulation.
         pub fn handler(
             &mut self,
-            handler: &Arc<dyn RouteHandle + Send + Sync + 'static>,
+            handler: &Arc<dyn RouteHandle<S> + Send + Sync + 'static>,
         ) -> &mut Self {
             self.handler_subscriber.push(handler.clone());
             self
