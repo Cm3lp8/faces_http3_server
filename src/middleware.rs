@@ -2,6 +2,8 @@ pub use middleware_state::{MiddleWareFlow, MiddleWareResult};
 pub use middleware_trait::MiddleWare;
 pub use middleware_types::HeadersColl;
 mod middleware_trait {
+    use std::sync::Arc;
+
     use quiche::h3;
 
     use super::{
@@ -10,9 +12,7 @@ mod middleware_trait {
     };
 
     pub trait MiddleWare<S> {
-        fn callback(
-            &self,
-        ) -> Box<dyn FnMut(&mut [h3::Header], &S) -> MiddleWareFlow + Send + Sync + 'static>;
+        fn callback(&self) -> Arc<&(dyn Fn(Vec<h3::Header>, &S) -> MiddleWareFlow + Send + Sync)>;
     }
 }
 
@@ -22,7 +22,7 @@ mod middleware_state {
     use crate::{ErrorResponse, H3Method, Response};
 
     pub enum MiddleWareFlow {
-        Continue,
+        Continue(Vec<h3::Header>),
         Abort(ErrorResponse),
     }
 

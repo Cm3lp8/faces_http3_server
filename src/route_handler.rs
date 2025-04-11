@@ -34,8 +34,8 @@ mod request_hndlr {
         route_manager::{DataManagement, RouteManagerInner},
         server_config,
         server_init::quiche_http3_server::{self, Client},
-        BodyStorage, FinishedEvent, HeadersColl, MiddleWareFlow, MiddleWareResult, RequestResponse,
-        RouteEventListener, RouteResponse, ServerConfig,
+        BodyStorage, FinishedEvent, HeadersColl, MiddleWare, MiddleWareFlow, MiddleWareResult,
+        RequestResponse, RouteEventListener, RouteResponse, ServerConfig,
     };
     use mio::{net::UdpSocket, Waker};
     use quiche::{
@@ -76,9 +76,7 @@ mod request_hndlr {
             path: &str,
             method: H3Method,
             content_length: Option<usize>,
-            middleware_collection: Vec<
-                Box<dyn FnMut(&mut [h3::Header], &S) -> MiddleWareFlow + Send + Sync + 'static>,
-            >,
+            middleware_collection: Vec<Arc<dyn MiddleWare<S> + Send + Sync + 'static>>,
             msg: HeaderMessage,
             middleware_result_sender: crossbeam_channel::Sender<MiddleWareResult>,
         ) -> Option<MiddleWareJob<S>> {

@@ -35,7 +35,6 @@ mod routes_macros;
 pub mod prelude {
 
     pub use crate::handler_dispatcher::{ErrorResponse, Response, RouteHandle, RouteResponse};
-    pub use crate::middleware;
     pub use crate::middleware::{HeadersColl, MiddleWare, MiddleWareFlow, MiddleWareResult};
     pub use crate::request_response::{ContentType, RequestResponse, Status};
     pub use crate::route_events::{

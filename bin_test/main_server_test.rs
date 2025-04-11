@@ -50,17 +50,7 @@ fn main() {
     pub struct AppStateTest;
     let mut router = RouteManager::new_with_app_state(AppStateTest);
 
-    let global_middleware = middleware!(AppStateTest, |headers, app_state| {
-        MiddleWareFlow::Continue
-    });
-    router.global_middleware(global_middleware);
-
-    let middle_ware_0 = middleware!(AppStateTest, |headers, app_state| {
-        MiddleWareFlow::Continue
-    });
-    let middle_ware_error = middleware!(AppStateTest, |headers, app_state| {
-        MiddleWareFlow::Abort(faces_quic_server::ErrorResponse::Error401(None))
-    });
+    let middle_ware_0 = router.middleware(&|headers, app_state| MiddleWareFlow::Continue(headers));
 
     router.route_post(
         "/large_data",

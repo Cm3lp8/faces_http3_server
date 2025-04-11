@@ -77,8 +77,8 @@ mod route_mngr {
         request_response::{BodyType, RequestResponse},
         route_events::RouteEvent,
         route_handler::{self, RequestsTable},
-        server_config, ErrorResponse, HeadersColl, MiddleWareFlow, Response, RouteEventListener,
-        ServerConfig,
+        server_config, ErrorResponse, HeadersColl, MiddleWareFlow, MiddleWareResult, Response,
+        RouteEventListener, ServerConfig,
     };
 
     use self::route_config::DataManagement;
@@ -295,6 +295,32 @@ mod route_mngr {
             RouteManager {
                 inner: Arc::new(Mutex::new(request_manager_inner)),
             }
+        }
+        pub fn middleware<F: Fn(Vec<h3::Header>, &S) -> MiddleWareFlow + Send + Sync + 'static>(
+            &self,
+            cb: &'static F,
+        ) -> Arc<dyn MiddleWare<S> + Send + Sync + 'static> {
+            struct Anon<S: 'static>(
+                Arc<
+                    &'static (dyn Fn(Vec<h3::Header>, &S) -> MiddleWareFlow
+                                  + Send
+                                  + Sync
+                                  + 'static),
+                >,
+            );
+
+            impl<S> MiddleWare<S> for Anon<S> {
+                fn callback(
+                    &self,
+                ) -> Arc<&'static (dyn Fn(Vec<h3::Header>, &S) -> MiddleWareFlow + Send + Sync)>
+                {
+                    //Box::new(|h, s| self.0(h, s))
+                    self.0.clone()
+                }
+            }
+
+            let anon: Arc<dyn MiddleWare<S> + Send + Sync + 'static> = Arc::new(Anon(Arc::new(cb)));
+            anon
         }
         pub fn build_route_event_dispatcher(&self) -> RouteEventDispatcher {
             let mut handler_dispatcher = RouteEventDispatcher::new();
@@ -537,18 +563,15 @@ mod route_mngr {
         pub fn path(&self) -> &'static str {
             self.path
         }
-        pub fn to_middleware_coll(
-            &self,
-        ) -> Vec<Box<dyn FnMut(&mut [h3::Header], &S) -> MiddleWareFlow + Send + Sync + 'static>>
-        {
-            let mut vec: Vec<
-                Box<dyn FnMut(&mut [Header], &S) -> MiddleWareFlow + Send + Sync + 'static>,
-            > = vec![];
+        pub fn to_middleware_coll(&self) -> Vec<Arc<dyn MiddleWare<S> + Send + Sync>> {
+            let mut vec: Vec<Arc<&(dyn Fn(Vec<Header>, &S) -> MiddleWareFlow + Send + Sync)>> =
+                vec![];
 
             for mdw in &self.middlewares {
                 vec.push(mdw.callback())
             }
-            vec
+            //vec
+            self.middlewares.clone()
         }
         pub fn method(&self) -> &H3Method {
             &self.method

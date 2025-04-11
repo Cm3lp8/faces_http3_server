@@ -96,9 +96,9 @@ mod thread_pool {
                         let method = middleware_job.method();
                         let mut temps_headers: Vec<h3::Header> = vec![];
 
-                        for mdw in &middleware_job.middleware_collection() {
-                            match (mdw.callback())(temps_headers, &app_state) {
-                                MiddleWareFlow::Continue(headers) => temps_headers = headers,
+                        for mdw in &mut middleware_job.middleware_collection() {
+                            match mdw(temp_header, &app_state) {
+                                MiddleWareFlow::Continue => {}
                                 MiddleWareFlow::Abort(error_response) => {
                                     if let Err(r) =
                                         middleware_job.send_done(MiddleWareResult::Abort {
@@ -197,7 +197,8 @@ mod job {
         content_length: Option<usize>,
         scid: Vec<u8>,
         headers: Vec<h3::Header>,
-        middleware_collection: Vec<Arc<dyn MiddleWare<S> + Send + Sync + 'static>>,
+        middleware_collection:
+            Vec<Box<dyn FnMut(Vec<Header>, &S) -> MiddleWareFlow + Send + Sync + 'static>>,
         task_done_sender: crossbeam_channel::Sender<MiddleWareResult>,
     }
 
@@ -211,7 +212,9 @@ mod job {
             has_more_frames: bool,
             content_length: Option<usize>,
             headers: Vec<h3::Header>,
-            middleware_collection: Vec<Arc<dyn MiddleWare<S> + Send + Sync + 'static>>,
+            middleware_collection: Vec<
+                Box<dyn FnMut(Vec<Header>, &S) -> MiddleWareFlow + Send + Sync + 'static>,
+            >,
             task_done_sender: crossbeam_channel::Sender<MiddleWareResult>,
         ) -> Self {
             Self {
@@ -259,7 +262,8 @@ mod job {
         }
         pub fn middleware_collection(
             &mut self,
-        ) -> Vec<Arc<dyn MiddleWare<S> + Send + Sync + 'static>> {
+        ) -> Vec<Box<dyn FnMut(Vec<Header>, &S) -> MiddleWareFlow + Send + Sync + 'static>>
+        {
             std::mem::replace(&mut self.middleware_collection, vec![])
         }
     }

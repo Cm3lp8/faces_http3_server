@@ -33,29 +33,3 @@ mod router_handle {
         }};
     }
 }
-
-mod middleware {
-
-    #[macro_export]
-    macro_rules! middleware {
-        ($state: ident,$closure: expr) => {{
-            #[derive(Clone, Copy)]
-            struct Anon;
-
-            impl MiddleWare<$state> for Anon {
-                fn callback(
-                    &self,
-                ) -> Box<
-                    dyn FnMut(&mut [h3::Header], &AppStateTest) -> MiddleWareFlow
-                        + Send
-                        + Sync
-                        + 'static,
-                > {
-                    Box::new($closure)
-                }
-            }
-            let mdw: Arc<dyn MiddleWare<$state> + Send + Sync> = Arc::new(Anon {});
-            mdw
-        }};
-    }
-}
