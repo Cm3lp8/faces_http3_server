@@ -42,36 +42,32 @@ let _server = Http3Server::new(addr)
 ```
 ### Create a route handler
 ``` rust
-  let handler = route_handle!(
-        |event: FinishedEvent, current_status_response: RouteResponse| {
-            info!(
-                "Received Data on file path [{}] on [{:?}] ",
-                event.bytes_written(),
-                event.path()
-            );
-            Response::ok_200_with_data(event, vec![0; 1888835])
-        }
-    );
+  let handler_0 = router.handler(&|event, app_state, current_status_response| {
+        info!(
+            "Received Data on file path [{}] on [{:?}] ",
+            event.bytes_written(),
+            event.path()
+        );
+        Response::ok_200_with_data(event, vec![9; 23])
+    });
 
 ```
-The `route_handle!` macro takes a closure with `Event` and `RouteResponse`. It is called when a request is finished. 
+The `handler()` 's closurel takes an `Event` and a `RouteResponse`. It is called when a request is finished. 
 You can have a collection of handlers registered to a same route so the Event and RouteResponse parameters are 
 successivly passed in and owned by all the handlers processed in the iteration.
 
-- `Event : owned by the closure, all the data about the finished request, including the payload data (as bytes or file path) if any. You have to yield it back for the rest of the iteration. It is the last processed Handler's response that is send to peer.
+- `Event` : owned by the closure, all the data about the finished request, including the payload data (as bytes or file path) if any. You have to yield it back for the rest of the iteration. It is the last processed Handler's response that is send to peer.
 - `RouteResponse` : the response returned by the previous handler processed.
 ### Create a middleware
 ``` rust
 
-let middle_ware = middleware!(AppStateTest, |headers, app_state| {
-        MiddleWareFlow::Continue
-        //MiddleWareFlow::Abort(ErrorResponse::Error401(None)) --> this aborts the request and send an error response to the peer.
-    });
+
+   let middle_ware_0 = router.middleware(&|headers, app_state| MiddleWareFlow::Continue(headers));
 
 
 
 ```
-The `middleware!` macro takes the type registered on the router for the application state. The state can be accessed by the the second parameter of the closure.
+The `middleware()` 's closure takes the type registered on the router for the application state. The state can be accessed by the the second parameter of the closure.
 `header` parameter is a `&mut[h3::Header]` that can be mutably borrowed by the middleware.
 
 Same as the handlers, multiple middlewares can be registered on the same route. They are processed with the same order as their registration order on the route.
@@ -83,8 +79,9 @@ router.route_post(
         "/large_data",
         RouteConfig::new(DataManagement::Storage(BodyStorage::File)),
         |route_builder| {
-            route_builder.middleware(&middle_ware);// can be chained
-            route_builder.handler(&handler);// can be chained too.
+            route_builder.middleware(&middle_ware_0);// can be chained:w
+
+            route_builder.handler(&handler_0);// can be chained too.
         },
     );
 
