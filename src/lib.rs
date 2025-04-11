@@ -5,6 +5,7 @@ pub use event_listener::{EventLoop, RouteEventListener};
 use file_writer::FileWriter;
 pub use handler_dispatcher::{ErrorResponse, Response, RouteHandle, RouteResponse};
 pub use middleware::{HeadersColl, MiddleWare, MiddleWareFlow, MiddleWareResult};
+pub use quiche::h3;
 pub use request_response::{ContentType, RequestResponse, Status};
 pub use route_events::{
     DataEvent, EventResponseChannel, EventResponseWaiter, FinishedEvent, ResponseBuilderSender,
@@ -15,6 +16,7 @@ pub use server_config::{
     BodyStorage, H3Method, RequestType, RouteConfig, RouteForm, RouteHandler, RouteManager,
     RouteManagerBuilder, ServerConfig,
 };
+
 use server_init::quiche_http3_server::{BodyReqQueue, QueueTrackableItem};
 mod event_listener;
 mod file_writer;
@@ -48,6 +50,7 @@ pub mod prelude {
         RouteManagerBuilder, ServerConfig,
     };
     pub use crate::server_init::Http3Server;
+    pub use quiche::h3;
 }
 
 #[cfg(test)]

@@ -239,7 +239,7 @@ mod workers {
         request_response::{ChunkingStation, ChunksDispatchChannel, HeaderPriority},
         response_queue_processing::{self, ResponsePoolProcessingSender},
         route_events::EventType,
-        route_handler::{self, send_error},
+        route_handler::{self, send_404, send_error},
         H3Method, MiddleWareResult, RouteHandler,
     };
 
@@ -263,9 +263,13 @@ mod workers {
         let middleware_result_chan = crossbeam_channel::unbounded::<MiddleWareResult>();
         let chunking_station = chunking_station.clone();
         let mio_waker = mio_waker.clone();
+        let chunking_station_cl = chunking_station.clone();
+        let mio_waker_cl = mio_waker.clone();
         let response_processing_pool_injector = response_processing_pool_sender.clone();
         std::thread::spawn(move || {
             while let Ok(header_msg) = receiver.recv() {
+                let stream_id = header_msg.stream_id();
+                let scid = header_msg.scid();
                 let (method, path, content_length) =
                     extract_method_path_content_length(header_msg.headers());
                 if method.is_none() || path.is_none() {
@@ -294,9 +298,23 @@ mod workers {
                     ) {
                         header_workers_pool.execute(middleware_job);
                     }
-                } else {
-                    //error
+                    continue;
                 }
+                route_handler.inner_mut(|guard| {
+                    send_404(
+                        "/404",
+                        guard,
+                        &mio_waker_cl,
+                        &chunking_station_cl.get_chunking_dispatch_channel(),
+                        &chunking_station_cl,
+                        &scid,
+                        stream_id,
+                        EventType::OnFinished,
+                        HeaderPriority::SendHeader,
+                    );
+                });
+
+                //error
             }
         });
 

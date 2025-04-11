@@ -684,6 +684,28 @@ mod route_handle_implementation {
                     }
                 }
             }
+        } else {
+            let header_sender = chunk_dispatch_channel.get_high_priority_sender(stream_id, &scid);
+            chunk_dispatch_channel.insert_new_channel(stream_id, &scid);
+            let (_recv_send_confirmation, header_req) = HeaderRequest::new(
+                stream_id,
+                &scid,
+                vec![h3::Header::new(b":status", b"404")],
+                true,
+                None,
+                header_sender,
+                header_priority,
+            );
+            if let Err(_) = chunking_station
+                .get_chunking_dispatch_channel()
+                .send_to_high_priority_queue(
+                    stream_id,
+                    &scid,
+                    QueuedRequest::new_header(header_req),
+                )
+            {
+                error!("Failed to send header_req")
+            }
         }
     }
     pub fn response_preparation_with_route_handler<S: Send + Sync + 'static + Clone>(
