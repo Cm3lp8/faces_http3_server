@@ -394,6 +394,7 @@ mod req_temp_table {
             is_end: bool,
             file_writer_channel: FileWriterChannel,
         ) {
+            info!("data_management_type [{:?}]", data_management_type);
             if let Some(_entry) = self
                 .table
                 .lock()
@@ -405,40 +406,41 @@ mod req_temp_table {
             let mut file_opened: Option<Arc<Mutex<BufWriter<File>>>> = None;
             let storage_path = if let Some(data_management_type) = data_management_type.as_ref() {
                 if let Some(body_storage) = data_management_type.is_body_storage() {
-                    if let BodyStorage::File = body_storage {
-                        let mut path = server_config.get_storage_path();
+                    match body_storage {
+                        BodyStorage::File => {
+                            let mut path = server_config.get_storage_path();
 
-                        let mut extension: Option<String> = None;
+                            let mut extension: Option<String> = None;
 
-                        if let Some(found_content_type) =
-                            headers.iter().find(|hdr| hdr.name() == b"content-type")
-                        {
-                            match found_content_type.value() {
-                                b"text/plain" => {
-                                    extension = Some(String::from(".txt"));
+                            if let Some(found_content_type) =
+                                headers.iter().find(|hdr| hdr.name() == b"content-type")
+                            {
+                                match found_content_type.value() {
+                                    b"text/plain" => {
+                                        extension = Some(String::from(".txt"));
+                                    }
+                                    _ => {}
                                 }
-                                _ => {}
+                            };
+
+                            let uuid = Uuid::new_v4();
+                            let mut uuid = uuid.to_string();
+
+                            if let Some(ext) = extension {
+                                uuid = format!("{}{}", uuid, ext);
                             }
-                        };
 
-                        let uuid = Uuid::new_v4();
-                        let mut uuid = uuid.to_string();
+                            path.push(uuid);
 
-                        if let Some(ext) = extension {
-                            uuid = format!("{}{}", uuid, ext);
+                            if let Ok(file) = File::create(path.clone()) {
+                                file_opened = Some(Arc::new(Mutex::new(BufWriter::new(file))));
+                            } else {
+                                error!("Failed creating [{:?}] file", path);
+                            }
+
+                            Some(path)
                         }
-
-                        path.push(uuid);
-
-                        if let Ok(file) = File::create(path.clone()) {
-                            file_opened = Some(Arc::new(Mutex::new(BufWriter::new(file))));
-                        } else {
-                            error!("Failed creating [{:?}] file", path);
-                        }
-
-                        Some(path)
-                    } else {
-                        None
+                        BodyStorage::InMemory => None,
                     }
                 } else {
                     None

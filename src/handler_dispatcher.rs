@@ -49,10 +49,13 @@ mod error_response {
 mod route_response {
     use std::path::PathBuf;
 
+    #[derive(Debug)]
     pub enum RouteResponse {
         OK200,
         OK200_DATA(Vec<u8>),
         OK200_FILE(PathBuf),
+        ERROR409(Vec<u8>),
+        ERROR503(Vec<u8>),
     }
 }
 mod dispatcher {
@@ -77,6 +80,7 @@ mod dispatcher {
                 response: RouteResponse::OK200,
             }
         }
+
         pub fn ok_200_with_file(
             from_event: FinishedEvent,
             file_path: impl AsRef<Path>,
@@ -90,6 +94,20 @@ mod dispatcher {
             Response {
                 finished_event: Some(from_event),
                 response: RouteResponse::OK200_DATA(data),
+            }
+        }
+        /// Service unvailable
+        pub fn error_503(from_event: FinishedEvent, error_body: Vec<u8>) -> Response {
+            Response {
+                finished_event: Some(from_event),
+                response: RouteResponse::ERROR503(error_body),
+            }
+        }
+        /// Conflict in database
+        pub fn error_409(from_event: FinishedEvent, error_body: Vec<u8>) -> Response {
+            Response {
+                finished_event: Some(from_event),
+                response: RouteResponse::ERROR409(error_body),
             }
         }
         pub fn response(&mut self) -> Response {

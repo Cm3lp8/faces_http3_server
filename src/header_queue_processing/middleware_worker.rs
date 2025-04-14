@@ -119,6 +119,7 @@ mod thread_pool {
                         if route_handler.is_request_set_in_table(stream_id, conn_id.as_str()) {
                             let (data_management_type, event_listener) =
                                 route_handler.get_additionnal_attributes(path.as_str(), method);
+
                             route_handler.complete_request_entry_in_table(
                                 stream_id,
                                 conn_id.as_str(),

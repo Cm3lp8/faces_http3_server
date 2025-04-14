@@ -55,6 +55,8 @@ mod event_response_channel {
                 RouteResponse::OK200 => self.send_ok_200(),
                 RouteResponse::OK200_DATA(data) => self.send_ok_200_with_data(data),
                 RouteResponse::OK200_FILE(file_path) => self.send_ok_200_with_file(file_path),
+                RouteResponse::ERROR409(data) => self.send_error_409(data),
+                RouteResponse::ERROR503(data) => self.send_error_503(data),
             }
         }
         pub fn send_ok_200_with_data(
@@ -80,6 +82,28 @@ mod event_response_channel {
                 RequestResponse::new_200_with_file(stream_id, scid, conn_id, path)
                     .header("x-received-data", self.bytes_written.to_string().as_str()),
             )
+        }
+        pub fn send_error_409(
+            &self,
+            data: Vec<u8>,
+        ) -> Result<(), crossbeam_channel::SendError<RequestResponse>> {
+            let stream_id = self.stream_id;
+            let conn_id = &self.conn_id;
+            let scid = &self.scid;
+            self.sender.send(RequestResponse::new_409_with_data(
+                stream_id, scid, conn_id, data,
+            ))
+        }
+        pub fn send_error_503(
+            &self,
+            data: Vec<u8>,
+        ) -> Result<(), crossbeam_channel::SendError<RequestResponse>> {
+            let stream_id = self.stream_id;
+            let conn_id = &self.conn_id;
+            let scid = &self.scid;
+            self.sender.send(RequestResponse::new_503_with_data(
+                stream_id, scid, conn_id, data,
+            ))
         }
     }
     pub struct EventResponseWaiter {

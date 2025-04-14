@@ -484,13 +484,7 @@ mod quiche_implementation {
                 }
                 if client.http3_conn.is_some() {
                     // Process HTTP/3 events.
-                    let mut req_recvd = 0;
-                    //  while req_recvd < 10 {
-                    let mut h3_read_count = 0;
-                    let max_read = 1000;
                     'h3_read: loop {
-                        h3_read_count += 1;
-
                         let http3_conn = client.http3_conn.as_mut().unwrap();
                         match http3_conn.poll(&mut client.conn) {
                             Ok((stream_id, quiche::h3::Event::Headers { list, more_frames })) => {
@@ -536,7 +530,6 @@ mod quiche_implementation {
                                         );
                                     }
                                     total += read;
-                                    req_recvd += 1;
                                 }
                                 let trace_id = client.conn.trace_id().to_string();
 
@@ -900,7 +893,7 @@ mod quiche_implementation {
             &Priority::new(7, true),
             is_end,
         ) {
-            debug!(
+            info!(
                 "Failed send intermediate 200 response, [{:?}] [{:?}]",
                 headers, e
             );

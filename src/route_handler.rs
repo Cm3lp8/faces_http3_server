@@ -128,6 +128,12 @@ mod request_hndlr {
                 RouteResponse::OK200_DATA(buf) => Some(RequestResponse::new_200_with_data(
                     stream_id, scid, conn_id, buf,
                 )),
+                RouteResponse::ERROR409(buf) => Some(RequestResponse::new_409_with_data(
+                    stream_id, scid, conn_id, buf,
+                )),
+                RouteResponse::ERROR503(buf) => Some(RequestResponse::new_503_with_data(
+                    stream_id, scid, conn_id, buf,
+                )),
             }
         }
         pub fn send_reception_status_first(

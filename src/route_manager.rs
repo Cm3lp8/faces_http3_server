@@ -33,8 +33,8 @@ mod route_config {
 
     #[derive(Clone, Default, Copy, Debug)]
     pub enum BodyStorage {
-        InMemory,
         #[default]
+        InMemory,
         File,
     }
     #[derive(Debug)]
@@ -45,7 +45,7 @@ mod route_config {
     impl Default for RouteConfig {
         fn default() -> Self {
             Self {
-                data_management: DataManagement::Storage(BodyStorage::InMemory),
+                data_management: Default::default(),
             }
         }
     }

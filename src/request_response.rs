@@ -750,6 +750,40 @@ mod request_reponse_builder {
                 .build()
                 .unwrap()
         }
+        /// Conflict in database
+        pub fn new_409_with_data(
+            stream_id: u64,
+            scid: &[u8],
+            conn_id: &str,
+            data: Vec<u8>,
+        ) -> RequestResponse {
+            ResponseBuilder::new()
+                .set_stream_id(stream_id)
+                .set_scid(scid)
+                .set_conn_id(conn_id)
+                .set_status(Status::Err(409))
+                .extends_headers(vec![h3::Header::new(b"content-type", b"application/json")])
+                .set_body(data)
+                .build()
+                .unwrap()
+        }
+        /// Service unavailable
+        pub fn new_503_with_data(
+            stream_id: u64,
+            scid: &[u8],
+            conn_id: &str,
+            data: Vec<u8>,
+        ) -> RequestResponse {
+            ResponseBuilder::new()
+                .set_stream_id(stream_id)
+                .set_scid(scid)
+                .set_conn_id(conn_id)
+                .set_status(Status::Err(503))
+                .extends_headers(vec![h3::Header::new(b"content-type", b"application/json")])
+                .set_body(data)
+                .build()
+                .unwrap()
+        }
         pub fn content_length(&self) -> String {
             if let Some(content_len) = &self.content_length {
                 String::from_utf8_lossy(content_len.value()).to_string()
@@ -886,7 +920,7 @@ mod request_reponse_builder {
             }
 
             let status = h3::Header::new(
-                b"status",
+                b":status",
                 self.status
                     .take()
                     .unwrap()
