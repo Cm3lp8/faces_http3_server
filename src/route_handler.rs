@@ -134,6 +134,9 @@ mod request_hndlr {
                 RouteResponse::ERROR503(buf) => Some(RequestResponse::new_503_with_data(
                     stream_id, scid, conn_id, buf,
                 )),
+                RouteResponse::ERROR401(buf) => Some(RequestResponse::new_401_with_data(
+                    stream_id, scid, conn_id, buf,
+                )),
             }
         }
         pub fn send_reception_status_first(
@@ -417,7 +420,9 @@ mod request_hndlr {
             let guard = &mut *self.inner.lock().unwrap();
             let mut data_management: Option<DataManagement> = None;
             let mut event_subscriber: Option<Arc<dyn RouteEventListener + Sync + Send>> = None;
-            if let Some((route_form, _)) = guard.get_routes_from_path_and_method(path, method) {
+            if let Some((route_form, req_args)) =
+                guard.get_routes_from_path_and_method(path, method)
+            {
                 data_management = route_form.data_management_type();
                 event_subscriber = route_form.event_subscriber();
                 //   event_subscriber.as_ref().unwrap().on_header();
@@ -822,6 +827,68 @@ mod route_handle_implementation {
                     }
                 }
                 H3Method::POST => {
+                    chunk_dispatch_channel.insert_new_channel(stream_id, scid);
+                    let body_sender =
+                        chunk_dispatch_channel.get_low_priority_sender(stream_id, scid);
+                    let header_sender =
+                        chunk_dispatch_channel.get_high_priority_sender(stream_id, scid);
+                    if let Some(resp) = &mut response {
+                        resp.attach_chunk_sender(body_sender.unwrap())
+                    }
+                    if let Ok((headers, body)) =
+                        route_form.build_response(stream_id, scid, conn_id, response)
+                    {
+                        match body {
+                            Some(body) => {
+                                let (_recv_send_confirmation, header_req) = HeaderRequest::new(
+                                    stream_id,
+                                    &scid,
+                                    headers.clone(),
+                                    false,
+                                    Some(body),
+                                    header_sender,
+                                    crate::request_response::HeaderPriority::SendAdditionnalHeader,
+                                );
+
+                                if let Err(_) = chunk_dispatch_channel.send_to_high_priority_queue(
+                                    stream_id,
+                                    &scid,
+                                    QueuedRequest::new_header(header_req),
+                                ) {
+                                    error!("Failed to send header_req")
+                                }
+                                if let Err(e) = waker.wake() {
+                                    error!("Failed to wake poll [{:?}]", e);
+                                };
+                            }
+                            None => {
+                                let (_recv_send_confirmation, header_req) = HeaderRequest::new(
+                                    stream_id,
+                                    &scid,
+                                    headers.clone(),
+                                    true,
+                                    None,
+                                    header_sender,
+                                    crate::request_response::HeaderPriority::SendAdditionnalHeader,
+                                );
+                                if let Err(_) = chunking_station
+                                    .get_chunking_dispatch_channel()
+                                    .send_to_high_priority_queue(
+                                        stream_id,
+                                        &scid,
+                                        QueuedRequest::new_header(header_req),
+                                    )
+                                {
+                                    error!("Failed to send header_req")
+                                }
+                                if let Err(e) = waker.wake() {
+                                    error!("Failed to wake poll [{:?}]", e);
+                                };
+                            }
+                        }
+                    }
+                }
+                H3Method::DELETE => {
                     chunk_dispatch_channel.insert_new_channel(stream_id, scid);
                     let body_sender =
                         chunk_dispatch_channel.get_low_priority_sender(stream_id, scid);

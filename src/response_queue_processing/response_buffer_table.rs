@@ -77,7 +77,8 @@ mod response_buff {
         }
         pub fn register(&self, response_injection: ResponseInjection) {
             if self.is_request_signal_in_queue(response_injection.req_id()) {
-                //Send immediatly
+                //Send immediatly if all the necessary middleware validation and data process is
+                //done
                 let stream_id = response_injection.stream_id();
                 let scid = response_injection.scid();
                 let conn_id = response_injection.conn_id();
@@ -93,6 +94,8 @@ mod response_buff {
                     HeaderPriority::SendAdditionnalHeader,
                 );
             } else {
+                // If req process (middleware or async data processing) is not finished, wait for
+                // it in the table
                 self.table
                     .lock()
                     .unwrap()

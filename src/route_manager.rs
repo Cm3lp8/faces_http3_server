@@ -77,7 +77,7 @@ mod route_mngr {
         middleware::MiddleWare,
         request_response::{BodyType, RequestResponse},
         route_events::RouteEvent,
-        route_handler::{self, RequestsTable},
+        route_handler::{self, ReqArgs, RequestsTable},
         server_config, ErrorResponse, FinishedEvent, HeadersColl, MiddleWareFlow, MiddleWareResult,
         Response, RouteEventListener, RouteResponse, ServerConfig,
     };
@@ -250,24 +250,16 @@ mod route_mngr {
             &self,
             path: &'b str,
             methode: H3Method,
-        ) -> Option<(Arc<RouteForm<S>>, Option<Vec<&'b str>>)> {
+        ) -> Option<(Arc<RouteForm<S>>, Option<ReqArgs>)> {
             //if param in path
             //
 
-            let mut path_s = path.to_string();
-            let mut param_trail: Option<Vec<&str>> = None;
+            let (path, req_args) = ReqArgs::parse_args(&path);
 
-            if let Some((path, id)) = path.split_once("?") {
-                path_s = path.to_string();
-
-                let args_it: Vec<&str> = id.split("&").collect();
-                param_trail = Some(args_it);
-            }
-
-            if let Some(route_coll) = self.get_routes_from_path(path_s.as_str()) {
+            if let Some(route_coll) = self.get_routes_from_path(path.as_str()) {
                 if let Some(found_route) = route_coll.iter().find(|item| item.method() == &methode)
                 {
-                    return Some((found_route.clone(), param_trail));
+                    return Some((found_route.clone(), req_args));
                 }
                 None
             } else {
@@ -411,6 +403,15 @@ mod route_mngr {
             route: impl FnOnce(&mut RouteFormBuilder<S>),
         ) -> &mut Self {
             self.add_route(path, H3Method::GET, route_configuration, route);
+            self
+        }
+        pub fn route_delete(
+            &mut self,
+            path: &'static str,
+            route_configuration: RouteConfig,
+            route: impl FnOnce(&mut RouteFormBuilder<S>),
+        ) -> &mut Self {
+            self.add_route(path, H3Method::DELETE, route_configuration, route);
             self
         }
         fn add_route(

@@ -479,7 +479,7 @@ mod req_temp_table {
         storage_path: Option<PathBuf>,
         file_opened: Option<Arc<Mutex<BufWriter<File>>>>,
         path: Option<String>,
-        args: Option<Vec<ReqArgs>>,
+        args: Option<ReqArgs>,
         body_written_size: usize,
         content_length: Option<usize>,
         precedent_percentage_written: Option<f32>,
@@ -644,29 +644,37 @@ mod req_temp_table {
 }
 
 mod request_argument_parser {
+    use std::collections::HashMap;
+
+    type Parameter = String;
+    type Value = String;
+
     use super::*;
     #[derive(Debug)]
+    /// Table (k=Parameter v=Value )* of the query string if any
+    #[derive(Clone)]
     pub struct ReqArgs {
-        parameter: String,
-        value: String,
+        map: HashMap<Parameter, Value>,
     }
 
     impl ReqArgs {
-        pub fn build_query_string(query_string: &str) -> Vec<ReqArgs> {
-            let mut args: Vec<ReqArgs> = vec![];
+        pub fn new() -> Self {
+            Self {
+                map: HashMap::new(),
+            }
+        }
+        pub fn build_query_string(query_string: &str) -> ReqArgs {
+            let mut req_args = ReqArgs::new();
 
             for s in query_string.split("&") {
                 if let Some((param, value)) = s.split_once("=") {
-                    args.push(ReqArgs {
-                        parameter: param.to_string(),
-                        value: value.to_string(),
-                    });
+                    req_args.map.insert(param.to_string(), value.to_string());
                 }
             }
-            args
+            req_args
         }
         // Parsing the request path string and split it if query-string is present = (path, vec<ReqArgs>).
-        pub fn parse_args(path: &str) -> (String, Option<Vec<ReqArgs>>) {
+        pub fn parse_args(path: &str) -> (String, Option<ReqArgs>) {
             match path.split_once("?") {
                 Some((path_split, query_string)) => {
                     let req_args = ReqArgs::build_query_string(query_string);
@@ -675,11 +683,13 @@ mod request_argument_parser {
                 None => (path.to_string(), None),
             }
         }
-        pub fn parameter(&self) -> &str {
-            self.parameter.as_str()
-        }
-        pub fn value(&self) -> &str {
-            self.value.as_str()
+
+        pub fn get(&self, name: &str) -> Option<&str> {
+            if let Some(args) = self.map.get(name) {
+                Some(args.as_str())
+            } else {
+                None
+            }
         }
     }
 }
@@ -701,16 +711,14 @@ mod test_request_argument_parser {
         let mut role: Option<String> = None;
         let mut age: Option<String> = None;
 
-        for args in args.unwrap() {
-            if args.parameter() == "name" {
-                name = Some(args.value().to_string())
-            }
-            if args.parameter() == "role" {
-                role = Some(args.value().to_string())
-            }
-            if args.parameter() == "age" {
-                age = Some(args.value().to_string())
-            }
+        if let Some(nm) = args.as_ref().unwrap().get("name") {
+            name = Some(nm.to_string());
+        }
+        if let Some(rl) = args.as_ref().unwrap().get("role") {
+            role = Some(rl.to_string());
+        }
+        if let Some(ag) = args.as_ref().unwrap().get("age") {
+            role = Some(ag.to_string());
         }
 
         assert!(name.is_some());

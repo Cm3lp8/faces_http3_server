@@ -56,6 +56,7 @@ mod route_response {
         OK200_FILE(PathBuf),
         ERROR409(Vec<u8>),
         ERROR503(Vec<u8>),
+        ERROR401(Vec<u8>),
     }
 }
 mod dispatcher {
@@ -94,6 +95,13 @@ mod dispatcher {
             Response {
                 finished_event: Some(from_event),
                 response: RouteResponse::OK200_DATA(data),
+            }
+        }
+        /// Unauthorized
+        pub fn error_401(from_event: FinishedEvent, error_body: Vec<u8>) -> Response {
+            Response {
+                finished_event: Some(from_event),
+                response: RouteResponse::ERROR401(error_body),
             }
         }
         /// Service unvailable

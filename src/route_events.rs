@@ -57,6 +57,7 @@ mod event_response_channel {
                 RouteResponse::OK200_FILE(file_path) => self.send_ok_200_with_file(file_path),
                 RouteResponse::ERROR409(data) => self.send_error_409(data),
                 RouteResponse::ERROR503(data) => self.send_error_503(data),
+                RouteResponse::ERROR401(data) => self.send_error_401(data),
             }
         }
         pub fn send_ok_200_with_data(
@@ -82,6 +83,17 @@ mod event_response_channel {
                 RequestResponse::new_200_with_file(stream_id, scid, conn_id, path)
                     .header("x-received-data", self.bytes_written.to_string().as_str()),
             )
+        }
+        pub fn send_error_401(
+            &self,
+            data: Vec<u8>,
+        ) -> Result<(), crossbeam_channel::SendError<RequestResponse>> {
+            let stream_id = self.stream_id;
+            let conn_id = &self.conn_id;
+            let scid = &self.scid;
+            self.sender.send(RequestResponse::new_401_with_data(
+                stream_id, scid, conn_id, data,
+            ))
         }
         pub fn send_error_409(
             &self,
@@ -140,7 +152,7 @@ mod request_event {
         path: String,
         headers: Vec<h3::Header>,
         method: H3Method,
-        args: Option<Vec<ReqArgs>>,
+        args: Option<ReqArgs>,
     }
     impl HeaderEvent {
         pub fn new(
@@ -150,7 +162,7 @@ mod request_event {
             path: &str,
             method: H3Method,
             headers: Vec<h3::Header>,
-            args: Option<Vec<ReqArgs>>,
+            args: Option<ReqArgs>,
         ) -> HeaderEvent {
             HeaderEvent {
                 stream_id,
@@ -168,7 +180,7 @@ mod request_event {
         pub fn method(&self) -> H3Method {
             self.method
         }
-        pub fn args(&self) -> Option<&Vec<ReqArgs>> {
+        pub fn args(&self) -> Option<&ReqArgs> {
             self.args.as_ref()
         }
     }
@@ -181,7 +193,7 @@ mod request_event {
         path: String,
         headers: Vec<h3::Header>,
         method: H3Method,
-        args: Option<Vec<ReqArgs>>,
+        args: Option<ReqArgs>,
         file_path: Option<PathBuf>,
         bytes_written: usize,
         body: Vec<u8>,
@@ -196,7 +208,7 @@ mod request_event {
             path: &str,
             method: H3Method,
             headers: Vec<h3::Header>,
-            args: Option<Vec<ReqArgs>>,
+            args: Option<ReqArgs>,
             file_path: Option<PathBuf>,
             bytes_written: usize,
             body: Option<Vec<u8>>,
@@ -240,8 +252,11 @@ mod request_event {
         pub fn extend_body_data(&mut self, data: &[u8]) {
             self.body.extend_from_slice(data);
         }
-        pub fn args(&self) -> Option<&Vec<ReqArgs>> {
+        pub fn args(&self) -> Option<&ReqArgs> {
             self.args.as_ref()
+        }
+        pub fn to_args(&self) -> Option<ReqArgs> {
+            self.args.clone()
         }
         pub fn take_body(&mut self) -> Vec<u8> {
             std::mem::replace(&mut self.body, Vec::with_capacity(1))
