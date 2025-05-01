@@ -94,7 +94,7 @@ mod thread_pool {
 
                         let path = middleware_job.path();
                         let method = middleware_job.method();
-                        let mut temps_headers: Vec<h3::Header> = vec![];
+                        let mut temps_headers: Vec<h3::Header> = headers.clone();
 
                         for mdw in &middleware_job.middleware_collection() {
                             match (mdw.callback())(temps_headers, &app_state) {
@@ -114,6 +114,8 @@ mod thread_pool {
                                 } //middleware execution
                             }
                         }
+
+                        headers = temps_headers;
 
                         //if the thread reached here,create an entry in partial response table
                         if route_handler.is_request_set_in_table(stream_id, conn_id.as_str()) {

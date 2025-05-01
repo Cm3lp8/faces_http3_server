@@ -53,6 +53,7 @@ mod route_response {
     pub enum RouteResponse {
         OK200,
         OK200_DATA(Vec<u8>),
+        OK200_JSON(Vec<u8>),
         OK200_FILE(PathBuf),
         ERROR409(Vec<u8>),
         ERROR503(Vec<u8>),
@@ -95,6 +96,12 @@ mod dispatcher {
             Response {
                 finished_event: Some(from_event),
                 response: RouteResponse::OK200_DATA(data),
+            }
+        }
+        pub fn ok_200_with_json_data(from_event: FinishedEvent, data: Vec<u8>) -> Response {
+            Response {
+                finished_event: Some(from_event),
+                response: RouteResponse::OK200_JSON(data),
             }
         }
         /// Unauthorized

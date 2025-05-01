@@ -43,7 +43,7 @@ mod server_config_builder {
     }
 
     pub struct ServerConfigBuilder {
-        server_socket_address: Option<&'static str>,
+        server_socket_address: Option<String>,
         file_storage_path: Option<PathBuf>,
         cert: Option<PathBuf>,
         key: Option<PathBuf>,
@@ -59,8 +59,8 @@ mod server_config_builder {
         }
         ///Set the server the server ip + port. Example "127.0.0.1:300gg0"
         ///
-        pub fn set_address(&mut self, address: &'static str) -> &mut Self {
-            self.server_socket_address = Some(address);
+        pub fn set_address(&mut self, address: &str) -> &mut Self {
+            self.server_socket_address = Some(address.to_owned());
             self
         }
         ///

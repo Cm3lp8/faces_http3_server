@@ -750,6 +750,25 @@ mod request_reponse_builder {
                 .build()
                 .unwrap()
         }
+        ///
+        /// Respond to client with in  json memory data
+        ///
+        pub fn new_200_with_json(
+            stream_id: u64,
+            scid: &[u8],
+            conn_id: &str,
+            data: Vec<u8>,
+        ) -> RequestResponse {
+            ResponseBuilder::new()
+                .set_stream_id(stream_id)
+                .set_scid(scid)
+                .set_conn_id(conn_id)
+                .set_status(Status::Ok(200))
+                .extends_headers(vec![h3::Header::new(b"content-type", b"application/json")])
+                .set_body(data)
+                .build()
+                .unwrap()
+        }
         /// Conflict in database
         pub fn new_409_with_data(
             stream_id: u64,

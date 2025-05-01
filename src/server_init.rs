@@ -20,7 +20,7 @@ mod server_initiation {
     }
 
     impl Http3Server {
-        pub fn new(socket: &'static str) -> Http3ServerBuilder {
+        pub fn new(socket: &str) -> Http3ServerBuilder {
             let mut server_config_builder = ServerConfig::new();
             server_config_builder.set_address(socket);
             Http3ServerBuilder {
@@ -50,43 +50,6 @@ mod server_initiation {
             }
             self
         }
-        /*
-                pub fn route_post(
-                    &mut self,
-                    path: &'static str,
-                    route_configuration: RouteConfig,
-                    route: impl FnOnce(&mut RouteFormBuilder),
-                ) -> &mut Self {
-                    self.add_route(path, H3Method::POST, route_configuration, route);
-                    self
-                }
-                pub fn route_get(
-                    &mut self,
-                    path: &'static str,
-                    route_configuration: RouteConfig,
-                    route: impl FnOnce(&mut RouteFormBuilder),
-                ) -> &mut Self {
-                    self.add_route(path, H3Method::POST, route_configuration, route);
-                    self
-                }
-        */
-        /*
-                pub fn add_route(
-                    &mut self,
-                    path: &'static str,
-                    method: H3Method,
-                    route_configuration: RouteConfig,
-                    route: impl FnOnce(&mut RouteFormBuilder),
-                ) -> &mut Self {
-                    let mut route_form = RouteForm::new(path, method, route_configuration);
-
-                    route(&mut route_form);
-
-                    let route = route_form.build();
-                    self.route_manager.add_new_route(route);
-                    self
-                }
-        */
         pub fn run_blocking<S: 'static + Send + Sync + Clone>(
             &mut self,
             mut route_manager_builder: RouteManagerBuilder<S>,

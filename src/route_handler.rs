@@ -128,6 +128,9 @@ mod request_hndlr {
                 RouteResponse::OK200_DATA(buf) => Some(RequestResponse::new_200_with_data(
                     stream_id, scid, conn_id, buf,
                 )),
+                RouteResponse::OK200_JSON(buf) => Some(RequestResponse::new_200_with_json(
+                    stream_id, scid, conn_id, buf,
+                )),
                 RouteResponse::ERROR409(buf) => Some(RequestResponse::new_409_with_data(
                     stream_id, scid, conn_id, buf,
                 )),

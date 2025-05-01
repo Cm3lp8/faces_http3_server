@@ -55,6 +55,7 @@ mod event_response_channel {
                 RouteResponse::OK200 => self.send_ok_200(),
                 RouteResponse::OK200_DATA(data) => self.send_ok_200_with_data(data),
                 RouteResponse::OK200_FILE(file_path) => self.send_ok_200_with_file(file_path),
+                RouteResponse::OK200_JSON(data) => self.send_ok_200_with_json_data(data),
                 RouteResponse::ERROR409(data) => self.send_error_409(data),
                 RouteResponse::ERROR503(data) => self.send_error_503(data),
                 RouteResponse::ERROR401(data) => self.send_error_401(data),
@@ -69,6 +70,18 @@ mod event_response_channel {
             let scid = &self.scid;
             self.sender.send(
                 RequestResponse::new_200_with_data(stream_id, scid, conn_id, data)
+                    .header("x-received-data", self.bytes_written.to_string().as_str()),
+            )
+        }
+        pub fn send_ok_200_with_json_data(
+            &self,
+            data: Vec<u8>,
+        ) -> Result<(), crossbeam_channel::SendError<RequestResponse>> {
+            let stream_id = self.stream_id;
+            let conn_id = &self.conn_id;
+            let scid = &self.scid;
+            self.sender.send(
+                RequestResponse::new_200_with_json(stream_id, scid, conn_id, data)
                     .header("x-received-data", self.bytes_written.to_string().as_str()),
             )
         }
