@@ -192,15 +192,16 @@ mod quiche_implementation {
         route_handler::{self, response_preparation_with_route_handler},
         server_config::{self, RouteHandler},
         server_init::quiche_http3_server,
+        stream_sessions::UserSessions,
         DataManagement, HeadersColl, ResponseBuilderSender, RouteEventListener, RouteManager,
         ServerConfig,
     };
 
     use super::*;
 
-    pub fn run<S: Send + Sync + 'static + Clone>(
+    pub fn run<S: Send + Sync + 'static + Clone, T: UserSessions<Output = T>>(
         server_config: Arc<ServerConfig>,
-        route_manager: RouteManager<S>,
+        route_manager: RouteManager<S, T>,
     ) {
         let mut buf = [0; 65535];
         let mut out = [0; MAX_DATAGRAM_SIZE];
@@ -516,6 +517,7 @@ mod quiche_implementation {
                                         );
                                     }
                                     let scid = client.conn.source_id().as_ref().to_vec();
+                                    info!("PING received ! [{:?}]", &out[..read]);
                                     if let Err(_) =
                                         route_manager.routes_handler().write_body_packet(
                                             stream_id,
@@ -1168,11 +1170,11 @@ mod quiche_implementation {
          * */
         Ok(written)
     }
-    fn handle_request<S: Send + Sync + 'static>(
+    fn handle_request<S: Send + Sync + 'static, T: UserSessions<Output = T>>(
         client: &mut Client,
         stream_id: u64,
         headers: &[quiche::h3::Header],
-        route_handler: &RouteHandler<S>,
+        route_handler: &RouteHandler<S, T>,
     ) {
         let conn = &mut client.conn;
         let http3_conn = &mut client.http3_conn.as_mut().unwrap();
@@ -1222,10 +1224,10 @@ mod quiche_implementation {
         }
     }
     /// Builds an HTTP/3 response given a request.
-    fn build_response<S: Send + Sync + 'static>(
+    fn build_response<S: Send + Sync + 'static, T: UserSessions<Output = T>>(
         root: &str,
         request: &[quiche::h3::Header],
-        _request_handler: &RouteHandler<S>,
+        _request_handler: &RouteHandler<S, T>,
     ) -> (Vec<quiche::h3::Header>, Vec<u8>) {
         let mut file_path = std::path::PathBuf::from(root);
         let mut path = std::path::Path::new("");
@@ -1359,9 +1361,9 @@ mod quiche_implementation {
             })
             .collect()
     }
-    pub fn response_prep<S: Send + Sync + 'static + Clone>(
+    pub fn response_prep<S: Send + Sync + 'static + Clone, T: UserSessions<Output = T>>(
         response_injection: ResponseInjection,
-        response_injection_buffer: &ResponseInjectionBuffer<S>,
+        response_injection_buffer: &ResponseInjectionBuffer<S, T>,
     ) {
         response_injection_buffer.register(response_injection);
     }

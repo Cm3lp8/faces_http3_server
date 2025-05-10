@@ -2,9 +2,12 @@ pub use reponse_process_thread_pool::ResponseThreadPool;
 mod reponse_process_thread_pool {
     use std::{sync::Arc, thread::JoinHandle};
 
-    use crate::response_queue_processing::{
-        response_pool_processing::ResponseInjection, ResponseInjectionBuffer,
-        ResponsePoolProcessingSender,
+    use crate::{
+        response_queue_processing::{
+            response_pool_processing::ResponseInjection, ResponseInjectionBuffer,
+            ResponsePoolProcessingSender,
+        },
+        stream_sessions::UserSessions,
     };
 
     pub struct ResponseThreadPool {
@@ -16,7 +19,7 @@ mod reponse_process_thread_pool {
     }
 
     impl ResponseThreadPool {
-        pub fn new<S: Sync + Send + 'static + Clone>(
+        pub fn new<S: Sync + Send + 'static + Clone, T: UserSessions<Output = T>>(
             amount: usize,
             job_channel: (
                 crossbeam_channel::Sender<ResponseInjection>,
@@ -24,9 +27,9 @@ mod reponse_process_thread_pool {
             ),
             app_state: S,
             worker_cb: Arc<
-                impl Fn(ResponseInjection, &ResponseInjectionBuffer<S>) + Send + Sync + 'static,
+                impl Fn(ResponseInjection, &ResponseInjectionBuffer<S, T>) + Send + Sync + 'static,
             >,
-            response_injection_buffer: &ResponseInjectionBuffer<S>,
+            response_injection_buffer: &ResponseInjectionBuffer<S, T>,
         ) -> Self {
             let mut workers = Vec::with_capacity(amount);
 
@@ -54,14 +57,14 @@ mod reponse_process_thread_pool {
         thread: JoinHandle<()>,
     }
     impl ResponseWorker {
-        pub fn new<S: Send + Clone + Sync + 'static>(
+        pub fn new<S: Send + Clone + Sync + 'static, T: UserSessions<Output = T>>(
             id: usize,
             injection_channel: crossbeam_channel::Receiver<ResponseInjection>,
             app_state: S,
             worker_cb: Arc<
-                impl Fn(ResponseInjection, &ResponseInjectionBuffer<S>) + Send + Sync + 'static,
+                impl Fn(ResponseInjection, &ResponseInjectionBuffer<S, T>) + Send + Sync + 'static,
             >,
-            response_injection_buffer: &ResponseInjectionBuffer<S>,
+            response_injection_buffer: &ResponseInjectionBuffer<S, T>,
         ) -> Self {
             let response_injection_buffer_clone = response_injection_buffer.clone();
             let worker = std::thread::spawn(move || {

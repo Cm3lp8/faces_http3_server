@@ -1,7 +1,7 @@
 pub use job::MiddleWareJob;
 pub use thread_pool::ThreadPool;
 mod thread_pool {
-    use std::{sync::Arc, thread::JoinHandle};
+    use std::{marker::PhantomData, sync::Arc, thread::JoinHandle};
 
     use mio::Waker;
     use quiche::h3;
@@ -10,24 +10,27 @@ mod thread_pool {
         file_writer::{self, FileWriterChannel},
         request_response::ChunkingStation,
         response_queue_processing::SignalNewRequest,
-        server_config, MiddleWareFlow, MiddleWareResult, RouteHandler, ServerConfig,
+        server_config,
+        stream_sessions::UserSessions,
+        MiddleWareFlow, MiddleWareResult, RouteHandler, ServerConfig,
     };
 
     use super::job::MiddleWareJob;
 
-    pub struct ThreadPool<S: Send + Sync + 'static + Clone> {
+    pub struct ThreadPool<S: Send + Sync + 'static + Clone, T: UserSessions<Output = T>> {
         workers: Vec<Worker>,
         job_channel: (
             crossbeam_channel::Sender<MiddleWareJob<S>>,
             crossbeam_channel::Receiver<MiddleWareJob<S>>,
         ),
+        user_sessions: PhantomData<T>,
     }
 
-    impl<S: Send + Sync + 'static + Clone> ThreadPool<S> {
+    impl<S: Send + Sync + 'static + Clone, T: UserSessions<Output = T>> ThreadPool<S, T> {
         pub fn new(
             amount: usize,
             app_state: S,
-            route_handler: &RouteHandler<S>,
+            route_handler: &RouteHandler<S, T>,
             server_config: &Arc<ServerConfig>,
             file_writer_channel: &FileWriterChannel,
             response_signal_sender: &SignalNewRequest,
@@ -53,6 +56,7 @@ mod thread_pool {
             Self {
                 workers,
                 job_channel,
+                user_sessions: PhantomData::<T>,
             }
         }
         pub fn execute(&self, middleware_job: MiddleWareJob<S>) {
@@ -65,11 +69,11 @@ mod thread_pool {
         thread: JoinHandle<()>,
     }
     impl Worker {
-        fn new<S: Send + Sync + 'static + Clone>(
+        fn new<S: Send + Sync + 'static + Clone, T: UserSessions<Output = T>>(
             id: usize,
             receiver: crossbeam_channel::Receiver<MiddleWareJob<S>>,
             app_state: S,
-            route_handler: &RouteHandler<S>,
+            route_handler: &RouteHandler<S, T>,
             server_config: &Arc<ServerConfig>,
             file_writer_channel: &crate::file_writer::FileWriterChannel,
             response_signal_sender: &SignalNewRequest,

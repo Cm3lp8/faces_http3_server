@@ -13,7 +13,9 @@ mod header_reception {
         file_writer::FileWriterChannel,
         request_response::{ChunkingStation, ChunksDispatchChannel},
         response_queue_processing::{ResponsePoolProcessingSender, SignalNewRequest},
-        route_handler, RouteHandler, ServerConfig,
+        route_handler,
+        stream_sessions::UserSessions,
+        RouteHandler, ServerConfig,
     };
 
     use super::{
@@ -63,8 +65,8 @@ mod header_reception {
     }
 
     /// Processing headers asyncronously
-    pub struct HeaderProcessing<S: Send + Sync + 'static + Clone> {
-        route_handler: RouteHandler<S>,
+    pub struct HeaderProcessing<S: Send + Sync + 'static + Clone, T: UserSessions<Output = T>> {
+        route_handler: RouteHandler<S, T>,
         server_config: Arc<ServerConfig>,
         chunking_station: ChunkingStation,
         waker: Arc<Waker>,
@@ -73,13 +75,13 @@ mod header_reception {
             crossbeam_channel::Receiver<HeaderMessage>,
         ),
         file_writer_channel: FileWriterChannel,
-        workers: Arc<ThreadPool<S>>,
+        workers: Arc<ThreadPool<S, T>>,
         response_processing_pool_injector: ResponsePoolProcessingSender,
     }
 
-    impl<S: Send + Sync + 'static + Clone> HeaderProcessing<S> {
+    impl<S: Send + Sync + 'static + Clone, T: UserSessions<Output = T>> HeaderProcessing<S, T> {
         pub fn new(
-            route_handler: RouteHandler<S>,
+            route_handler: RouteHandler<S, T>,
             server_config: Arc<ServerConfig>,
             chunking_station: ChunkingStation,
             waker: Arc<Waker>,
@@ -240,6 +242,7 @@ mod workers {
         response_queue_processing::{self, ResponsePoolProcessingSender},
         route_events::EventType,
         route_handler::{self, send_404, send_error},
+        stream_sessions::UserSessions,
         H3Method, MiddleWareResult, RouteHandler,
     };
 
@@ -249,10 +252,10 @@ mod workers {
         HeaderMessage,
     };
 
-    pub fn run_header_processor<S: Send + Sync + 'static + Clone>(
+    pub fn run_header_processor<S: Send + Sync + 'static + Clone, T: UserSessions<Output = T>>(
         receiver: crossbeam_channel::Receiver<HeaderMessage>,
-        route_handler: &RouteHandler<S>,
-        header_workers_pool: &Arc<ThreadPool<S>>,
+        route_handler: &RouteHandler<S, T>,
+        header_workers_pool: &Arc<ThreadPool<S, T>>,
         chunking_station: &ChunkingStation,
         mio_waker: &Arc<mio::Waker>,
         response_processing_pool_sender: &ResponsePoolProcessingSender,

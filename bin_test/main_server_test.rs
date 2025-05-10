@@ -1,6 +1,9 @@
 #![allow(warnings)]
+use std::collections::HashMap;
+use std::hash::Hash;
 use std::io::{BufRead, BufReader, Cursor};
 use std::ops::Add;
+use std::process::Output;
 use std::sync::{Arc, Mutex};
 use std::{thread, usize};
 
@@ -15,7 +18,49 @@ fn main() {
 
     #[derive(Clone)]
     pub struct AppStateTest;
-    let mut router = RouteManager::new_with_app_state(AppStateTest);
+
+    type UserID = usize;
+    type StreamIdent = (Vec<u8>, u64);
+    pub struct StreamSessions {
+        register: Arc<Mutex<HashMap<UserID, StreamIdent>>>,
+    }
+    impl StreamSessions {
+        pub fn register(&self, user_id: UserID, stream_id: StreamIdent) {
+            let guard = &mut *self.register.lock().unwrap();
+
+            guard.entry(user_id).or_insert(stream_id);
+        }
+    }
+
+    impl UserSessions for StreamSessions {
+        type Output = StreamSessions;
+        type Key = UserID;
+        fn new() -> Self::Output {
+            StreamSessions {
+                register: Arc::new(Mutex::new(HashMap::new())),
+            }
+        }
+        fn user_sessions(&self) -> &Self::Output {
+            self
+        }
+
+        fn broadcast_to_streams(&self, keys: &[Self::Key]) -> Vec<impl ToStreamIdent> {
+            let mut dst: Vec<StreamIdent> = vec![];
+
+            let guard = &*self.register.lock().unwrap();
+            for key in keys {
+                if let Some(stream_ident) = guard.get(&key) {
+                    dst.push(stream_ident.to_owned())
+                }
+            }
+
+            dst
+        }
+    }
+
+    let mut router = RouteManager::<_, StreamSessions>::new_with_app_state(AppStateTest);
+
+    let streams = StreamSessions::new();
 
     let middle_ware_0 = router.middleware(&|headers, app_state| MiddleWareFlow::Continue(headers));
     let handler_0 = router.handler(&|event, app_state, current_status_response| {

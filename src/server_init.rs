@@ -9,6 +9,7 @@ mod server_initiation {
         handler_dispatcher,
         route_manager::{RouteForm, RouteFormBuilder},
         server_config::ServerConfigBuilder,
+        stream_sessions::UserSessions,
         EventLoop, H3Method, RouteConfig, RouteEvent, RouteManager, RouteManagerBuilder,
         ServerConfig,
     };
@@ -50,9 +51,9 @@ mod server_initiation {
             }
             self
         }
-        pub fn run_blocking<S: 'static + Send + Sync + Clone>(
+        pub fn run_blocking<S: 'static + Send + Sync + Clone, T: UserSessions<Output = T>>(
             &mut self,
-            mut route_manager_builder: RouteManagerBuilder<S>,
+            mut route_manager_builder: RouteManagerBuilder<S, T>,
         ) -> Http3Server {
             let config_clone = self.server_config.build();
             let config_clone = Arc::new(config_clone);
@@ -90,9 +91,9 @@ mod server_initiation {
             thread::park();
             server
         }
-        pub fn run<S: 'static + Send + Sync + Clone>(
+        pub fn run<S: 'static + Send + Sync + Clone, T: UserSessions<Output = T>>(
             &mut self,
-            route_manager: RouteManager<S>,
+            route_manager: RouteManager<S, T>,
         ) -> Http3Server {
             let config_clone = self.server_config.build();
             let config_clone = Arc::new(config_clone);

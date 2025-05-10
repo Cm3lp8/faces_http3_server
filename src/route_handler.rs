@@ -34,6 +34,7 @@ mod request_hndlr {
         route_manager::{DataManagement, RouteManagerInner},
         server_config,
         server_init::quiche_http3_server::{self, Client},
+        stream_sessions::UserSessions,
         BodyStorage, FinishedEvent, HeadersColl, MiddleWare, MiddleWareFlow, MiddleWareResult,
         RequestResponse, RouteEventListener, RouteResponse, ServerConfig,
     };
@@ -50,10 +51,10 @@ mod request_hndlr {
 
     use super::*;
 
-    pub struct RouteHandler<S: Sync + Send + 'static> {
-        inner: Arc<Mutex<RouteManagerInner<S>>>,
+    pub struct RouteHandler<S: Sync + Send + 'static, T: UserSessions<Output = T>> {
+        inner: Arc<Mutex<RouteManagerInner<S, T>>>,
     }
-    impl<S: Sync + Send + 'static> Clone for RouteHandler<S> {
+    impl<S: Sync + Send + 'static, T: UserSessions<Output = T>> Clone for RouteHandler<S, T> {
         fn clone(&self) -> Self {
             Self {
                 inner: self.inner.clone(),
@@ -61,8 +62,8 @@ mod request_hndlr {
         }
     }
 
-    impl<S: Send + Sync + 'static + Clone> RouteHandler<S> {
-        pub fn new(route_mngr_inner: Arc<Mutex<RouteManagerInner<S>>>) -> Self {
+    impl<S: Send + Sync + 'static + Clone, T: UserSessions<Output = T>> RouteHandler<S, T> {
+        pub fn new(route_mngr_inner: Arc<Mutex<RouteManagerInner<S, T>>>) -> Self {
             RouteHandler {
                 inner: route_mngr_inner,
             }
@@ -336,7 +337,7 @@ mod request_hndlr {
                 file_writer_channel,
             );
         }
-        pub fn inner_mut(&self, cb: impl FnOnce(&mut RouteManagerInner<S>)) {
+        pub fn inner_mut(&self, cb: impl FnOnce(&mut RouteManagerInner<S, T>)) {
             let guard = &mut *self.inner.lock().unwrap();
             cb(guard);
         }
@@ -379,7 +380,7 @@ mod request_hndlr {
             }
             (None, None)
         }
-        pub fn mutex_guard(&self) -> MutexGuard<RouteManagerInner<S>> {
+        pub fn mutex_guard(&self) -> MutexGuard<RouteManagerInner<S, T>> {
             let a = self.inner.lock().unwrap();
             a
         }
@@ -500,6 +501,7 @@ mod route_handle_implementation {
         route_events::{self, EventType},
         route_manager::{ErrorType, RouteManagerInner},
         server_init::QClient as Client,
+        stream_sessions::UserSessions,
         ErrorResponse, FinishedEvent, RouteEvent,
     };
 
@@ -532,9 +534,9 @@ mod route_handle_implementation {
         }
     }
 
-    pub fn send_error<S: Send + Sync + 'static + Clone>(
+    pub fn send_error<S: Send + Sync + 'static + Clone, T: UserSessions<Output = T>>(
         error_type: ErrorResponse,
-        guard: &RouteManagerInner<S>,
+        guard: &RouteManagerInner<S, T>,
         waker: &mio::Waker,
         chunk_dispatch_channel: &ChunksDispatchChannel,
         chunking_station: &ChunkingStation,
@@ -637,9 +639,9 @@ mod route_handle_implementation {
             }
         }
     }
-    pub fn send_404<S: Send + Sync + 'static + Clone>(
+    pub fn send_404<S: Send + Sync + 'static + Clone, T: UserSessions<Output = T>>(
         req_path: &str,
-        guard: &RouteManagerInner<S>,
+        guard: &RouteManagerInner<S, T>,
         waker: &mio::Waker,
         chunk_dispatch_channel: &ChunksDispatchChannel,
         chunking_station: &ChunkingStation,
@@ -722,8 +724,11 @@ mod route_handle_implementation {
             }
         }
     }
-    pub fn response_preparation_with_route_handler<S: Send + Sync + 'static + Clone>(
-        route_handler: &RouteHandler<S>,
+    pub fn response_preparation_with_route_handler<
+        S: Send + Sync + 'static + Clone,
+        T: UserSessions<Output = T>,
+    >(
+        route_handler: &RouteHandler<S, T>,
         waker: &mio::Waker,
         chunking_station: &ChunkingStation,
         conn_id: &str,
@@ -957,8 +962,8 @@ mod route_handle_implementation {
             }
         }
     }
-    pub fn response_preparation<S: Send + Sync + 'static + Clone>(
-        guard: &RouteManagerInner<S>,
+    pub fn response_preparation<S: Send + Sync + 'static + Clone, T: UserSessions<Output = T>>(
+        guard: &RouteManagerInner<S, T>,
         waker: &mio::Waker,
         chunking_station: &ChunkingStation,
         conn_id: &str,

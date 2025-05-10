@@ -63,9 +63,10 @@ mod route_mngr {
     use std::{
         any::Any,
         borrow::BorrowMut,
-        collections::HashMap,
+        collections::{hash_map, HashMap},
         fmt::Debug,
         hash::Hash,
+        process::Output,
         sync::{Arc, Mutex},
     };
 
@@ -78,35 +79,39 @@ mod route_mngr {
         request_response::{BodyType, RequestResponse},
         route_events::RouteEvent,
         route_handler::{self, ReqArgs, RequestsTable},
-        server_config, ErrorResponse, FinishedEvent, HeadersColl, MiddleWareFlow, MiddleWareResult,
-        Response, RouteEventListener, RouteResponse, ServerConfig,
+        server_config,
+        stream_sessions::{StreamBuilder, StreamHandle, StreamSessions, StreamType, UserSessions},
+        ErrorResponse, FinishedEvent, HeadersColl, MiddleWareFlow, MiddleWareResult, Response,
+        RouteEventListener, RouteResponse, ServerConfig,
     };
 
     use self::route_config::DataManagement;
 
     use super::*;
+    use crate::StreamCreation;
 
     type ReqPath = &'static str;
 
-    pub struct RouteManager<S: Send + Sync + 'static> {
-        inner: Arc<Mutex<RouteManagerInner<S>>>,
+    pub struct RouteManager<S: Send + Sync + 'static, T: UserSessions<Output = T>> {
+        inner: Arc<Mutex<RouteManagerInner<S, T>>>,
     }
-    impl<S: Send + Sync + 'static> Clone for RouteManager<S> {
+    impl<S: Send + Sync + 'static, T: UserSessions<Output = T>> Clone for RouteManager<S, T> {
         fn clone(&self) -> Self {
             Self {
                 inner: self.inner.clone(),
             }
         }
     }
-    impl<S: Send + Sync + 'static + Clone> RouteManager<S> {
+    impl<S: Send + Sync + 'static + Clone, T: UserSessions<Output = T>> RouteManager<S, T> {
         ///
         ///___________________________
         ///Create a new Router with a concrete S as generic for an app state.
         ///Use S for MiddleWare trait implementation.
         ///
-        pub fn new_with_app_state(app_state: S) -> RouteManagerBuilder<S> {
+        pub fn new_with_app_state(app_state: S) -> RouteManagerBuilder<S, T> {
             RouteManagerBuilder {
                 routes_formats: HashMap::new(),
+                stream_sessions: StreamSessions::<S, T>::new(),
                 error_formats: HashMap::new(),
                 app_state: Some(app_state),
                 global_middlewares: vec![],
@@ -132,7 +137,7 @@ mod route_mngr {
 
             cb(guard.get_routes_from_path_and_method_b(path, methode));
         }
-        pub fn routes_handler(&self) -> RouteHandler<S> {
+        pub fn routes_handler(&self) -> RouteHandler<S, T> {
             RouteHandler::new(self.inner.clone())
         }
         pub fn is_request_set_in_table(&self, stream_id: u64, conn_id: &str) -> bool {
@@ -170,8 +175,9 @@ mod route_mngr {
         }
     }
 
-    pub struct RouteManagerInner<S: Send + Sync + 'static> {
+    pub struct RouteManagerInner<S: Send + Sync + 'static, T: UserSessions<Output = T>> {
         routes_formats: HashMap<ReqPath, Vec<Arc<RouteForm<S>>>>,
+        stream_sessions: StreamSessions<S, T>,
         error_formats: HashMap<ErrorType, ErrorForm>,
         app_state: S,
         route_event_dispatcher: RouteEventDispatcher<S>,
@@ -179,7 +185,7 @@ mod route_mngr {
                                      //key value is HashMap
                                      //for stream_id u64
     }
-    impl<S: Send + Sync + 'static + Clone> RouteManagerInner<S> {
+    impl<S: Send + Sync + 'static + Clone, T: UserSessions<Output = T>> RouteManagerInner<S, T> {
         ///
         ///Init the request manager builder.
         ///You can add new request forms with add_new_request_form();
@@ -187,9 +193,10 @@ mod route_mngr {
         ///
         ///
         ///
-        pub fn new() -> RouteManagerBuilder<S> {
+        pub fn new() -> RouteManagerBuilder<S, T> {
             RouteManagerBuilder {
                 routes_formats: HashMap::new(),
+                stream_sessions: StreamSessions::<S, T>::new(),
                 error_formats: HashMap::new(),
                 app_state: None,
                 global_middlewares: vec![],
@@ -268,17 +275,22 @@ mod route_mngr {
         }
     }
 
-    pub struct RouteManagerBuilder<S> {
+    pub struct RouteManagerBuilder<S: Send + Sync + 'static, T: UserSessions<Output = T>> {
         routes_formats: HashMap<ReqPath, Vec<Arc<RouteForm<S>>>>,
+        stream_sessions: StreamSessions<S, T>,
         error_formats: HashMap<ErrorType, ErrorForm>,
         app_state: Option<S>,
         global_middlewares: Vec<Arc<dyn MiddleWare<S> + Send + Sync + 'static>>,
     }
-    impl<S: Send + Sync + 'static + Clone> RouteManagerBuilder<S> {
-        pub fn build(&mut self) -> RouteManager<S> {
+    impl<S: Send + Sync + 'static + Clone, T: UserSessions<Output = T>> RouteManagerBuilder<S, T> {
+        pub fn build(&mut self) -> RouteManager<S, T> {
             let handle_dispatcher = self.build_route_event_dispatcher();
             let request_manager_inner = RouteManagerInner {
                 routes_formats: std::mem::replace(&mut self.routes_formats, HashMap::new()),
+                stream_sessions: std::mem::replace(
+                    &mut self.stream_sessions,
+                    StreamSessions::<S, T>::new(),
+                ),
                 error_formats: std::mem::replace(&mut self.error_formats, HashMap::new()),
                 app_state: self.app_state.take().unwrap(),
                 route_states: RequestsTable::new(),
@@ -291,6 +303,37 @@ mod route_mngr {
         }
         pub fn app_state(&self) -> Option<S> {
             self.app_state.clone()
+        }
+        pub fn to_stream_handler<
+            F: Fn(FinishedEvent, &T, &S) -> Result<(), ()> + Sync + Send + 'static,
+        >(
+            &self,
+            cb: &'static F,
+        ) -> Arc<dyn StreamHandle<S, T> + Send + Sync + 'static> {
+            #[derive(Clone)]
+            pub struct Anon<S: 'static, T: UserSessions<Output = T>>(
+                Arc<
+                    &'static (dyn Fn(FinishedEvent, &T, &S) -> Result<(), ()>
+                                  + Sync
+                                  + Send
+                                  + 'static),
+                >,
+            );
+
+            impl<S: 'static + Send + Sync, T: UserSessions<Output = T>> StreamHandle<S, T> for Anon<S, T> {
+                fn call(
+                    &self,
+                    event: FinishedEvent,
+                    user_session: &T,
+                    state: &S,
+                ) -> Result<(), ()> {
+                    (*self.0)(event, user_session, state)
+                }
+            }
+
+            let anon: Arc<dyn StreamHandle<S, T> + Send + Sync + 'static> =
+                Arc::new(Anon(Arc::new(cb))) as Arc<dyn StreamHandle<S, T> + Send + Sync + 'static>;
+            anon
         }
         pub fn handler<
             F: Fn(FinishedEvent, &S, RouteResponse) -> Response + Sync + Send + 'static,
@@ -394,6 +437,20 @@ mod route_mngr {
             route: impl FnOnce(&mut RouteFormBuilder<S>),
         ) -> &mut Self {
             self.add_route(path, H3Method::POST, route_configuration, route);
+            self
+        }
+        pub fn down_stream(
+            &mut self,
+            path: &'static str,
+            route_configuration: (),
+            stream_builder_cb: impl FnOnce(&mut StreamBuilder<S, T>),
+        ) -> &mut Self {
+            self.stream_sessions.create_stream(
+                path,
+                StreamType::Down,
+                route_configuration,
+                stream_builder_cb,
+            );
             self
         }
         pub fn route_get(

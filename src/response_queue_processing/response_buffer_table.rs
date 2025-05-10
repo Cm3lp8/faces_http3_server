@@ -16,22 +16,25 @@ mod response_buff {
         response_queue_processing::ResponseInjection,
         route_events::EventType,
         route_handler::response_preparation_with_route_handler,
+        stream_sessions::UserSessions,
         RouteHandler, ServerConfig,
     };
 
-    pub struct ResponseInjectionBuffer<S: Send + Sync + 'static> {
+    pub struct ResponseInjectionBuffer<S: Send + Sync + 'static, T: UserSessions<Output = T>> {
         channel: (
             crossbeam_channel::Sender<ReqId>,
             crossbeam_channel::Receiver<ReqId>,
         ),
         table: Arc<Mutex<HashMap<ReqId, ResponseInjection>>>,
-        route_handler: RouteHandler<S>,
+        route_handler: RouteHandler<S, T>,
         file_writer_channel: FileWriterChannel,
         chunking_station: ChunkingStation,
         signal: Arc<Mutex<HashSet<ReqId>>>,
         waker: Arc<Waker>,
     }
-    impl<S: Send + Sync + 'static> Clone for ResponseInjectionBuffer<S> {
+    impl<S: Send + Sync + 'static, T: UserSessions<Output = T>> Clone
+        for ResponseInjectionBuffer<S, T>
+    {
         fn clone(&self) -> Self {
             Self {
                 channel: self.channel.clone(),
@@ -45,9 +48,9 @@ mod response_buff {
         }
     }
 
-    impl<S: Send + Sync + 'static + Clone> ResponseInjectionBuffer<S> {
+    impl<S: Send + Sync + 'static + Clone, T: UserSessions<Output = T>> ResponseInjectionBuffer<S, T> {
         pub fn new(
-            route_handler: RouteHandler<S>,
+            route_handler: RouteHandler<S, T>,
             server_config: &Arc<ServerConfig>,
             file_writer_channel: FileWriterChannel,
             chunking_station: ChunkingStation,
@@ -145,6 +148,7 @@ mod signal_receiver {
         response_queue_processing::ResponseInjection,
         route_events::EventType,
         route_handler::response_preparation_with_route_handler,
+        stream_sessions::UserSessions,
         RouteHandler,
     };
 
@@ -156,11 +160,11 @@ mod signal_receiver {
         task::Wake,
     };
 
-    pub fn run<S: Send + Sync + 'static + Clone>(
+    pub fn run<S: Send + Sync + 'static + Clone, T: UserSessions<Output = T>>(
         receiver: crossbeam_channel::Receiver<ReqId>,
         signal_set: Arc<Mutex<HashSet<ReqId>>>,
         table: Arc<Mutex<HashMap<ReqId, ResponseInjection>>>,
-        route_handler: RouteHandler<S>,
+        route_handler: RouteHandler<S, T>,
         chunking_station: ChunkingStation,
         waker: &Arc<Waker>,
     ) {

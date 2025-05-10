@@ -14,6 +14,7 @@ mod response_pool_processing {
     use crate::{
         file_writer::{FileWriter, FileWriterChannel},
         request_response::ChunkingStation,
+        stream_sessions::UserSessions,
         H3Method, RouteHandler, ServerConfig,
     };
 
@@ -75,28 +76,28 @@ mod response_pool_processing {
             self.has_more_frames
         }
     }
-    pub struct ResponsePoolProcessing<S: Sync + Send + 'static> {
+    pub struct ResponsePoolProcessing<S: Sync + Send + 'static, T: UserSessions<Output = T>> {
         injection_channel: (
             crossbeam_channel::Sender<ResponseInjection>,
             crossbeam_channel::Receiver<ResponseInjection>,
         ),
-        route_handler: RouteHandler<S>,
+        route_handler: RouteHandler<S, T>,
         server_config: Arc<ServerConfig>,
         chunking_station: ChunkingStation,
         waker: Arc<Waker>,
         file_writer_channel: FileWriterChannel,
         app_state: S,
-        response_injection_table: ResponseInjectionBuffer<S>,
+        response_injection_table: ResponseInjectionBuffer<S, T>,
     }
-    impl<S: Send + Sync + Clone + 'static> ResponsePoolProcessing<S> {
+    impl<S: Send + Sync + Clone + 'static, T: UserSessions<Output = T>> ResponsePoolProcessing<S, T> {
         pub fn new(
-            route_handler: RouteHandler<S>,
+            route_handler: RouteHandler<S, T>,
             server_config: Arc<ServerConfig>,
             chunking_station: ChunkingStation,
             waker: Arc<Waker>,
             file_writer_channel: FileWriterChannel,
             app_state: S,
-            response_injection_buffer: &ResponseInjectionBuffer<S>,
+            response_injection_buffer: &ResponseInjectionBuffer<S, T>,
         ) -> Self {
             Self {
                 injection_channel: crossbeam_channel::unbounded(),
@@ -111,7 +112,10 @@ mod response_pool_processing {
         }
         pub fn run(
             &self,
-            worker_cb: impl Fn(ResponseInjection, &ResponseInjectionBuffer<S>) + Send + Sync + 'static,
+            worker_cb: impl Fn(ResponseInjection, &ResponseInjectionBuffer<S, T>)
+                + Send
+                + Sync
+                + 'static,
         ) {
             let worker_cb = Arc::new(worker_cb);
             let _ = ResponseThreadPool::new(

@@ -394,7 +394,6 @@ mod req_temp_table {
             is_end: bool,
             file_writer_channel: FileWriterChannel,
         ) {
-            info!("data_management_type [{:?}]", data_management_type);
             if let Some(_entry) = self
                 .table
                 .lock()

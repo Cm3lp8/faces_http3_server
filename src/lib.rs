@@ -17,6 +17,12 @@ pub use server_config::{
     RouteManagerBuilder, ServerConfig,
 };
 
+use stream_sessions::StreamCreation;
+pub use stream_sessions::ToStreamIdent;
+
+pub use stream_sessions::StreamHandle;
+pub use stream_sessions::UserSessions;
+
 use server_init::quiche_http3_server::{BodyReqQueue, QueueTrackableItem};
 mod event_listener;
 mod file_writer;
@@ -27,6 +33,7 @@ mod route_handler;
 mod route_manager;
 mod server_config;
 mod server_init;
+mod stream_sessions;
 pub use server_init::Http3Server;
 mod conn_statistics;
 mod handler_dispatcher;
@@ -50,6 +57,9 @@ pub mod prelude {
         RouteManagerBuilder, ServerConfig,
     };
     pub use crate::server_init::Http3Server;
+    pub use crate::StreamHandle;
+    pub use crate::ToStreamIdent;
+    pub use crate::UserSessions;
     pub use quiche::h3;
 }
 
