@@ -1,6 +1,6 @@
 #![allow(warnings)]
 pub use header_reception::{HeaderMessage, HeaderProcessing};
-pub use middleware_worker::MiddleWareJob;
+pub use middleware_worker::{MiddleWareJob, RouteType};
 
 mod middleware_worker;
 mod header_reception {
@@ -232,6 +232,7 @@ mod middleware_process {
 }
 
 mod workers {
+    use crate::stream_sessions::StreamManagement;
     use std::{sync::Arc, time::Duration};
 
     use quiche::h3::{self, NameValue};
@@ -249,7 +250,7 @@ mod workers {
     use super::{
         middleware_process::{ConfirmationRoom, MiddleWareProcess},
         middleware_worker::ThreadPool,
-        HeaderMessage,
+        HeaderMessage, RouteType,
     };
 
     pub fn run_header_processor<S: Send + Sync + 'static + Clone, T: UserSessions<Output = T>>(
@@ -269,6 +270,7 @@ mod workers {
         let chunking_station_cl = chunking_station.clone();
         let mio_waker_cl = mio_waker.clone();
         let response_processing_pool_injector = response_processing_pool_sender.clone();
+        let stream_sessions = route_handler.stream_sessions();
         std::thread::spawn(move || {
             while let Ok(header_msg) = receiver.recv() {
                 let stream_id = header_msg.stream_id();
@@ -293,6 +295,7 @@ mod workers {
                     let middleware_coll = route_form.to_middleware_coll();
                     if let Some(middleware_job) = route_handler.send_header_work(
                         path.as_str(),
+                        RouteType::Regular,
                         method,
                         content_length,
                         middleware_coll,
@@ -302,6 +305,29 @@ mod workers {
                         header_workers_pool.execute(middleware_job);
                     }
                     continue;
+                }
+
+                info!("headers [{:?}]", path);
+
+                if let Some(stream_sessions) = &stream_sessions {
+                    if let Ok(_) =
+                        stream_sessions.get_stream_from_path(path.as_str(), |stream, _| {
+                            let middleware_coll = stream.to_middleware_coll();
+                            if let Some(middleware_job) = route_handler.send_header_work(
+                                path.as_str(),
+                                RouteType::Stream,
+                                method,
+                                content_length,
+                                middleware_coll,
+                                header_msg.clone(),
+                                middleware_result_chan.0.clone(),
+                            ) {
+                                header_workers_pool.execute(middleware_job);
+                            }
+                        })
+                    {
+                        continue;
+                    }
                 }
                 route_handler.inner_mut(|guard| {
                     send_404(

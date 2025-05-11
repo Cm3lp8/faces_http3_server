@@ -111,7 +111,7 @@ mod route_mngr {
         pub fn new_with_app_state(app_state: S) -> RouteManagerBuilder<S, T> {
             RouteManagerBuilder {
                 routes_formats: HashMap::new(),
-                stream_sessions: StreamSessions::<S, T>::new(),
+                stream_sessions: StreamSessions::<S, T>::new(app_state.clone()),
                 error_formats: HashMap::new(),
                 app_state: Some(app_state),
                 global_middlewares: vec![],
@@ -193,6 +193,7 @@ mod route_mngr {
         ///
         ///
         ///
+        /*
         pub fn new() -> RouteManagerBuilder<S, T> {
             RouteManagerBuilder {
                 routes_formats: HashMap::new(),
@@ -201,7 +202,7 @@ mod route_mngr {
                 app_state: None,
                 global_middlewares: vec![],
             }
-        }
+        }*/
         pub fn app_state(&self) -> &S {
             &self.app_state
         }
@@ -209,6 +210,10 @@ mod route_mngr {
             self.routes_states()
                 .is_entry_partial_reponse_set(stream_id, conn_id)
         }
+        pub fn stream_sessions(&self) -> Option<&StreamSessions<S, T>> {
+            Some(&self.stream_sessions)
+        }
+
         pub fn routes_states(&self) -> &RequestsTable {
             &self.route_states
         }
@@ -289,7 +294,7 @@ mod route_mngr {
                 routes_formats: std::mem::replace(&mut self.routes_formats, HashMap::new()),
                 stream_sessions: std::mem::replace(
                     &mut self.stream_sessions,
-                    StreamSessions::<S, T>::new(),
+                    StreamSessions::<S, T>::new(self.app_state.clone().take().unwrap()),
                 ),
                 error_formats: std::mem::replace(&mut self.error_formats, HashMap::new()),
                 app_state: self.app_state.take().unwrap(),
@@ -445,12 +450,14 @@ mod route_mngr {
             route_configuration: (),
             stream_builder_cb: impl FnOnce(&mut StreamBuilder<S, T>),
         ) -> &mut Self {
+            info!("will create stream");
             self.stream_sessions.create_stream(
                 path,
                 StreamType::Down,
                 route_configuration,
                 stream_builder_cb,
             );
+            info!("ok created stream !!");
             self
         }
         pub fn route_get(

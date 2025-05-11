@@ -1,8 +1,9 @@
-pub use job::MiddleWareJob;
+pub use job::{MiddleWareJob, RouteType};
 pub use thread_pool::ThreadPool;
 mod thread_pool {
     use std::{marker::PhantomData, sync::Arc, thread::JoinHandle};
 
+    use env_logger::init;
     use mio::Waker;
     use quiche::h3;
 
@@ -15,7 +16,11 @@ mod thread_pool {
         MiddleWareFlow, MiddleWareResult, RouteHandler, ServerConfig,
     };
 
-    use super::job::MiddleWareJob;
+    use self::middleware_worker_implementation::{
+        regular_request_partial_response_table_update, stream_request_partial_response_table_update,
+    };
+
+    use super::{job::MiddleWareJob, RouteType};
 
     pub struct ThreadPool<S: Send + Sync + 'static + Clone, T: UserSessions<Output = T>> {
         workers: Vec<Worker>,
@@ -121,50 +126,39 @@ mod thread_pool {
 
                         headers = temps_headers;
 
-                        //if the thread reached here,create an entry in partial response table
-                        if route_handler.is_request_set_in_table(stream_id, conn_id.as_str()) {
-                            let (data_management_type, event_listener) =
-                                route_handler.get_additionnal_attributes(path.as_str(), method);
-
-                            route_handler.complete_request_entry_in_table(
+                        match middleware_job.route_type() {
+                            RouteType::Regular => regular_request_partial_response_table_update(
+                                &route_handler,
                                 stream_id,
+                                &scid,
                                 conn_id.as_str(),
                                 method,
                                 path.as_str(),
-                                &headers,
-                                content_length,
-                                data_management_type,
-                                event_listener,
-                            );
-                        } else {
-                            route_handler.create_new_request_in_table(
-                                path.as_str(),
-                                stream_id,
-                                conn_id.as_str(),
-                                method,
                                 &headers,
                                 content_length,
                                 has_more_frames,
                                 &server_config,
                                 &file_writer_channel,
-                            );
-                        }
-
-                        if let Err(_) = route_handler.send_reception_status_first(
-                            stream_id,
-                            &scid,
-                            conn_id.as_str(),
-                            &chunking_station.get_chunking_dispatch_channel(),
-                        ) {
-                            error!("Failed to send progress response status")
-                        } else {
-                        }
-
-                        let _ = waker.wake();
-                        if let Err(e) =
-                            response_signal_sender.send_signal((stream_id, conn_id.clone()))
-                        {
-                            error!("Failed sending response signal");
+                                &chunking_station,
+                                &waker,
+                                &response_signal_sender,
+                            ),
+                            RouteType::Stream => stream_request_partial_response_table_update(
+                                &route_handler,
+                                stream_id,
+                                &scid,
+                                conn_id.as_str(),
+                                method,
+                                path.as_str(),
+                                &headers,
+                                content_length,
+                                has_more_frames,
+                                &server_config,
+                                &file_writer_channel,
+                                &chunking_station,
+                                &waker,
+                                &response_signal_sender,
+                            ),
                         }
 
                         // Every middleware have been processed successfully
@@ -185,6 +179,141 @@ mod thread_pool {
             }
         }
     }
+
+    mod middleware_worker_implementation {
+        use std::sync::Arc;
+
+        use mio::Waker;
+        use quiche::h3;
+
+        use crate::{
+            event_listener, file_writer::FileWriterChannel, request_response::ChunkingStation,
+            response_queue_processing::SignalNewRequest, route_handler, server_config,
+            DataManagement, H3Method, RouteHandler, ServerConfig, UserSessions,
+        };
+
+        pub fn regular_request_partial_response_table_update<
+            S: Send + Sync + Clone + 'static,
+            T: UserSessions<Output = T>,
+        >(
+            route_handler: &RouteHandler<S, T>,
+            stream_id: u64,
+            scid: &[u8],
+            conn_id: &str,
+            method: H3Method,
+            path: &str,
+            headers: &[h3::Header],
+            content_length: Option<usize>,
+            has_more_frames: bool,
+            server_config: &Arc<ServerConfig>,
+            file_writer_channel: &FileWriterChannel,
+            chunking_station: &ChunkingStation,
+            waker: &Waker,
+            new_request_signal: &SignalNewRequest,
+        ) {
+            //if the thread reached here,create an entry in partial response table
+            if route_handler.is_request_set_in_table(stream_id, conn_id) {
+                let (data_management_type, event_listener) =
+                    route_handler.get_additionnal_attributes(path, method);
+
+                route_handler.complete_request_entry_in_table(
+                    stream_id,
+                    conn_id,
+                    method,
+                    path,
+                    &headers,
+                    content_length,
+                    data_management_type,
+                    event_listener,
+                );
+            } else {
+                route_handler.create_new_request_in_table(
+                    path,
+                    stream_id,
+                    conn_id,
+                    method,
+                    &headers,
+                    content_length,
+                    has_more_frames,
+                    server_config,
+                    file_writer_channel,
+                );
+            }
+            if let Err(_) = route_handler.send_reception_status_first(
+                stream_id,
+                scid,
+                conn_id,
+                &chunking_station.get_chunking_dispatch_channel(),
+            ) {
+                error!("Failed to send progress response status")
+            } else {
+            }
+
+            let _ = waker.wake();
+            if let Err(e) = new_request_signal.send_signal((stream_id, conn_id.to_string())) {
+                error!("Failed sending response signal");
+            }
+        }
+        pub fn stream_request_partial_response_table_update<
+            S: Send + Sync + Clone + 'static,
+            T: UserSessions<Output = T>,
+        >(
+            route_handler: &RouteHandler<S, T>,
+            stream_id: u64,
+            scid: &[u8],
+            conn_id: &str,
+            method: H3Method,
+            path: &str,
+            headers: &[h3::Header],
+            content_length: Option<usize>,
+            has_more_frames: bool,
+            server_config: &Arc<ServerConfig>,
+            file_writer_channel: &FileWriterChannel,
+            chunking_station: &ChunkingStation,
+            waker: &Waker,
+            new_request_signal: &SignalNewRequest,
+        ) {
+            //if the thread reached here,create an entry in partial response table
+            if route_handler.is_request_set_in_table(stream_id, conn_id) {
+                route_handler.complete_request_entry_in_table(
+                    stream_id,
+                    conn_id,
+                    method,
+                    path,
+                    &headers,
+                    content_length,
+                    Some(DataManagement::Storage(crate::BodyStorage::InMemory)),
+                    None,
+                );
+            } else {
+                route_handler.create_new_request_in_table(
+                    path,
+                    stream_id,
+                    conn_id,
+                    method,
+                    &headers,
+                    content_length,
+                    true,
+                    server_config,
+                    file_writer_channel,
+                );
+            }
+            if let Err(_) = route_handler.send_reception_status_first(
+                stream_id,
+                scid,
+                conn_id,
+                &chunking_station.get_chunking_dispatch_channel(),
+            ) {
+                error!("Failed to send progress response status")
+            } else {
+            }
+
+            let _ = waker.wake();
+            if let Err(e) = new_request_signal.send_signal((stream_id, conn_id.to_string())) {
+                error!("Failed sending response signal");
+            }
+        }
+    }
 }
 
 mod job {
@@ -194,6 +323,13 @@ mod job {
     use quiche::h3::{self, Header};
 
     use crate::{H3Method, HeadersColl, MiddleWare, MiddleWareFlow, MiddleWareResult};
+
+    #[derive(Debug, Clone, Copy)]
+    /// RouteType flags te route type context of the request being processed.
+    pub enum RouteType {
+        Regular,
+        Stream,
+    }
 
     pub struct MiddleWareJob<S: Send + Clone + Sync + 'static> {
         path: String,
@@ -206,12 +342,14 @@ mod job {
         headers: Vec<h3::Header>,
         middleware_collection: Vec<Arc<dyn MiddleWare<S> + Send + Sync + 'static>>,
         task_done_sender: crossbeam_channel::Sender<MiddleWareResult>,
+        route_type: RouteType,
     }
 
     impl<S: Send + Sync + 'static + Clone> MiddleWareJob<S> {
         pub fn new(
             path: &str,
             method: H3Method,
+            route_type: RouteType,
             stream_id: u64,
             scid: Vec<u8>,
             conn_id: String,
@@ -232,10 +370,14 @@ mod job {
                 headers,
                 middleware_collection,
                 task_done_sender,
+                route_type,
             }
         }
         pub fn path(&self) -> String {
             self.path.to_string()
+        }
+        pub fn route_type(&self) -> RouteType {
+            self.route_type
         }
         pub fn method(&self) -> H3Method {
             self.method

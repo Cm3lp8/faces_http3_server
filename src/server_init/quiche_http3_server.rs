@@ -517,8 +517,11 @@ mod quiche_implementation {
                                         );
                                     }
                                     let scid = client.conn.source_id().as_ref().to_vec();
-                                    info!("PING received ! [{:?}]", &out[..read]);
-                                    if let Err(_) =
+
+                                    if let Ok(res) = String::from_utf8(out[..read].to_vec()) {
+                                        info!("[{}][{:?}]", stream_id, res);
+                                    }
+                                    if let Err(e) =
                                         route_manager.routes_handler().write_body_packet(
                                             stream_id,
                                             &scid,
@@ -528,7 +531,7 @@ mod quiche_implementation {
                                         )
                                     {
                                         error!(
-                                            "Failed writing body packet on stream_id [{stream_id}]"
+                                            "Failed writing body packet on stream_id [{stream_id}] [{:?}]", e
                                         );
                                     }
                                     total += read;

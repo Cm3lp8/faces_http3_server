@@ -10,6 +10,7 @@ mod stream_sessions {
 
     use super::{
         stream_types::Stream, user_sessions_trait::UserSessions, StreamBuilder, StreamCreation,
+        StreamManagement,
     };
 
     type StreamPath = String;
@@ -23,10 +24,17 @@ mod stream_sessions {
         inner: Arc<Mutex<StreamSessionsInner<S, T>>>,
     }
 
-    impl<S: Send + Sync + 'static, T: UserSessions> StreamSessions<S, T> {
-        pub fn new() -> Self {
+    impl<S: Send + Sync + 'static, T: UserSessions<Output = T>> Clone for StreamSessions<S, T> {
+        fn clone(&self) -> Self {
             Self {
-                inner: Arc::new(Mutex::new(StreamSessionsInner::new())),
+                inner: self.inner.clone(),
+            }
+        }
+    }
+    impl<S: Send + Sync + 'static, T: UserSessions> StreamSessions<S, T> {
+        pub fn new(app_state: S) -> Self {
+            Self {
+                inner: Arc::new(Mutex::new(StreamSessionsInner::new(app_state))),
             }
         }
 
@@ -36,14 +44,36 @@ mod stream_sessions {
         }
     }
 
+    impl<S: Send + Sync + 'static, T: UserSessions<Output = T>> StreamManagement<S, T>
+        for StreamSessions<S, T>
+    {
+        fn get_stream_from_path(
+            &self,
+            path: &str,
+            cb: impl FnOnce(&Stream<S, T>, &S),
+        ) -> Result<(), ()> {
+            let guard = &*self.inner.lock().unwrap();
+
+            if let Some(stream) = guard.sessions.get(path) {
+                cb(stream, &guard.app_state);
+                Ok(())
+            } else {
+                warn!("no path registered for [{:?}]", path);
+                Err(())
+            }
+        }
+    }
+
     struct StreamSessionsInner<S: Send + Sync + 'static, T: UserSessions> {
         sessions: HashMap<StreamPath, Stream<S, T>>,
+        app_state: S,
     }
 
     impl<S: Send + Sync + 'static, T: UserSessions> StreamSessionsInner<S, T> {
-        fn new() -> Self {
+        fn new(app_state: S) -> Self {
             Self {
                 sessions: HashMap::new(),
+                app_state,
             }
         }
     }
@@ -60,6 +90,7 @@ mod stream_sessions {
         ) {
             let mut stream_builder = StreamBuilder::new();
 
+            stream_builder_cb(&mut stream_builder);
             stream_builder.set_path(path);
             stream_builder.set_stream_type(stream_type);
 
@@ -76,7 +107,7 @@ mod stream_sessions {
 mod stream_sessions_traits {
     use crate::{FinishedEvent, UserSessions};
 
-    use super::stream_types::{StreamBuilder, StreamIdent, StreamType};
+    use super::stream_types::{Stream, StreamBuilder, StreamIdent, StreamType};
 
     pub trait StreamCreation<S: Send + Sync + 'static, T: UserSessions<Output = T>> {
         fn create_stream(
@@ -92,8 +123,12 @@ mod stream_sessions_traits {
         fn call(&self, event: FinishedEvent, user_session: &T, app_state: &S) -> Result<(), ()>;
     }
 
-    pub trait StreamManagement {
-        fn add_user();
+    pub trait StreamManagement<S: Send + Sync + 'static, T: UserSessions<Output = T>> {
+        fn get_stream_from_path(
+            &self,
+            path: &str,
+            cb: impl FnOnce(&Stream<S, T>, &S),
+        ) -> Result<(), ()>;
     }
 
     pub trait ToStreamIdent {
@@ -191,6 +226,10 @@ mod stream_types {
             handler: &Arc<dyn StreamHandle<S, T> + Send + Sync + 'static>,
         ) -> &mut Self {
             self.stream_handler = Some(handler.clone());
+            info!(
+                "stream handler is set ? [{}]",
+                self.stream_handler.is_some()
+            );
             self
         }
         pub fn set_stream_type(&mut self, stream_type: StreamType) -> &mut Self {
@@ -202,6 +241,14 @@ mod stream_types {
                 | self.stream_type.as_ref().is_none()
                 | self.stream_handler.is_none()
             {
+                warn!(
+                    "returning error because [{:?}]",
+                    (
+                        self.stream_path.is_none(),
+                        self.stream_type.is_none(),
+                        self.stream_handler.is_none()
+                    )
+                );
                 return Err(());
             }
 
@@ -212,6 +259,19 @@ mod stream_types {
                 stream_type: self.stream_type.unwrap(),
                 registered_sessions: T::new(),
             })
+        }
+    }
+    impl<S: Send + Sync + 'static, T: UserSessions<Output = T>> Stream<S, T> {
+        pub fn to_middleware_coll(&self) -> Vec<Arc<dyn MiddleWare<S> + Send + Sync + 'static>> {
+            self.middlewares.clone()
+        }
+        pub fn stream_handler_callback(
+            &self,
+        ) -> &Arc<dyn StreamHandle<S, T> + Send + Sync + 'static> {
+            &self.stream_handler
+        }
+        pub fn registered_sessions(&self) -> &T {
+            &self.registered_sessions
         }
     }
 }

@@ -270,6 +270,7 @@ mod req_temp_table {
                 .unwrap()
                 .get_mut(&(conn_id.clone(), stream_id))
             {
+                info!("entry[{:#?}]", entry.data_management_type());
                 if let Some(data_mngmt) = entry.data_management_type() {
                     match data_mngmt {
                         DataManagement::Stream => {
