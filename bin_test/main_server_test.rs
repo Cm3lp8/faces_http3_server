@@ -32,9 +32,10 @@ fn main() {
         }
     }
 
+    type Scid = Vec<u8>;
+    type StreamId = u64;
     impl UserSessions for StreamSessions {
         type Output = StreamSessions;
-        type Key = UserID;
         fn new() -> Self::Output {
             StreamSessions {
                 register: Arc::new(Mutex::new(HashMap::new())),
@@ -44,7 +45,7 @@ fn main() {
             self
         }
 
-        fn broadcast_to_streams(&self, keys: &[Self::Key]) -> Vec<impl ToStreamIdent> {
+        fn broadcast_to_streams(&self, keys: &[usize]) -> Vec<impl ToStreamIdent> {
             let mut dst: Vec<StreamIdent> = vec![];
 
             let guard = &*self.register.lock().unwrap();
@@ -55,6 +56,11 @@ fn main() {
             }
 
             dst
+        }
+
+        fn register_sessions(&mut self, user_id: usize, conn_ids: (Scid, StreamId)) {}
+        fn remove_sessions_by_connection(&mut self, conn_id: &[u8]) -> Vec<usize> {
+            vec![0]
         }
     }
 

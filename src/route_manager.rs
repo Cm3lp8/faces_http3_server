@@ -126,6 +126,16 @@ mod route_mngr {
 
             cb(guard.get_routes_from_path(path));
         }
+        pub fn stream_sessions(&self) -> Option<StreamSessions<S, T>> {
+            let guard = &*self.inner.lock().unwrap();
+
+            if let Some(stream_sessions) = guard.stream_sessions() {
+                Some(stream_sessions.clone())
+            } else {
+                info!("no stream_sessions");
+                None
+            }
+        }
         pub fn get_routes_from_path_and_method_and_request_type(
             &self,
             path: &str,
@@ -310,7 +320,7 @@ mod route_mngr {
             self.app_state.clone()
         }
         pub fn to_stream_handler<
-            F: Fn(FinishedEvent, &T, &S) -> Result<(), ()> + Sync + Send + 'static,
+            F: Fn(FinishedEvent, &mut T, &S) -> Result<(), ()> + Sync + Send + 'static,
         >(
             &self,
             cb: &'static F,
@@ -318,7 +328,7 @@ mod route_mngr {
             #[derive(Clone)]
             pub struct Anon<S: 'static, T: UserSessions<Output = T>>(
                 Arc<
-                    &'static (dyn Fn(FinishedEvent, &T, &S) -> Result<(), ()>
+                    &'static (dyn Fn(FinishedEvent, &mut T, &S) -> Result<(), ()>
                                   + Sync
                                   + Send
                                   + 'static),
@@ -329,7 +339,7 @@ mod route_mngr {
                 fn call(
                     &self,
                     event: FinishedEvent,
-                    user_session: &T,
+                    user_session: &mut T,
                     state: &S,
                 ) -> Result<(), ()> {
                     (*self.0)(event, user_session, state)

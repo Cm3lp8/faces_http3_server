@@ -232,6 +232,10 @@ mod quiche_implementation {
         let mut last_time_spend = Arc::new(Mutex::new(Duration::from_micros(100)));
         let mut socket_time = Duration::from_micros(33);
         let chunking_station = ChunkingStation::new(waker_clone.clone(), last_time_spend.clone());
+
+        if let Some(stream_sessions) = route_manager.stream_sessions() {
+            stream_sessions.set_chunking_station(&chunking_station);
+        }
         let chunk_dispatch_channel = chunking_station.get_chunking_dispatch_channel();
 
         let response_injection_buffer = ResponseInjectionBuffer::new(
@@ -831,6 +835,11 @@ mod quiche_implementation {
                         c.conn.trace_id(),
                         c.conn.stats()
                     );
+                    info!("cleaning user session !! ");
+                    if let Some(stream_sessions) = route_manager.stream_sessions() {
+                        stream_sessions
+                            .clean_closed_connexions(c.conn.source_id().to_vec().as_slice());
+                    }
                 }
                 !c.conn.is_closed()
             });

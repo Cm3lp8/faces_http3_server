@@ -482,6 +482,16 @@ mod request_hndlr {
                 } => {
                     *sender = Some(sndr);
                 }
+                crate::request_response::BodyType::StreamData {
+                    stream_id,
+                    scid,
+                    conn_id,
+                    data,
+                    sender,
+                    conn_stats,
+                } => {
+                    *sender = Some(sndr);
+                }
                 crate::request_response::BodyType::FilePath {
                     stream_id,
                     scid,
@@ -747,7 +757,6 @@ mod route_handle_implementation {
         event_type: EventType,
         header_priority: HeaderPriority,
     ) {
-        info!("enter response_preparation [{}]", stream_id);
         let chunk_dispatch_channel = chunking_station.get_chunking_dispatch_channel();
         let mut route_event: Option<RouteEvent> = None;
         if let Ok(rt_event) = route_handler
@@ -785,11 +794,13 @@ mod route_handle_implementation {
                         info!("has stream ! ");
                         match route_event {
                             RouteEvent::OnFinished(event) => {
-                                stream.stream_handler_callback().call(
-                                    event,
-                                    stream.registered_sessions(),
-                                    app_state,
-                                );
+                                let callback = stream.stream_handler_callback().clone();
+                                let user_session = stream.registered_sessions();
+                                if let Ok(res) = callback.call(event, user_session, app_state) {
+                                    //
+                                } else {
+                                    // send error + close mecanism
+                                }
                             }
                             _ => {}
                         };

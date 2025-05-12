@@ -244,6 +244,13 @@ mod request_event {
         pub fn bytes_written(&self) -> usize {
             self.bytes_written
         }
+
+        pub fn scid(&self) -> &[u8] {
+            &self.scid
+        }
+        pub fn stream_id(&self) -> u64 {
+            self.stream_id
+        }
         pub fn get_file_path(&self) -> Option<&PathBuf> {
             self.file_path.as_ref()
         }

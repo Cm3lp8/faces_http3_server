@@ -276,6 +276,25 @@ mod response_queue {
                         self.station_channel.0.send(c_b);
                     };
                 }
+                BodyType::StreamData {
+                    stream_id,
+                    scid,
+                    conn_id,
+                    data,
+                    sender,
+                    conn_stats,
+                } => {
+                    if let Ok(c_b) = ChunkableBody::new_data(
+                        sender.expect("No sender attached"),
+                        stream_id,
+                        &scid,
+                        conn_id,
+                        data,
+                        conn_stats,
+                    ) {
+                        self.station_channel.0.send(c_b);
+                    };
+                }
                 BodyType::FilePath {
                     stream_id,
                     scid,
@@ -477,6 +496,7 @@ mod response_queue {
             conn_stats: ConnStats,
         ) {
             let body_option = self.attached_body.take();
+
             if let Some(mut body) = body_option {
                 body.attach_conn_stats(conn_stats);
                 chunking_station.send_response(body);
@@ -581,6 +601,14 @@ mod request_reponse_builder {
             sender: Option<ChunkSender>,
             conn_stats: Option<ConnStats>,
         },
+        StreamData {
+            stream_id: u64,
+            scid: Vec<u8>,
+            conn_id: String,
+            data: Vec<u8>,
+            sender: Option<ChunkSender>,
+            conn_stats: Option<ConnStats>,
+        },
         FilePath {
             stream_id: u64,
             scid: Vec<u8>,
@@ -628,6 +656,14 @@ mod request_reponse_builder {
                     sender,
                     conn_stats,
                 } => *conn_stats = Some(conn_statis),
+                Self::StreamData {
+                    stream_id,
+                    scid,
+                    conn_id,
+                    data,
+                    sender,
+                    conn_stats,
+                } => *conn_stats = Some(conn_statis),
                 Self::FilePath {
                     stream_id,
                     scid,
@@ -644,6 +680,14 @@ mod request_reponse_builder {
         pub fn bytes_len(&self) -> usize {
             match self {
                 Self::Data {
+                    stream_id,
+                    scid,
+                    conn_id,
+                    data,
+                    sender,
+                    conn_stats,
+                } => data.len(),
+                Self::StreamData {
                     stream_id,
                     scid,
                     conn_id,

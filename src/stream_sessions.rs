@@ -8,9 +8,12 @@ mod stream_sessions {
         sync::{Arc, Mutex},
     };
 
+    use crate::request_response::ChunkingStation;
+
     use super::{
-        stream_types::Stream, user_sessions_trait::UserSessions, StreamBuilder, StreamCreation,
-        StreamManagement,
+        stream_types::{stream_cleaning, Stream},
+        user_sessions_trait::UserSessions,
+        StreamBuilder, StreamCreation, StreamManagement,
     };
 
     type StreamPath = String;
@@ -42,6 +45,18 @@ mod stream_sessions {
             let guard = &mut *self.inner.lock().unwrap();
             cb(guard);
         }
+        /// Set the ChunkingStation object to send stream data to the connection.
+        pub fn set_chunking_station(&self, chunking_station: &ChunkingStation) {
+            let guard = &mut *self.inner.lock().unwrap();
+
+            guard.chunking_station = Some(chunking_station.clone());
+        }
+
+        pub fn clean_closed_connexions(&self, scid: &[u8]) {
+            let guard = &mut *self.inner.lock().unwrap();
+
+            stream_cleaning(&mut guard.sessions, scid);
+        }
     }
 
     impl<S: Send + Sync + 'static, T: UserSessions<Output = T>> StreamManagement<S, T>
@@ -50,11 +65,11 @@ mod stream_sessions {
         fn get_stream_from_path(
             &self,
             path: &str,
-            cb: impl FnOnce(&Stream<S, T>, &S),
+            cb: impl FnOnce(&mut Stream<S, T>, &S),
         ) -> Result<(), ()> {
-            let guard = &*self.inner.lock().unwrap();
+            let guard = &mut *self.inner.lock().unwrap();
 
-            if let Some(stream) = guard.sessions.get(path) {
+            if let Some(stream) = guard.sessions.get_mut(path) {
                 cb(stream, &guard.app_state);
                 Ok(())
             } else {
@@ -66,6 +81,7 @@ mod stream_sessions {
 
     struct StreamSessionsInner<S: Send + Sync + 'static, T: UserSessions> {
         sessions: HashMap<StreamPath, Stream<S, T>>,
+        chunking_station: Option<ChunkingStation>,
         app_state: S,
     }
 
@@ -73,6 +89,7 @@ mod stream_sessions {
         fn new(app_state: S) -> Self {
             Self {
                 sessions: HashMap::new(),
+                chunking_station: None,
                 app_state,
             }
         }
@@ -120,14 +137,15 @@ mod stream_sessions_traits {
     }
 
     pub trait StreamHandle<S: Send + Sync + 'static, T: UserSessions<Output = T>> {
-        fn call(&self, event: FinishedEvent, user_session: &T, app_state: &S) -> Result<(), ()>;
+        fn call(&self, event: FinishedEvent, user_session: &mut T, app_state: &S)
+            -> Result<(), ()>;
     }
 
     pub trait StreamManagement<S: Send + Sync + 'static, T: UserSessions<Output = T>> {
         fn get_stream_from_path(
             &self,
             path: &str,
-            cb: impl FnOnce(&Stream<S, T>, &S),
+            cb: impl FnOnce(&mut Stream<S, T>, &S),
         ) -> Result<(), ()>;
     }
 
@@ -270,8 +288,20 @@ mod stream_types {
         ) -> &Arc<dyn StreamHandle<S, T> + Send + Sync + 'static> {
             &self.stream_handler
         }
-        pub fn registered_sessions(&self) -> &T {
-            &self.registered_sessions
+        pub fn registered_sessions(&mut self) -> &mut T {
+            &mut self.registered_sessions
+        }
+    }
+
+    pub fn stream_cleaning<S: Send + Sync + 'static, T: UserSessions>(
+        map: &mut HashMap<String, Stream<S, T>>,
+        scid: &[u8],
+    ) {
+        for (path, stream) in map.iter_mut() {
+            let user_id = stream
+                .registered_sessions
+                .remove_sessions_by_connection(scid);
+            info!("CLEANED [{:?}] connection !", user_id);
         }
     }
 }
@@ -281,9 +311,10 @@ mod user_sessions_trait {
 
     pub trait UserSessions: Send + Sync + 'static {
         type Output;
-        type Key;
         fn new() -> Self::Output;
         fn user_sessions(&self) -> &Self::Output;
-        fn broadcast_to_streams(&self, keys: &[Self::Key]) -> Vec<impl ToStreamIdent>;
+        fn broadcast_to_streams(&self, keys: &[usize]) -> Vec<impl ToStreamIdent>;
+        fn register_sessions(&mut self, user_id: usize, conn_ids: (Vec<u8>, u64));
+        fn remove_sessions_by_connection(&mut self, conn_id: &[u8]) -> Vec<usize>;
     }
 }

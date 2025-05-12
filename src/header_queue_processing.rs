@@ -307,8 +307,6 @@ mod workers {
                     continue;
                 }
 
-                info!("headers [{:?}]", path);
-
                 if let Some(stream_sessions) = &stream_sessions {
                     if let Ok(_) =
                         stream_sessions.get_stream_from_path(path.as_str(), |stream, _| {
