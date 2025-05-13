@@ -351,7 +351,7 @@ mod route_mngr {
                     user_session: &mut T,
                     app_state: &Self::State,
                 ) -> Result<(), ()> {
-                    self.call(event, user_session, app_state)
+                    (*self.0)(event, user_session, app_state)
                 }
             }
             /*

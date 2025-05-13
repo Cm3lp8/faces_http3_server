@@ -18,11 +18,13 @@ pub use server_config::{
 };
 
 use stream_sessions::StreamCreation;
-pub use stream_sessions::ToStreamIdent;
 
+pub use stream_sessions::StreamBridge;
+pub use stream_sessions::StreamBridgeOps;
 pub use stream_sessions::StreamHandle;
 pub use stream_sessions::StreamSessions;
 pub use stream_sessions::UserSessions;
+pub use stream_sessions::{StreamIdent, ToStreamIdent};
 
 use server_init::quiche_http3_server::{BodyReqQueue, QueueTrackableItem};
 mod event_listener;
@@ -58,7 +60,9 @@ pub mod prelude {
         RouteManagerBuilder, ServerConfig,
     };
     pub use crate::server_init::Http3Server;
+    pub use crate::StreamBridge;
     pub use crate::StreamHandle;
+    pub use crate::StreamIdent;
     pub use crate::StreamSessions;
     pub use crate::ToStreamIdent;
     pub use crate::UserSessions;

@@ -1,5 +1,6 @@
 #![allow(warnings)]
 use std::collections::HashMap;
+use std::fmt::Debug;
 use std::hash::Hash;
 use std::io::{BufRead, BufReader, Cursor};
 use std::ops::Add;
@@ -41,21 +42,19 @@ fn main() {
                 register: Arc::new(Mutex::new(HashMap::new())),
             }
         }
-        fn user_sessions(&self) -> &Self::Output {
-            self
-        }
-
-        fn broadcast_to_streams(&self, keys: &[usize], data: Vec<u8>) -> Vec<impl ToStreamIdent> {
-            let mut dst: Vec<StreamIdent> = vec![];
-
-            let guard = &*self.register.lock().unwrap();
-            for key in keys {
-                if let Some(stream_ident) = guard.get(&key) {
-                    dst.push(stream_ident.to_owned())
-                }
-            }
+        fn get_connection_ids_on_user_ids(&self, keys: &[usize]) -> Vec<impl ToStreamIdent> {
+            let dst: Vec<(usize, Vec<u8>, u64)> = vec![];
 
             dst
+        }
+        fn get_all_connections(&self) -> Vec<impl ToStreamIdent + Debug> {
+            let dst: Vec<(usize, Vec<u8>, u64)> = vec![];
+
+            dst
+        }
+
+        fn user_sessions(&self) -> &Self::Output {
+            self
         }
 
         fn register_sessions(&mut self, user_id: usize, conn_ids: (Scid, StreamId)) {}

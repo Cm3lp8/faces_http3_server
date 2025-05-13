@@ -1,6 +1,6 @@
 pub use stream_sessions::StreamSessions;
 pub use stream_sessions_traits::*;
-pub use stream_types::{StreamBuilder, StreamType};
+pub use stream_types::{StreamBuilder, StreamIdent, StreamType};
 pub use user_sessions_trait::UserSessions;
 mod stream_sessions {
     use std::{
@@ -8,12 +8,12 @@ mod stream_sessions {
         sync::{Arc, Mutex},
     };
 
-    use crate::request_response::ChunkingStation;
+    use crate::{request_response::ChunkingStation, StreamBridgeOps, StreamIdent};
 
     use super::{
         stream_types::{stream_cleaning, Stream},
         user_sessions_trait::UserSessions,
-        StreamBuilder, StreamCreation, StreamManagement,
+        StreamBridge, StreamBuilder, StreamCreation, StreamManagement, ToStreamIdent,
     };
 
     type StreamPath = String;
@@ -23,9 +23,8 @@ mod stream_sessions {
     /// StreamSessions registers sesssions routes opened via the router
     /// and keeps track of the users ids (quic dcid and stream id (u64))
     ///
-    /// # Type annotations
+    /// # Type annotation
     ///
-    /// S : The application state with Send + Sync + 'static
     /// T: The user session type, that has to implement UserSessions<Output = T> interface
     pub struct StreamSessions<T: UserSessions<Output = T>> {
         inner: Arc<Mutex<StreamSessionsInner<T>>>,
@@ -80,9 +79,47 @@ mod stream_sessions {
         }
     }
 
-    struct StreamSessionsInner<T: UserSessions> {
+    impl<T: UserSessions<Output = T>> StreamBridge<T> for StreamSessions<T> {
+        fn user_session(&self, cb: impl FnOnce(&StreamSessionsInner<T>)) {
+            let guard = &*self.inner.lock().unwrap();
+
+            cb(guard)
+        }
+    }
+    pub struct StreamSessionsInner<T: UserSessions> {
         sessions: HashMap<StreamPath, Stream<T>>,
         chunking_station: Option<ChunkingStation>,
+    }
+
+    impl<T: UserSessions<Output = T>> StreamBridgeOps<T> for StreamSessionsInner<T> {
+        fn get_connection_ids_on_stream_path_by_user_id(
+            &self,
+            stream_path: &str,
+            peer_id: usize,
+        ) -> Result<crate::StreamIdent, ()> {
+            if let Some(stream) = self.sessions.get(stream_path) {
+                let mut stream_ident: Vec<StreamIdent> = stream
+                    .registered_sessions()
+                    .get_connection_ids_on_user_ids(&[peer_id])
+                    .into_iter()
+                    .filter_map(|it| {
+                        if let Ok(s) = it.to_stream_ident() {
+                            Some(s)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+
+                if !stream_ident.is_empty() && stream_ident[0].user_id == peer_id {
+                    Ok(stream_ident.remove(0))
+                } else {
+                    Err(())
+                }
+            } else {
+                Err(())
+            }
+        }
     }
 
     impl<T: UserSessions> StreamSessionsInner<T> {
@@ -123,7 +160,21 @@ mod stream_sessions_traits {
 
     use crate::{FinishedEvent, UserSessions};
 
-    use super::stream_types::{Stream, StreamBuilder, StreamIdent, StreamType};
+    use super::{
+        stream_sessions::StreamSessionsInner,
+        stream_types::{Stream, StreamBuilder, StreamIdent, StreamType},
+    };
+
+    pub trait StreamBridge<T: UserSessions<Output = T>> {
+        fn user_session(&self, cb: impl FnOnce(&StreamSessionsInner<T>));
+    }
+    pub trait StreamBridgeOps<T: UserSessions<Output = T>> {
+        fn get_connection_ids_on_stream_path_by_user_id(
+            &self,
+            stream_path: &str,
+            peer_id: usize,
+        ) -> Result<StreamIdent, ()>;
+    }
 
     pub trait StreamCreation<T: UserSessions<Output = T>> {
         fn create_stream(
@@ -154,6 +205,7 @@ mod stream_sessions_traits {
             user_session: &mut T,
             app_state: &dyn Any,
         ) -> Result<(), ()> {
+            info!("ici Callback Stream handle for C");
             match app_state.downcast_ref::<C::State>() {
                 Some(state) => self.callback(event, user_session, &state),
                 None => Err(()),
@@ -189,18 +241,18 @@ mod stream_sessions_traits {
 
         use super::ToStreamIdent;
 
-        impl ToStreamIdent for (Vec<u8>, u64) {
+        impl ToStreamIdent for (usize, Vec<u8>, u64) {
             fn to_stream_ident(
                 self,
             ) -> Result<crate::stream_sessions::stream_types::StreamIdent, ()> {
-                Ok(StreamIdent::new(self.0, self.1))
+                Ok(StreamIdent::new(self.0, self.1, self.2))
             }
         }
-        impl ToStreamIdent for (&[u8], u64) {
+        impl ToStreamIdent for (usize, &[u8], u64) {
             fn to_stream_ident(
                 self,
             ) -> Result<crate::stream_sessions::stream_types::StreamIdent, ()> {
-                Ok(StreamIdent::new(self.0.to_vec(), self.1))
+                Ok(StreamIdent::new(self.0, self.1.to_vec(), self.2))
             }
         }
     }
@@ -214,12 +266,17 @@ mod stream_types {
     use super::{user_sessions_trait::UserSessions, StreamHandle};
 
     pub struct StreamIdent {
-        dcid: Vec<u8>, //
-        stream_id: u64,
+        pub user_id: usize,
+        pub dcid: Vec<u8>, //
+        pub stream_id: u64,
     }
     impl StreamIdent {
-        pub fn new(dcid: Vec<u8>, stream_id: u64) -> Self {
-            Self { dcid, stream_id }
+        pub fn new(user_id: usize, dcid: Vec<u8>, stream_id: u64) -> Self {
+            Self {
+                user_id,
+                dcid,
+                stream_id,
+            }
         }
     }
 
@@ -317,8 +374,11 @@ mod stream_types {
         pub fn stream_handler_callback(&self) -> &Arc<dyn StreamHandle<T> + Send + Sync + 'static> {
             &self.stream_handler
         }
-        pub fn registered_sessions(&mut self) -> &mut T {
+        pub fn registered_sessions_mut(&mut self) -> &mut T {
             &mut self.registered_sessions
+        }
+        pub fn registered_sessions(&self) -> &T {
+            &self.registered_sessions
         }
     }
 
@@ -333,13 +393,16 @@ mod stream_types {
 }
 
 mod user_sessions_trait {
+    use std::fmt::Debug;
+
     use super::ToStreamIdent;
 
     pub trait UserSessions: Send + Sync + 'static {
         type Output;
         fn new() -> Self::Output;
         fn user_sessions(&self) -> &Self::Output;
-        fn broadcast_to_streams(&self, keys: &[usize], data: Vec<u8>) -> Vec<impl ToStreamIdent>;
+        fn get_connection_ids_on_user_ids(&self, keys: &[usize]) -> Vec<impl ToStreamIdent>;
+        fn get_all_connections(&self) -> Vec<impl ToStreamIdent + Debug>;
         fn register_sessions(&mut self, user_id: usize, conn_ids: (Vec<u8>, u64));
         fn remove_sessions_by_connection(&mut self, conn_id: &[u8]) -> Vec<usize>;
     }
