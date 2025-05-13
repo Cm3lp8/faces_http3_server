@@ -45,7 +45,7 @@ fn main() {
             self
         }
 
-        fn broadcast_to_streams(&self, keys: &[usize]) -> Vec<impl ToStreamIdent> {
+        fn broadcast_to_streams(&self, keys: &[usize], data: Vec<u8>) -> Vec<impl ToStreamIdent> {
             let mut dst: Vec<StreamIdent> = vec![];
 
             let guard = &*self.register.lock().unwrap();

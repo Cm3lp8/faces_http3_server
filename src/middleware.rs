@@ -1,8 +1,8 @@
 pub use middleware_state::{MiddleWareFlow, MiddleWareResult};
-pub use middleware_trait::MiddleWare;
+pub use middleware_trait::{MiddleWare, MiddleWareErased};
 pub use middleware_types::HeadersColl;
 mod middleware_trait {
-    use std::sync::Arc;
+    use std::{any::Any, sync::Arc};
 
     use quiche::h3;
 
@@ -11,8 +11,30 @@ mod middleware_trait {
         middleware_types::HeadersColl,
     };
 
-    pub trait MiddleWare<S> {
-        fn callback(&self) -> Arc<&(dyn Fn(Vec<h3::Header>, &S) -> MiddleWareFlow + Send + Sync)>;
+    pub trait MiddleWare {
+        fn callback(&self, headers: Vec<h3::Header>, state: &dyn Any)
+            -> Result<MiddleWareFlow, ()>;
+    }
+
+    pub trait MiddleWareErased {
+        type State: Send + Sync + 'static + Any;
+        fn call_inner(&self, headers: Vec<h3::Header>, state: &Self::State) -> MiddleWareFlow;
+    }
+
+    impl<C> MiddleWare for C
+    where
+        C: MiddleWareErased,
+    {
+        fn callback(
+            &self,
+            headers: Vec<h3::Header>,
+            state: &dyn Any,
+        ) -> Result<MiddleWareFlow, ()> {
+            match state.downcast_ref::<C::State>() {
+                Some(state) => Ok(self.call_inner(headers, state)),
+                None => Err(()),
+            }
+        }
     }
 }
 

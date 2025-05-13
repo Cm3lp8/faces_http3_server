@@ -23,25 +23,29 @@ mod stream_sessions {
     /// StreamSessions registers sesssions routes opened via the router
     /// and keeps track of the users ids (quic dcid and stream id (u64))
     ///
-    pub struct StreamSessions<S: Send + Sync + 'static, T: UserSessions> {
-        inner: Arc<Mutex<StreamSessionsInner<S, T>>>,
+    /// # Type annotations
+    ///
+    /// S : The application state with Send + Sync + 'static
+    /// T: The user session type, that has to implement UserSessions<Output = T> interface
+    pub struct StreamSessions<T: UserSessions<Output = T>> {
+        inner: Arc<Mutex<StreamSessionsInner<T>>>,
     }
 
-    impl<S: Send + Sync + 'static, T: UserSessions<Output = T>> Clone for StreamSessions<S, T> {
+    impl<T: UserSessions<Output = T>> Clone for StreamSessions<T> {
         fn clone(&self) -> Self {
             Self {
                 inner: self.inner.clone(),
             }
         }
     }
-    impl<S: Send + Sync + 'static, T: UserSessions> StreamSessions<S, T> {
-        pub fn new(app_state: S) -> Self {
+    impl<T: UserSessions<Output = T>> StreamSessions<T> {
+        pub fn new() -> Self {
             Self {
-                inner: Arc::new(Mutex::new(StreamSessionsInner::new(app_state))),
+                inner: Arc::new(Mutex::new(StreamSessionsInner::new())),
             }
         }
 
-        fn mut_access(&self, cb: impl FnOnce(&mut StreamSessionsInner<S, T>)) {
+        fn mut_access(&self, cb: impl FnOnce(&mut StreamSessionsInner<T>)) {
             let guard = &mut *self.inner.lock().unwrap();
             cb(guard);
         }
@@ -51,59 +55,52 @@ mod stream_sessions {
 
             guard.chunking_station = Some(chunking_station.clone());
         }
-
-        pub fn clean_closed_connexions(&self, scid: &[u8]) {
-            let guard = &mut *self.inner.lock().unwrap();
-
-            stream_cleaning(&mut guard.sessions, scid);
-        }
     }
 
-    impl<S: Send + Sync + 'static, T: UserSessions<Output = T>> StreamManagement<S, T>
-        for StreamSessions<S, T>
-    {
+    impl<T: UserSessions<Output = T>> StreamManagement<T> for StreamSessions<T> {
         fn get_stream_from_path(
             &self,
             path: &str,
-            cb: impl FnOnce(&mut Stream<S, T>, &S),
+            cb: impl FnOnce(&mut Stream<T>),
         ) -> Result<(), ()> {
             let guard = &mut *self.inner.lock().unwrap();
 
             if let Some(stream) = guard.sessions.get_mut(path) {
-                cb(stream, &guard.app_state);
+                cb(stream);
                 Ok(())
             } else {
                 warn!("no path registered for [{:?}]", path);
                 Err(())
             }
         }
+        fn clean_closed_connexions(&self, scid: &[u8]) {
+            let guard = &mut *self.inner.lock().unwrap();
+
+            stream_cleaning(&mut guard.sessions, scid);
+        }
     }
 
-    struct StreamSessionsInner<S: Send + Sync + 'static, T: UserSessions> {
-        sessions: HashMap<StreamPath, Stream<S, T>>,
+    struct StreamSessionsInner<T: UserSessions> {
+        sessions: HashMap<StreamPath, Stream<T>>,
         chunking_station: Option<ChunkingStation>,
-        app_state: S,
     }
 
-    impl<S: Send + Sync + 'static, T: UserSessions> StreamSessionsInner<S, T> {
-        fn new(app_state: S) -> Self {
+    impl<T: UserSessions> StreamSessionsInner<T> {
+        fn new() -> Self {
             Self {
                 sessions: HashMap::new(),
                 chunking_station: None,
-                app_state,
             }
         }
     }
 
-    impl<S: Send + Sync + 'static, T: UserSessions<Output = T>> StreamCreation<S, T>
-        for StreamSessions<S, T>
-    {
+    impl<T: UserSessions<Output = T>> StreamCreation<T> for StreamSessions<T> {
         fn create_stream(
             &self,
             path: &str,
             stream_type: super::stream_types::StreamType,
             stream_config: (),
-            stream_builder_cb: impl FnOnce(&mut StreamBuilder<S, T>),
+            stream_builder_cb: impl FnOnce(&mut StreamBuilder<T>),
         ) {
             let mut stream_builder = StreamBuilder::new();
 
@@ -122,31 +119,65 @@ mod stream_sessions {
     }
 }
 mod stream_sessions_traits {
+    use std::any::Any;
+
     use crate::{FinishedEvent, UserSessions};
 
     use super::stream_types::{Stream, StreamBuilder, StreamIdent, StreamType};
 
-    pub trait StreamCreation<S: Send + Sync + 'static, T: UserSessions<Output = T>> {
+    pub trait StreamCreation<T: UserSessions<Output = T>> {
         fn create_stream(
             &self,
             path: &str,
             stream_stype: StreamType,
             stream_config: (),
-            stream_builder_cb: impl FnOnce(&mut StreamBuilder<S, T>),
+            stream_builder_cb: impl FnOnce(&mut StreamBuilder<T>),
         );
     }
 
-    pub trait StreamHandle<S: Send + Sync + 'static, T: UserSessions<Output = T>> {
-        fn call(&self, event: FinishedEvent, user_session: &mut T, app_state: &S)
-            -> Result<(), ()>;
+    pub trait StreamHandle<T: UserSessions<Output = T>> {
+        fn call(
+            &self,
+            event: FinishedEvent,
+            user_session: &mut T,
+            app_state: &dyn Any,
+        ) -> Result<(), ()>;
+    }
+    impl<T, C> StreamHandle<T> for C
+    where
+        T: UserSessions<Output = T>,
+        C: StreamHandleCallback<T>,
+    {
+        fn call(
+            &self,
+            event: FinishedEvent,
+            user_session: &mut T,
+            app_state: &dyn Any,
+        ) -> Result<(), ()> {
+            match app_state.downcast_ref::<C::State>() {
+                Some(state) => self.callback(event, user_session, &state),
+                None => Err(()),
+            }
+        }
     }
 
-    pub trait StreamManagement<S: Send + Sync + 'static, T: UserSessions<Output = T>> {
+    pub trait StreamHandleCallback<T: UserSessions<Output = T>>: StreamHandle<T> {
+        type State: Send + Sync + 'static + Any;
+        fn callback(
+            &self,
+            event: FinishedEvent,
+            user_session: &mut T,
+            app_state: &Self::State,
+        ) -> Result<(), ()>;
+    }
+
+    pub trait StreamManagement<T: UserSessions<Output = T>> {
         fn get_stream_from_path(
             &self,
             path: &str,
-            cb: impl FnOnce(&mut Stream<S, T>, &S),
+            cb: impl FnOnce(&mut Stream<T>),
         ) -> Result<(), ()>;
+        fn clean_closed_connexions(&self, scid: &[u8]);
     }
 
     pub trait ToStreamIdent {
@@ -197,21 +228,21 @@ mod stream_types {
         Up,
     }
 
-    pub struct Stream<S: Send + Sync + 'static, T: UserSessions> {
+    pub struct Stream<T: UserSessions> {
         stream_path: String,
-        stream_handler: Arc<dyn StreamHandle<S, T> + Send + Sync + 'static>,
-        middlewares: Vec<Arc<dyn MiddleWare<S> + Send + Sync + 'static>>,
+        stream_handler: Arc<dyn StreamHandle<T> + Send + Sync + 'static>,
+        middlewares: Vec<Arc<dyn MiddleWare + Send + Sync + 'static>>,
         stream_type: StreamType,
         registered_sessions: T,
     }
 
-    pub struct StreamBuilder<S: Send + Sync + 'static, T: UserSessions<Output = T>> {
+    pub struct StreamBuilder<T: UserSessions<Output = T>> {
         stream_path: Option<String>,
-        stream_handler: Option<Arc<dyn StreamHandle<S, T> + Send + Sync + 'static>>,
-        middlewares: Vec<Arc<dyn MiddleWare<S> + Send + Sync + 'static>>,
+        stream_handler: Option<Arc<dyn StreamHandle<T> + Send + Sync + 'static>>,
+        middlewares: Vec<Arc<dyn MiddleWare + Send + Sync + 'static>>,
         stream_type: Option<StreamType>,
     }
-    impl<S: Send + Sync + 'static, T: UserSessions<Output = T>> StreamBuilder<S, T> {
+    impl<T: UserSessions<Output = T>> StreamBuilder<T> {
         pub fn new() -> Self {
             Self {
                 stream_path: None,
@@ -226,14 +257,14 @@ mod stream_types {
         }
         pub fn middleware(
             &mut self,
-            middleware: &Arc<dyn MiddleWare<S> + Send + Sync + 'static>,
+            middleware: &Arc<dyn MiddleWare + Send + Sync + 'static>,
         ) -> &mut Self {
             self.middlewares.push(middleware.clone());
             self
         }
         fn add_global_middlewares(
             &mut self,
-            entries: Vec<Arc<dyn MiddleWare<S> + Send + Sync + 'static>>,
+            entries: Vec<Arc<dyn MiddleWare + Send + Sync + 'static>>,
         ) -> &mut Self {
             let specific_mdw = std::mem::replace(&mut self.middlewares, entries);
             self.middlewares.extend(specific_mdw);
@@ -241,7 +272,7 @@ mod stream_types {
         }
         pub fn stream_handler(
             &mut self,
-            handler: &Arc<dyn StreamHandle<S, T> + Send + Sync + 'static>,
+            handler: &Arc<dyn StreamHandle<T> + Send + Sync + 'static>,
         ) -> &mut Self {
             self.stream_handler = Some(handler.clone());
             info!(
@@ -254,7 +285,7 @@ mod stream_types {
             self.stream_type = Some(stream_type);
             self
         }
-        pub fn build(mut self) -> Result<Stream<S, T>, ()> {
+        pub fn build(mut self) -> Result<Stream<T>, ()> {
             if self.stream_path.as_ref().is_none()
                 | self.stream_type.as_ref().is_none()
                 | self.stream_handler.is_none()
@@ -279,13 +310,11 @@ mod stream_types {
             })
         }
     }
-    impl<S: Send + Sync + 'static, T: UserSessions<Output = T>> Stream<S, T> {
-        pub fn to_middleware_coll(&self) -> Vec<Arc<dyn MiddleWare<S> + Send + Sync + 'static>> {
+    impl<T: UserSessions<Output = T>> Stream<T> {
+        pub fn to_middleware_coll(&self) -> Vec<Arc<dyn MiddleWare + Send + Sync + 'static>> {
             self.middlewares.clone()
         }
-        pub fn stream_handler_callback(
-            &self,
-        ) -> &Arc<dyn StreamHandle<S, T> + Send + Sync + 'static> {
+        pub fn stream_handler_callback(&self) -> &Arc<dyn StreamHandle<T> + Send + Sync + 'static> {
             &self.stream_handler
         }
         pub fn registered_sessions(&mut self) -> &mut T {
@@ -293,10 +322,7 @@ mod stream_types {
         }
     }
 
-    pub fn stream_cleaning<S: Send + Sync + 'static, T: UserSessions>(
-        map: &mut HashMap<String, Stream<S, T>>,
-        scid: &[u8],
-    ) {
+    pub fn stream_cleaning<T: UserSessions>(map: &mut HashMap<String, Stream<T>>, scid: &[u8]) {
         for (path, stream) in map.iter_mut() {
             let user_id = stream
                 .registered_sessions
@@ -313,7 +339,7 @@ mod user_sessions_trait {
         type Output;
         fn new() -> Self::Output;
         fn user_sessions(&self) -> &Self::Output;
-        fn broadcast_to_streams(&self, keys: &[usize]) -> Vec<impl ToStreamIdent>;
+        fn broadcast_to_streams(&self, keys: &[usize], data: Vec<u8>) -> Vec<impl ToStreamIdent>;
         fn register_sessions(&mut self, user_id: usize, conn_ids: (Vec<u8>, u64));
         fn remove_sessions_by_connection(&mut self, conn_id: &[u8]) -> Vec<usize>;
     }

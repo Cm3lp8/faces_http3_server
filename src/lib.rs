@@ -21,6 +21,7 @@ use stream_sessions::StreamCreation;
 pub use stream_sessions::ToStreamIdent;
 
 pub use stream_sessions::StreamHandle;
+pub use stream_sessions::StreamSessions;
 pub use stream_sessions::UserSessions;
 
 use server_init::quiche_http3_server::{BodyReqQueue, QueueTrackableItem};
@@ -58,6 +59,7 @@ pub mod prelude {
     };
     pub use crate::server_init::Http3Server;
     pub use crate::StreamHandle;
+    pub use crate::StreamSessions;
     pub use crate::ToStreamIdent;
     pub use crate::UserSessions;
     pub use quiche::h3;

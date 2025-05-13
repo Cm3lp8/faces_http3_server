@@ -80,7 +80,10 @@ mod route_mngr {
         route_events::RouteEvent,
         route_handler::{self, ReqArgs, RequestsTable},
         server_config,
-        stream_sessions::{StreamBuilder, StreamHandle, StreamSessions, StreamType, UserSessions},
+        stream_sessions::{
+            self, StreamBuilder, StreamHandle, StreamHandleCallback, StreamSessions, StreamType,
+            UserSessions,
+        },
         ErrorResponse, FinishedEvent, HeadersColl, MiddleWareFlow, MiddleWareResult, Response,
         RouteEventListener, RouteResponse, ServerConfig,
     };
@@ -111,12 +114,13 @@ mod route_mngr {
         pub fn new_with_app_state(app_state: S) -> RouteManagerBuilder<S, T> {
             RouteManagerBuilder {
                 routes_formats: HashMap::new(),
-                stream_sessions: StreamSessions::<S, T>::new(app_state.clone()),
+                stream_sessions: Some(StreamSessions::<T>::new()),
                 error_formats: HashMap::new(),
                 app_state: Some(app_state),
                 global_middlewares: vec![],
             }
         }
+
         pub fn get_routes_from_path(
             &self,
             path: &str,
@@ -126,7 +130,7 @@ mod route_mngr {
 
             cb(guard.get_routes_from_path(path));
         }
-        pub fn stream_sessions(&self) -> Option<StreamSessions<S, T>> {
+        pub fn stream_sessions(&self) -> Option<StreamSessions<T>> {
             let guard = &*self.inner.lock().unwrap();
 
             if let Some(stream_sessions) = guard.stream_sessions() {
@@ -187,7 +191,7 @@ mod route_mngr {
 
     pub struct RouteManagerInner<S: Send + Sync + 'static, T: UserSessions<Output = T>> {
         routes_formats: HashMap<ReqPath, Vec<Arc<RouteForm<S>>>>,
-        stream_sessions: StreamSessions<S, T>,
+        stream_sessions: StreamSessions<T>,
         error_formats: HashMap<ErrorType, ErrorForm>,
         app_state: S,
         route_event_dispatcher: RouteEventDispatcher<S>,
@@ -220,7 +224,7 @@ mod route_mngr {
             self.routes_states()
                 .is_entry_partial_reponse_set(stream_id, conn_id)
         }
-        pub fn stream_sessions(&self) -> Option<&StreamSessions<S, T>> {
+        pub fn stream_sessions(&self) -> Option<&StreamSessions<T>> {
             Some(&self.stream_sessions)
         }
 
@@ -292,20 +296,21 @@ mod route_mngr {
 
     pub struct RouteManagerBuilder<S: Send + Sync + 'static, T: UserSessions<Output = T>> {
         routes_formats: HashMap<ReqPath, Vec<Arc<RouteForm<S>>>>,
-        stream_sessions: StreamSessions<S, T>,
+        stream_sessions: Option<StreamSessions<T>>,
         error_formats: HashMap<ErrorType, ErrorForm>,
         app_state: Option<S>,
-        global_middlewares: Vec<Arc<dyn MiddleWare<S> + Send + Sync + 'static>>,
+        global_middlewares: Vec<Arc<dyn MiddleWare + Send + Sync + 'static>>,
     }
     impl<S: Send + Sync + 'static + Clone, T: UserSessions<Output = T>> RouteManagerBuilder<S, T> {
+        pub fn with_stream_sessions(mut self, stream_sessions: &StreamSessions<T>) -> Self {
+            self.stream_sessions = Some(stream_sessions.clone());
+            self
+        }
         pub fn build(&mut self) -> RouteManager<S, T> {
             let handle_dispatcher = self.build_route_event_dispatcher();
             let request_manager_inner = RouteManagerInner {
                 routes_formats: std::mem::replace(&mut self.routes_formats, HashMap::new()),
-                stream_sessions: std::mem::replace(
-                    &mut self.stream_sessions,
-                    StreamSessions::<S, T>::new(self.app_state.clone().take().unwrap()),
-                ),
+                stream_sessions: self.stream_sessions.take().unwrap(),
                 error_formats: std::mem::replace(&mut self.error_formats, HashMap::new()),
                 app_state: self.app_state.take().unwrap(),
                 route_states: RequestsTable::new(),
@@ -324,7 +329,7 @@ mod route_mngr {
         >(
             &self,
             cb: &'static F,
-        ) -> Arc<dyn StreamHandle<S, T> + Send + Sync + 'static> {
+        ) -> Arc<dyn StreamHandle<T> + Send + Sync + 'static> {
             #[derive(Clone)]
             pub struct Anon<S: 'static, T: UserSessions<Output = T>>(
                 Arc<
@@ -335,19 +340,36 @@ mod route_mngr {
                 >,
             );
 
-            impl<S: 'static + Send + Sync, T: UserSessions<Output = T>> StreamHandle<S, T> for Anon<S, T> {
+            impl<S: Send + Sync + 'static + Any, T: UserSessions<Output = T>>
+                StreamHandleCallback<T> for Anon<S, T>
+            {
+                type State = S;
+
+                fn callback(
+                    &self,
+                    event: FinishedEvent,
+                    user_session: &mut T,
+                    app_state: &Self::State,
+                ) -> Result<(), ()> {
+                    self.call(event, user_session, app_state)
+                }
+            }
+            /*
+            impl<S: 'static + Send + Sync, T: UserSessions<Output = T>> StreamHandle<T> for Anon<S, T> {
+                type State = S;
                 fn call(
                     &self,
                     event: FinishedEvent,
                     user_session: &mut T,
-                    state: &S,
+                    app_state: &Self::State,
                 ) -> Result<(), ()> {
-                    (*self.0)(event, user_session, state)
+                    (self.0)(event, user_session, app_state)
                 }
             }
 
-            let anon: Arc<dyn StreamHandle<S, T> + Send + Sync + 'static> =
-                Arc::new(Anon(Arc::new(cb))) as Arc<dyn StreamHandle<S, T> + Send + Sync + 'static>;
+            */
+            let anon: Arc<dyn StreamHandle<T> + Send + Sync + 'static> =
+                Arc::new(Anon(Arc::new(cb))) as Arc<dyn StreamHandle<T> + Send + Sync + 'static>;
             anon
         }
         pub fn handler<
@@ -384,7 +406,7 @@ mod route_mngr {
         pub fn middleware<F: Fn(Vec<h3::Header>, &S) -> MiddleWareFlow + Send + Sync + 'static>(
             &self,
             cb: &'static F,
-        ) -> Arc<dyn MiddleWare<S> + Send + Sync + 'static> {
+        ) -> Arc<dyn MiddleWare + Send + Sync + 'static> {
             struct Anon<S: 'static>(
                 Arc<
                     &'static (dyn Fn(Vec<h3::Header>, &S) -> MiddleWareFlow
@@ -394,17 +416,21 @@ mod route_mngr {
                 >,
             );
 
-            impl<S> MiddleWare<S> for Anon<S> {
-                fn callback(
+            use crate::middleware::MiddleWareErased;
+
+            impl<S: Send + Sync + 'static + Any> MiddleWareErased for Anon<S> {
+                type State = S;
+
+                fn call_inner(
                     &self,
-                ) -> Arc<&'static (dyn Fn(Vec<h3::Header>, &S) -> MiddleWareFlow + Send + Sync)>
-                {
-                    //Box::new(|h, s| self.0(h, s))
-                    self.0.clone()
+                    headers: Vec<h3::Header>,
+                    state: &Self::State,
+                ) -> MiddleWareFlow {
+                    (*self.0)(headers, state)
                 }
             }
 
-            let anon: Arc<dyn MiddleWare<S> + Send + Sync + 'static> = Arc::new(Anon(Arc::new(cb)));
+            let anon: Arc<dyn MiddleWare + Send + Sync + 'static> = Arc::new(Anon(Arc::new(cb)));
             anon
         }
         pub fn build_route_event_dispatcher(&self) -> RouteEventDispatcher<S> {
@@ -428,7 +454,7 @@ mod route_mngr {
         ///It will be process before the route specifics middlewares.
         pub fn global_middleware(
             &mut self,
-            entry: Arc<dyn MiddleWare<S> + Send + Sync + 'static>,
+            entry: Arc<dyn MiddleWare + Send + Sync + 'static>,
         ) -> &mut Self {
             self.global_middlewares.push(entry);
             self
@@ -458,16 +484,19 @@ mod route_mngr {
             &mut self,
             path: &'static str,
             route_configuration: (),
-            stream_builder_cb: impl FnOnce(&mut StreamBuilder<S, T>),
+            stream_builder_cb: impl FnOnce(&mut StreamBuilder<T>),
         ) -> &mut Self {
             info!("will create stream");
-            self.stream_sessions.create_stream(
-                path,
-                StreamType::Down,
-                route_configuration,
-                stream_builder_cb,
-            );
-            info!("ok created stream !!");
+
+            if let Some(stream_session) = &mut self.stream_sessions {
+                stream_session.create_stream(
+                    path,
+                    StreamType::Down,
+                    route_configuration,
+                    stream_builder_cb,
+                );
+                info!("ok created stream !!");
+            }
             self
         }
         pub fn route_get(
@@ -630,7 +659,7 @@ mod route_mngr {
         method: H3Method,
         event_subscriber: Option<Arc<dyn RouteEventListener + 'static + Send + Sync>>,
         handler_subscriber: Vec<Arc<dyn RouteHandle<S> + Send + Sync + 'static>>,
-        middlewares: Vec<Arc<dyn MiddleWare<S> + Send + Sync + 'static>>,
+        middlewares: Vec<Arc<dyn MiddleWare + Send + Sync + 'static>>,
         path: &'static str,
         route_configuration: Option<RouteConfig>,
         scheme: &'static str,
@@ -673,12 +702,13 @@ mod route_mngr {
         pub fn path(&self) -> &'static str {
             self.path
         }
-        pub fn to_middleware_coll(&self) -> Vec<Arc<dyn MiddleWare<S> + Send + Sync>> {
-            let mut vec: Vec<Arc<&(dyn Fn(Vec<Header>, &S) -> MiddleWareFlow + Send + Sync)>> =
-                vec![];
+        pub fn to_middleware_coll(&self) -> Vec<Arc<dyn MiddleWare + Send + Sync>> {
+            let mut vec: Vec<Arc<dyn MiddleWare + Send + Sync>> = vec![];
 
-            for mdw in &self.middlewares {
-                vec.push(mdw.callback())
+            let cloned_coll = self.middlewares.clone();
+
+            for mdw in cloned_coll.into_iter() {
+                vec.push(mdw)
             }
             //vec
             self.middlewares.clone()
@@ -776,7 +806,7 @@ mod route_mngr {
         method: Option<H3Method>,
         event_subscriber: Option<Arc<dyn RouteEventListener + 'static + Send + Sync>>,
         handler_subscriber: Vec<Arc<dyn RouteHandle<S> + Send + Sync + 'static>>,
-        middlewares: Vec<Arc<dyn MiddleWare<S> + Sync + Send + 'static>>,
+        middlewares: Vec<Arc<dyn MiddleWare + Sync + Send + 'static>>,
         route_configuration: Option<RouteConfig>,
         path: Option<&'static str>,
         scheme: Option<&'static str>,
@@ -852,14 +882,14 @@ mod route_mngr {
         ///
         pub fn middleware(
             &mut self,
-            middleware: &Arc<dyn MiddleWare<S> + Send + Sync + 'static>,
+            middleware: &Arc<dyn MiddleWare + Send + Sync + 'static>,
         ) -> &mut Self {
             self.middlewares.push(middleware.clone());
             self
         }
         fn add_global_middlewares(
             &mut self,
-            entries: Vec<Arc<dyn MiddleWare<S> + Send + Sync + 'static>>,
+            entries: Vec<Arc<dyn MiddleWare + Send + Sync + 'static>>,
         ) -> &mut Self {
             let specific_mdw = std::mem::replace(&mut self.middlewares, entries);
             self.middlewares.extend(specific_mdw);

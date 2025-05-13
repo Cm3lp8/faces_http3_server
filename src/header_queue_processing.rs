@@ -75,7 +75,7 @@ mod header_reception {
             crossbeam_channel::Receiver<HeaderMessage>,
         ),
         file_writer_channel: FileWriterChannel,
-        workers: Arc<ThreadPool<S, T>>,
+        workers: Arc<ThreadPool<T>>,
         response_processing_pool_injector: ResponsePoolProcessingSender,
     }
 
@@ -256,7 +256,7 @@ mod workers {
     pub fn run_header_processor<S: Send + Sync + 'static + Clone, T: UserSessions<Output = T>>(
         receiver: crossbeam_channel::Receiver<HeaderMessage>,
         route_handler: &RouteHandler<S, T>,
-        header_workers_pool: &Arc<ThreadPool<S, T>>,
+        header_workers_pool: &Arc<ThreadPool<T>>,
         chunking_station: &ChunkingStation,
         mio_waker: &Arc<mio::Waker>,
         response_processing_pool_sender: &ResponsePoolProcessingSender,
@@ -292,7 +292,7 @@ mod workers {
                     .mutex_guard()
                     .get_routes_from_path_and_method(path.as_str(), method)
                 {
-                    let middleware_coll = route_form.to_middleware_coll();
+                    let middleware_coll = (*route_form.clone()).to_middleware_coll();
                     if let Some(middleware_job) = route_handler.send_header_work(
                         path.as_str(),
                         RouteType::Regular,
@@ -308,22 +308,20 @@ mod workers {
                 }
 
                 if let Some(stream_sessions) = &stream_sessions {
-                    if let Ok(_) =
-                        stream_sessions.get_stream_from_path(path.as_str(), |stream, _| {
-                            let middleware_coll = stream.to_middleware_coll();
-                            if let Some(middleware_job) = route_handler.send_header_work(
-                                path.as_str(),
-                                RouteType::Stream,
-                                method,
-                                content_length,
-                                middleware_coll,
-                                header_msg.clone(),
-                                middleware_result_chan.0.clone(),
-                            ) {
-                                header_workers_pool.execute(middleware_job);
-                            }
-                        })
-                    {
+                    if let Ok(_) = stream_sessions.get_stream_from_path(path.as_str(), |stream| {
+                        let middleware_coll = stream.to_middleware_coll();
+                        if let Some(middleware_job) = route_handler.send_header_work(
+                            path.as_str(),
+                            RouteType::Stream,
+                            method,
+                            content_length,
+                            middleware_coll,
+                            header_msg.clone(),
+                            middleware_result_chan.0.clone(),
+                        ) {
+                            header_workers_pool.execute(middleware_job);
+                        }
+                    }) {
                         continue;
                     }
                 }

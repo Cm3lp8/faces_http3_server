@@ -1,5 +1,6 @@
 use crate::conn_statistics::ConnStats;
 use crate::request_response::{BodyRequest, QueuedRequest, ResponseQueue};
+use crate::stream_sessions::StreamManagement;
 
 pub use self::quiche_implementation::{
     send_body, send_header, send_more_header, send_response, send_response_when_finished,
@@ -835,7 +836,6 @@ mod quiche_implementation {
                         c.conn.trace_id(),
                         c.conn.stats()
                     );
-                    info!("cleaning user session !! ");
                     if let Some(stream_sessions) = route_manager.stream_sessions() {
                         stream_sessions
                             .clean_closed_connexions(c.conn.source_id().to_vec().as_slice());

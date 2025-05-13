@@ -78,10 +78,10 @@ mod request_hndlr {
             route_type: RouteType,
             method: H3Method,
             content_length: Option<usize>,
-            middleware_collection: Vec<Arc<dyn MiddleWare<S> + Send + Sync + 'static>>,
+            middleware_collection: Vec<Arc<dyn MiddleWare + Send + Sync + 'static>>,
             msg: HeaderMessage,
             middleware_result_sender: crossbeam_channel::Sender<MiddleWareResult>,
-        ) -> Option<MiddleWareJob<S>> {
+        ) -> Option<MiddleWareJob> {
             // let guard = &*self.inner.lock().unwrap();
 
             let stream_id = msg.stream_id();
@@ -112,7 +112,7 @@ mod request_hndlr {
                 .routes_states()
                 .set_intermediate_headers_send(stream_id, conn_id.to_string());
         }
-        pub fn stream_sessions(&self) -> Option<StreamSessions<S, T>> {
+        pub fn stream_sessions(&self) -> Option<StreamSessions<T>> {
             let guard = &*self.inner.lock().unwrap();
 
             if let Some(stream_sessions) = guard.stream_sessions() {
@@ -521,7 +521,7 @@ mod route_handle_implementation {
         route_events::{self, EventType},
         route_manager::{ErrorType, RouteManagerInner},
         server_init::QClient as Client,
-        stream_sessions::{StreamManagement, UserSessions},
+        stream_sessions::{StreamHandleCallback, StreamManagement, UserSessions},
         ErrorResponse, FinishedEvent, RouteEvent,
     };
 
@@ -786,17 +786,19 @@ mod route_handle_implementation {
             None
         };
 
+        use crate::stream_sessions::StreamHandleCallback;
+
         // If route forme none, maybe path will match in streams table
         if route_form.is_none() {
             if let Some(stream_sessions) = route_handler.stream_sessions() {
                 if let Some(route_event) = route_event {
-                    stream_sessions.get_stream_from_path(path.as_str(), |stream, app_state| {
-                        info!("has stream ! ");
+                    let app_state = route_handler.app_state();
+                    let _ = stream_sessions.get_stream_from_path(path.as_str(), |stream| {
                         match route_event {
                             RouteEvent::OnFinished(event) => {
                                 let callback = stream.stream_handler_callback().clone();
                                 let user_session = stream.registered_sessions();
-                                if let Ok(res) = callback.call(event, user_session, app_state) {
+                                if let Ok(res) = callback.call(event, user_session, &app_state) {
                                     //
                                 } else {
                                     // send error + close mecanism

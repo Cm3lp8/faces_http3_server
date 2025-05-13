@@ -13,7 +13,7 @@ mod thread_pool {
         response_queue_processing::SignalNewRequest,
         server_config,
         stream_sessions::UserSessions,
-        MiddleWareFlow, MiddleWareResult, RouteHandler, ServerConfig,
+        ErrorResponse, MiddleWareFlow, MiddleWareResult, RouteHandler, ServerConfig,
     };
 
     use self::middleware_worker_implementation::{
@@ -22,17 +22,17 @@ mod thread_pool {
 
     use super::{job::MiddleWareJob, RouteType};
 
-    pub struct ThreadPool<S: Send + Sync + 'static + Clone, T: UserSessions<Output = T>> {
+    pub struct ThreadPool<T: UserSessions<Output = T>> {
         workers: Vec<Worker>,
         job_channel: (
-            crossbeam_channel::Sender<MiddleWareJob<S>>,
-            crossbeam_channel::Receiver<MiddleWareJob<S>>,
+            crossbeam_channel::Sender<MiddleWareJob>,
+            crossbeam_channel::Receiver<MiddleWareJob>,
         ),
         user_sessions: PhantomData<T>,
     }
 
-    impl<S: Send + Sync + 'static + Clone, T: UserSessions<Output = T>> ThreadPool<S, T> {
-        pub fn new(
+    impl<T: UserSessions<Output = T>> ThreadPool<T> {
+        pub fn new<S: Send + Sync + 'static + Clone>(
             amount: usize,
             app_state: S,
             route_handler: &RouteHandler<S, T>,
@@ -43,7 +43,7 @@ mod thread_pool {
             waker: &Arc<Waker>,
         ) -> Self {
             let mut workers = Vec::with_capacity(amount);
-            let job_channel = crossbeam_channel::unbounded::<MiddleWareJob<S>>();
+            let job_channel = crossbeam_channel::unbounded::<MiddleWareJob>();
 
             for i in 0..amount {
                 workers.push(Worker::new(
@@ -64,7 +64,7 @@ mod thread_pool {
                 user_sessions: PhantomData::<T>,
             }
         }
-        pub fn execute(&self, middleware_job: MiddleWareJob<S>) {
+        pub fn execute(&self, middleware_job: MiddleWareJob) {
             let _ = self.job_channel.0.send(middleware_job);
         }
     }
@@ -76,7 +76,7 @@ mod thread_pool {
     impl Worker {
         fn new<S: Send + Sync + 'static + Clone, T: UserSessions<Output = T>>(
             id: usize,
-            receiver: crossbeam_channel::Receiver<MiddleWareJob<S>>,
+            receiver: crossbeam_channel::Receiver<MiddleWareJob>,
             app_state: S,
             route_handler: &RouteHandler<S, T>,
             server_config: &Arc<ServerConfig>,
@@ -106,21 +106,41 @@ mod thread_pool {
                         let mut temps_headers: Vec<h3::Header> = headers.clone();
 
                         for mdw in &middleware_job.middleware_collection() {
-                            match (mdw.callback())(temps_headers, &app_state) {
-                                MiddleWareFlow::Continue(headers) => temps_headers = headers,
-                                MiddleWareFlow::Abort(error_response) => {
+                            match (mdw.callback(temps_headers, &app_state)) {
+                                Ok(middleware_res) => {
+                                    match middleware_res {
+                                        MiddleWareFlow::Continue(headers) => {
+                                            temps_headers = headers
+                                        }
+                                        MiddleWareFlow::Abort(error_response) => {
+                                            if let Err(r) =
+                                                middleware_job.send_done(MiddleWareResult::Abort {
+                                                    error_response,
+                                                    stream_id,
+                                                    scid,
+                                                })
+                                            {
+                                                error!("Failed sending middleware result")
+                                            }
+
+                                            continue 'injection;
+                                        } //middleware execution
+                                    }
+                                }
+                                Err(e) => {
                                     if let Err(r) =
                                         middleware_job.send_done(MiddleWareResult::Abort {
-                                            error_response,
+                                            error_response: ErrorResponse::Error415(Some(
+                                                b"failed to call middleware".to_vec(),
+                                            )),
                                             stream_id,
                                             scid,
                                         })
                                     {
                                         error!("Failed sending middleware result")
-                                    }
-
+                                    };
                                     continue 'injection;
-                                } //middleware execution
+                                }
                             }
                         }
 
@@ -331,7 +351,7 @@ mod job {
         Stream,
     }
 
-    pub struct MiddleWareJob<S: Send + Clone + Sync + 'static> {
+    pub struct MiddleWareJob {
         path: String,
         method: H3Method,
         stream_id: u64,
@@ -340,12 +360,12 @@ mod job {
         content_length: Option<usize>,
         scid: Vec<u8>,
         headers: Vec<h3::Header>,
-        middleware_collection: Vec<Arc<dyn MiddleWare<S> + Send + Sync + 'static>>,
+        middleware_collection: Vec<Arc<dyn MiddleWare + Send + Sync + 'static>>,
         task_done_sender: crossbeam_channel::Sender<MiddleWareResult>,
         route_type: RouteType,
     }
 
-    impl<S: Send + Sync + 'static + Clone> MiddleWareJob<S> {
+    impl MiddleWareJob {
         pub fn new(
             path: &str,
             method: H3Method,
@@ -356,7 +376,7 @@ mod job {
             has_more_frames: bool,
             content_length: Option<usize>,
             headers: Vec<h3::Header>,
-            middleware_collection: Vec<Arc<dyn MiddleWare<S> + Send + Sync + 'static>>,
+            middleware_collection: Vec<Arc<dyn MiddleWare + Send + Sync + 'static>>,
             task_done_sender: crossbeam_channel::Sender<MiddleWareResult>,
         ) -> Self {
             Self {
@@ -408,7 +428,7 @@ mod job {
         }
         pub fn middleware_collection(
             &mut self,
-        ) -> Vec<Arc<dyn MiddleWare<S> + Send + Sync + 'static>> {
+        ) -> Vec<Arc<dyn MiddleWare + Send + Sync + 'static>> {
             std::mem::replace(&mut self.middleware_collection, vec![])
         }
     }
