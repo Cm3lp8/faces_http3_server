@@ -1,64 +1,113 @@
+#![allow(warnings)]
+use std::collections::HashMap;
+use std::fmt::Debug;
+use std::hash::Hash;
+use std::io::{BufRead, BufReader, Cursor};
 use std::ops::Add;
-use std::thread;
+use std::process::Output;
+use std::sync::{Arc, Mutex};
+use std::{thread, usize};
 
-use faces_quic_server::{ContentType, H3Method, Http3Server, RequestForm, RequestResponse};
-use faces_quic_server::{RequestManager, RequestManagerBuilder, RequestType, ServerConfig};
-use log::info;
+use faces_quic_server::prelude::*;
+use log::{error, info, warn};
+use quiche::h3;
 fn main() {
     env_logger::init();
-    let addr = "127.0.0.1:3000";
-    let mut request_manager = RequestManager::new();
+    let addr = "192.168.1.22:3000";
 
-    let request_form_0 = RequestForm::new()
-        .set_path("/")
-        .set_method(H3Method::GET)
-        .set_scheme("https")
-        .set_request_callback(|mut req_event| {
-            let args = req_event.args();
-            let body = req_event.take_body();
+    let app_state = ();
 
-            Ok(RequestResponse::new_ok_200())
-        })
-        .set_request_type(RequestType::Ping)
-        .build();
-    let request_form_1 = RequestForm::new()
-        .set_path("/large_data")
-        .set_method(H3Method::POST)
-        .set_scheme("https")
-        .set_request_callback(|req_event| {
-            println!("Large data received len [{:?}]", req_event.as_body().len());
-            let len = req_event.as_body().len();
-            info!("body extract [{:?}]", &req_event.as_body()[len - 10..len]);
+    #[derive(Clone)]
+    pub struct AppStateTest;
 
-            let extract = &req_event.as_body()[len - 5..len].to_vec();
-            let mut s = String::new();
-            for it in extract {
-                s = s.add(it.to_string().as_str());
-                s = s.add(", ");
+    type UserID = usize;
+    type StreamIdent = (Vec<u8>, u64);
+    pub struct StreamSessions {
+        register: Arc<Mutex<HashMap<UserID, StreamIdent>>>,
+    }
+    impl StreamSessions {
+        pub fn register(&self, user_id: UserID, stream_id: StreamIdent) {
+            let guard = &mut *self.register.lock().unwrap();
+
+            guard.entry(user_id).or_insert(stream_id);
+        }
+    }
+
+    type Scid = Vec<u8>;
+    type StreamId = u64;
+    impl UserSessions for StreamSessions {
+        type Output = StreamSessions;
+        fn new() -> Self::Output {
+            StreamSessions {
+                register: Arc::new(Mutex::new(HashMap::new())),
             }
-            let resp = format!("Hello this is the trail : {}", s);
-            let response = RequestResponse::new()
-                .set_status(faces_quic_server::Status::Ok(200))
-                .set_body(vec![9; 2_000_000])
-                .set_content_type(ContentType::Text)
-                .build();
-            response
-        })
-        .set_request_type(RequestType::Ping)
-        .build();
+        }
+        fn get_connection_ids_on_user_ids(&self, keys: &[usize]) -> Vec<impl ToStreamIdent> {
+            let dst: Vec<(usize, Vec<u8>, u64)> = vec![];
 
-    request_manager.add_new_request_form(request_form_0);
-    request_manager.add_new_request_form(request_form_1);
+            dst
+        }
+        fn get_all_connections(&self) -> Vec<impl ToStreamIdent + Debug> {
+            let dst: Vec<(usize, Vec<u8>, u64)> = vec![];
 
-    let server_config = ServerConfig::new()
-        .set_address(addr)
-        .set_cert_path("/home/camille/Documents/rust/faces_quic_server/cert.pem")
-        .set_key_path("/home/camille/Documents/rust/faces_quic_server/key.pem")
-        .set_request_manager(request_manager.build())
-        .build();
+            dst
+        }
 
-    Http3Server::new(server_config).run();
+        fn user_sessions(&self) -> &Self::Output {
+            self
+        }
 
-    info!("[Server is listening at [{:?}] ]", addr);
-    thread::park();
+        fn register_sessions(&mut self, user_id: usize, conn_ids: (Scid, StreamId)) {}
+        fn remove_sessions_by_connection(&mut self, conn_id: &[u8]) -> Vec<usize> {
+            vec![0]
+        }
+    }
+
+    let mut router = RouteManager::<_, StreamSessions>::new_with_app_state(AppStateTest);
+
+    let streams = StreamSessions::new();
+
+    let middle_ware_0 = router.middleware(&|headers, app_state| MiddleWareFlow::Continue(headers));
+    let handler_0 = router.handler(&|event, app_state, current_status_response| {
+        info!(
+            "Received Data on file path [{}] on [{:?}] ",
+            event.bytes_written(),
+            event.path()
+        );
+        Response::ok_200_with_data(event, vec![9; 23])
+    });
+
+    let handler_1 = router.handler(&|event, app_state, current_status_response| {
+        info!(
+            "Received Data on file path [{}] on [{:?}] ",
+            event.bytes_written(),
+            event.path()
+        );
+        Response::ok_200_with_data(event, vec![0; 1888835])
+    });
+    router.route_post(
+        "/large_data",
+        RouteConfig::new(DataManagement::Storage(BodyStorage::File)),
+        |route_builder| {
+            route_builder.middleware(&middle_ware_0);
+            route_builder.handler(&handler_0);
+        },
+    );
+    router.route_get("/test", RouteConfig::default(), |route_builder| {
+        route_builder.handler(&handler_1);
+        route_builder.middleware(&middle_ware_0);
+    });
+    router.route_get("/test_mini", RouteConfig::default(), |route_builder| {
+        route_builder.handler(&handler_0);
+        route_builder.middleware(&middle_ware_0);
+    });
+
+    router.set_error_handler(ErrorType::Error404, |error_buidler| {
+        error_buidler.header(&[h3::Header::new(b"type", b"bad request")]);
+    });
+    let _server = Http3Server::new(addr)
+        .add_key_path("/home/camille/Documents/rust/faces_http3_server/key.pem")
+        .add_cert_path("/home/camille/Documents/rust/faces_http3_server/cert.pem")
+        .set_file_storage_path("/home/camille/.temp_server/")
+        .run_blocking(router);
 }
