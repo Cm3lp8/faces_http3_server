@@ -32,9 +32,11 @@ mod server_config_builder {
             &self.server_socket_address
         }
         pub fn cert_path(&self) -> &str {
+            debug!("cert path [{:?}]", self.cert);
             self.cert.as_str()
         }
         pub fn key_path(&self) -> &str {
+            debug!("key path [{:?}]", self.key);
             self.key.as_str()
         }
         pub fn get_storage_path(&self) -> PathBuf {
@@ -67,6 +69,7 @@ mod server_config_builder {
         ///path to the cert. Try absolute path if problems
         ///
         pub fn set_cert_path(&mut self, path: impl AsRef<Path>) -> &mut Self {
+            debug!("path cert [{:?}]", path.as_ref());
             self.cert = Some(path.as_ref().to_path_buf());
             self
         }
@@ -78,6 +81,7 @@ mod server_config_builder {
         ///path to the key. Try absolute path if problems
         ///
         pub fn set_key_path(&mut self, path: impl AsRef<Path>) -> &mut Self {
+            debug!("path key [{:?}]", path.as_ref());
             self.key = Some(path.as_ref().to_path_buf());
             self
         }
