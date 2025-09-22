@@ -277,12 +277,13 @@ mod quiche_implementation {
         // Create the configuration for the QUIC connections.
         let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
 
-        config
-            .load_cert_chain_from_pem_file(server_config.cert_path())
-            .unwrap();
-        config
-            .load_priv_key_from_pem_file(server_config.key_path())
-            .unwrap();
+        if let Err(e) = config.load_cert_chain_from_pem_file(server_config.cert_path()) {
+            let e = e.to_string();
+            error!("cert[{:?}]", e)
+        }
+        if let Err(e) = config.load_priv_key_from_pem_file(server_config.key_path()) {
+            error!("key [{:?}]", e)
+        }
         config
             .set_application_protos(quiche::h3::APPLICATION_PROTOCOL)
             .unwrap();
