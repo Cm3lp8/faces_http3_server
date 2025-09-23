@@ -284,6 +284,21 @@ mod request_event {
         pub fn as_body(&self) -> &Vec<u8> {
             &self.body
         }
+        pub fn copy(&self) -> Self {
+            Self {
+                stream_id: self.stream_id,
+                conn_id: self.conn_id.to_owned(),
+                scid: self.scid.to_vec(),
+                path: self.path.to_owned(),
+                method: self.method.clone(),
+                headers: self.headers.clone(),
+                args: self.args.clone(),
+                file_path: self.file_path.clone(),
+                bytes_written: self.bytes_written,
+                body: self.body.clone(),
+                is_end: self.is_end,
+            }
+        }
     }
 
     #[derive(Debug)]
