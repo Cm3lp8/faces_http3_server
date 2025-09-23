@@ -299,6 +299,21 @@ mod request_event {
                 is_end: self.is_end,
             }
         }
+        pub fn copy_without_body(&self) -> Self {
+            Self {
+                stream_id: self.stream_id,
+                conn_id: self.conn_id.to_owned(),
+                scid: self.scid.to_vec(),
+                path: self.path.to_owned(),
+                method: self.method.clone(),
+                headers: self.headers.clone(),
+                args: self.args.clone(),
+                file_path: self.file_path.clone(),
+                bytes_written: self.bytes_written,
+                body: vec![],
+                is_end: self.is_end,
+            }
+        }
     }
 
     #[derive(Debug)]
