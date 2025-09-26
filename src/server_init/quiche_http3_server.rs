@@ -213,6 +213,7 @@ mod quiche_implementation {
         let mut poll = mio::Poll::new().unwrap();
         let mut events = mio::Events::with_capacity(8192 * 16);
         // Create the UDP listening socket, and register it with the event loop.
+        info!("try socket at [{:?}]", server_config.server_address());
         let mut socket = mio::net::UdpSocket::bind(*server_config.server_address()).unwrap();
         info!("socket [{:?}]", socket);
         poll.registry()
