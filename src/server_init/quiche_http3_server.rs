@@ -525,9 +525,6 @@ mod quiche_implementation {
                                     }
                                     let scid = client.conn.source_id().as_ref().to_vec();
 
-                                    if let Ok(res) = String::from_utf8(out[..read].to_vec()) {
-                                        info!("[{}][{:?}]", stream_id, res);
-                                    }
                                     if let Err(e) =
                                         route_manager.routes_handler().write_body_packet(
                                             stream_id,
