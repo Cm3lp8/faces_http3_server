@@ -531,6 +531,7 @@ mod route_mngr {
             route_form.add_global_middlewares(self.global_middlewares.clone());
 
             let route = route_form.build();
+            info!("added route  [{:?}]", route.path);
             self.add_new_route(route);
             self
         }
