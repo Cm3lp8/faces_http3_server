@@ -104,7 +104,7 @@ mod file_writer_worker {
             .stack_size(1024 * 1024 * 2)
             .spawn(move || {
                 while let Ok(writable_item) = receiver.recv() {
-                    std::thread::sleep(Duration::from_micros(20));
+                    //   std::thread::sleep(Duration::from_micros(20));
                     if let Err(_) = writable_item.write_on_disk() {
                         error!("Failed to write data on disk");
                     }

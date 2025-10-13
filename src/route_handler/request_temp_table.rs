@@ -568,6 +568,8 @@ mod req_temp_table {
                     packet.to_vec(),
                     packet_id,
                     file_writer.clone(),
+                    //self.body_written_size
+                    //self.content_length
                 )) {
                     error!("failed to send writable item to file worker thread");
                 };
