@@ -242,6 +242,7 @@ mod req_temp_table {
                     Err(())
                 }
             } else {
+                log::error!("was not able to build route event");
                 Err(())
             };
 
@@ -343,6 +344,7 @@ mod req_temp_table {
                         path.push(uuid);
 
                         if let Ok(file) = File::create(path.clone()) {
+                            info!("file created for [{:?}]", path);
                             file_opened = Some(Arc::new(Mutex::new(BufWriter::new(file))));
                         } else {
                             error!("Failed creating [{:?}] file", path);
@@ -432,6 +434,7 @@ mod req_temp_table {
                             path.push(uuid);
 
                             if let Ok(file) = File::create(path.clone()) {
+                                info!("A file created for [{:?}]", path);
                                 file_opened = Some(Arc::new(Mutex::new(BufWriter::new(file))));
                             } else {
                                 error!("Failed creating [{:?}] file", path);
@@ -605,10 +608,10 @@ mod req_temp_table {
             conn_id: &str,
             event_type: EventType,
         ) -> Option<RouteEvent> {
-            let file_path = self.close_file();
             if self.method.is_none() || self.headers.is_none() || self.path.is_none() {
                 return None;
             }
+            let file_path = self.close_file();
             if let Some(headers) = self.headers.as_ref() {
                 match event_type {
                     EventType::OnHeader => Some(RouteEvent::new_header(HeaderEvent::new(

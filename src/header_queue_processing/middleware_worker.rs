@@ -236,6 +236,9 @@ mod thread_pool {
                 let (data_management_type, event_listener) =
                     route_handler.get_additionnal_attributes(path, method);
 
+                // the partial was partially set on the first data packet
+                // but path, methods, headers was not known because
+                // header wasn't entirelly processed.
                 route_handler.complete_request_entry_in_table(
                     stream_id,
                     conn_id,

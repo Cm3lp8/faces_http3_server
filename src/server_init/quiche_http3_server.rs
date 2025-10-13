@@ -496,6 +496,9 @@ mod quiche_implementation {
                         let http3_conn = client.http3_conn.as_mut().unwrap();
                         match http3_conn.poll(&mut client.conn) {
                             Ok((stream_id, quiche::h3::Event::Headers { list, more_frames })) => {
+                                if more_frames {
+                                    log::info!("new _hdr [{:#?}]", list)
+                                }
                                 let scid = client.conn.source_id().as_ref().to_vec();
                                 let conn_id = client.conn.trace_id().to_string();
                                 header_queue_processing.process_header(

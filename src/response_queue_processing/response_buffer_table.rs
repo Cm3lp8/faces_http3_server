@@ -99,6 +99,8 @@ mod response_buff {
             } else {
                 // If req process (middleware or async data processing) is not finished, wait for
                 // it in the table
+                //
+                info!("response was not ready to send, insertion in table");
                 self.table
                     .lock()
                     .unwrap()
