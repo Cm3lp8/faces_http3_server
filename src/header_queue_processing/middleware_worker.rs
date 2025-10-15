@@ -240,6 +240,7 @@ mod thread_pool {
                 // but path, methods, headers was not known because
                 // header wasn't entirelly processed.
                 route_handler.complete_request_entry_in_table(
+                    server_config,
                     stream_id,
                     conn_id,
                     method,
@@ -299,6 +300,7 @@ mod thread_pool {
             //if the thread reached here,create an entry in partial response table
             if route_handler.is_request_set_in_table(stream_id, conn_id) {
                 route_handler.complete_request_entry_in_table(
+                    server_config,
                     stream_id,
                     conn_id,
                     method,

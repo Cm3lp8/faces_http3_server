@@ -13,8 +13,11 @@ type FileOpen = Arc<Mutex<BufWriter<File>>>;
 pub fn build_temp_stage_file_storage_path(
     server_config: &ServerConfig,
     headers: &[h3::Header],
-    data_management_type: &DataManagement,
+    data_management_type: &Option<DataManagement>,
 ) -> Option<(PathBuf, FileOpen)> {
+    let Some(data_management_type) = data_management_type else {
+        return None;
+    };
     if let Some(body_storage) = data_management_type.is_body_storage() {
         match body_storage {
             BodyStorage::File => {

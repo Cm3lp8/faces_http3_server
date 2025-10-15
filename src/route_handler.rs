@@ -398,6 +398,7 @@ mod request_hndlr {
 
         pub fn complete_request_entry_in_table(
             &self,
+            server_config: &Arc<ServerConfig>,
             stream_id: u64,
             conn_id: &str,
             method: H3Method,
@@ -414,7 +415,7 @@ mod request_hndlr {
             match response_queue_processing::utils::build_temp_stage_file_storage_path(
                 server_config,
                 headers,
-                data_management_type,
+                &data_management_type,
             ) {
                 Some(file_s) => {
                     file_storage = Some(file_s.0);
