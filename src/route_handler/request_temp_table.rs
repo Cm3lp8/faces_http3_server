@@ -124,6 +124,8 @@ mod req_temp_table {
             content_length: Option<usize>,
             data_management_type: Option<DataManagement>,
             event_subscriber: Option<Arc<dyn RouteEventListener + 'static + Send + Sync>>,
+            storage_path: Option<PathBuf>,
+            file_open: Option<Arc<Mutex<BufWriter<File>>>>,
         ) {
             self.table
                 .lock()
@@ -134,6 +136,8 @@ mod req_temp_table {
                     entry.path = Some(path.to_string());
                     entry.event_subscriber = event_subscriber;
                     entry.data_management_type = data_management_type;
+                    entry.storage_path = storage_path;
+                    entry.file_opened = file_open;
                     entry.content_length = content_length;
                     entry.headers = Some(headers.to_vec());
                 });

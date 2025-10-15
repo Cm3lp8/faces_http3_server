@@ -4,6 +4,7 @@ pub use response_pool_processing::{
 };
 mod response_buffer_table;
 mod response_worker;
+pub mod utils;
 mod response_pool_processing {
     use std::sync::Arc;
 

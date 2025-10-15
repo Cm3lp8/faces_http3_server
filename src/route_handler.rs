@@ -16,6 +16,8 @@ mod request_hndlr {
         collections::HashMap,
         env::args,
         fmt::Pointer,
+        io::BufWriter,
+        path::PathBuf,
         sync::{Arc, Mutex, MutexGuard},
         time::Duration,
     };
@@ -29,7 +31,7 @@ mod request_hndlr {
             BodyRequest, ChunkSender, ChunkingStation, ChunksDispatchChannel, HeaderPriority,
             HeaderRequest,
         },
-        response_queue_processing::{ResponseInjection, ResponsePoolProcessingSender},
+        response_queue_processing::{self, ResponseInjection, ResponsePoolProcessingSender},
         route_events::{self, EventType, RouteEvent},
         route_manager::{DataManagement, RouteManagerInner},
         server_config,
@@ -407,6 +409,20 @@ mod request_hndlr {
         ) {
             let guard = &mut *self.inner.lock().unwrap();
 
+            let mut file_storage = None::<PathBuf>;
+            let mut file_open = None::<Arc<Mutex<BufWriter<std::fs::File>>>>;
+            match response_queue_processing::utils::build_temp_stage_file_storage_path(
+                server_config,
+                headers,
+                data_management_type,
+            ) {
+                Some(file_s) => {
+                    file_storage = Some(file_s.0);
+                    file_open = Some(file_s.1)
+                }
+                None => {}
+            };
+
             guard.routes_states().complete_request_entry_in_table(
                 stream_id,
                 conn_id,
@@ -416,6 +432,8 @@ mod request_hndlr {
                 content_length,
                 data_management_type,
                 event_subscriber,
+                file_storage,
+                file_open,
             )
         }
         pub fn create_new_request_in_table(
