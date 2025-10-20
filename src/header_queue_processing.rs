@@ -355,9 +355,9 @@ mod workers {
                         stream_id,
                         scid,
                     } => {
-                        log::error!("middleware error ... aborting");
                         route_handler.inner_mut(|guard| {
-                            info!("sending abording");
+                            log::error!("middleware error ... aborting");
+                            warn!("TODO => Clean file cache if any data was written in between !!");
                             send_error(
                                 error_response,
                                 guard,
@@ -381,7 +381,6 @@ mod workers {
                         has_more_frames,
                         content_length,
                     } => {
-                        log::info!("Middleware succes !");
 
                         /*
                         response_processing_pool_injector.send(
