@@ -383,6 +383,7 @@ mod workers {
                     } => {
                         log::info!("Middleware succes !");
 
+                        /*
                         response_processing_pool_injector.send(
                             stream_id,
                             &scid,
@@ -390,6 +391,7 @@ mod workers {
                             has_more_frames,
                             &mio_waker,
                         );
+                        */
                     }
                     _ => {}
                 }
