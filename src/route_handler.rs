@@ -588,6 +588,7 @@ mod route_handle_implementation {
         let header_sender = chunk_dispatch_channel.get_high_priority_sender(stream_id, &scid);
         match error_type {
             ErrorResponse::Error401(content) => {
+                log::info!("in send error");
                 let headers = vec![h3::Header::new(b":status", b"401")];
                 send_headers(
                     headers,
@@ -601,7 +602,8 @@ mod route_handle_implementation {
                 );
             }
             ErrorResponse::Error403(content) => {
-                let headers = vec![h3::Header::new(b":status", b"401")];
+                log::info!("in send error");
+                let headers = vec![h3::Header::new(b":status", b"403")];
                 send_headers(
                     headers,
                     stream_id,
@@ -614,6 +616,7 @@ mod route_handle_implementation {
                 );
             }
             ErrorResponse::Error415(content) => {
+                log::info!("in send error");
                 let headers = vec![h3::Header::new(b":status", b"401")];
                 send_headers(
                     headers,

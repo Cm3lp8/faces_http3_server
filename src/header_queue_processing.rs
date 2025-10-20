@@ -355,7 +355,9 @@ mod workers {
                         stream_id,
                         scid,
                     } => {
+                        log::error!("middleware error ... aborting");
                         route_handler.inner_mut(|guard| {
+                            info!("sending abording");
                             send_error(
                                 error_response,
                                 guard,
@@ -379,14 +381,15 @@ mod workers {
                         has_more_frames,
                         content_length,
                     } => {
-                        /*
+                        log::info!("Middleware succes !");
+
                         response_processing_pool_injector.send(
                             stream_id,
                             &scid,
                             conn_id.as_str(),
                             has_more_frames,
                             &mio_waker,
-                        );*/
+                        );
                     }
                     _ => {}
                 }
