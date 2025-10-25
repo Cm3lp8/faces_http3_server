@@ -128,7 +128,7 @@ mod stream_sessions {
     }
 
     impl<T: UserSessions<Output = T>> StreamBridge<T> for StreamSessions<T> {
-        fn user_session(&self, cb: impl FnOnce(&StreamSessionsInner<T>)) {
+        fn user_session<U>(&self, cb: impl FnOnce(&StreamSessionsInner<T>) -> U) -> U {
             let guard = &*self.inner.lock().unwrap();
 
             cb(guard)
@@ -166,6 +166,13 @@ mod stream_sessions {
                 }
             } else {
                 Err(())
+            }
+        }
+        fn is_connected(&self, stream_path: &str, peer_id: UserUuid) -> bool {
+            if let Some(stream) = self.sessions.get(stream_path) {
+                stream.registered_sessions().is_user_connected(peer_id)
+            } else {
+                false
             }
         }
         fn send_data_on_stream(
@@ -249,7 +256,7 @@ mod stream_sessions_traits {
     };
 
     pub trait StreamBridge<T: UserSessions<Output = T>> {
-        fn user_session(&self, cb: impl FnOnce(&StreamSessionsInner<T>));
+        fn user_session<U>(&self, cb: impl FnOnce(&StreamSessionsInner<T>) -> U) -> U;
     }
     pub trait StreamBridgeOps<T: UserSessions<Output = T>> {
         fn get_connection_ids_on_stream_path_by_user_id(
@@ -262,6 +269,7 @@ mod stream_sessions_traits {
             connection_ids: &[(&[u8], u64)],
             data: Vec<u8>,
         ) -> Result<(), ()>;
+        fn is_connected(&self, stream_path: &str, peer_id: UserUuid) -> bool;
     }
 
     pub trait StreamCreation<T: UserSessions<Output = T>> {
@@ -505,5 +513,6 @@ mod user_sessions_trait {
         fn get_all_connections(&self) -> Vec<impl ToStreamIdent + Debug>;
         fn register_sessions(&mut self, user_id: UserUuid, conn_ids: (Vec<u8>, u64));
         fn remove_sessions_by_connection(&mut self, conn_id: &[u8]) -> Vec<UserUuid>;
+        fn is_user_connected(&self, user_id: UserUuid) -> bool;
     }
 }

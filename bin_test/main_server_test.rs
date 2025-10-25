@@ -43,6 +43,9 @@ fn main() {
                 register: Arc::new(Mutex::new(HashMap::new())),
             }
         }
+        fn is_user_connected(&self, user_id: Uuid) -> bool {
+            false
+        }
         fn get_connection_ids_on_user_ids(&self, keys: &[Uuid]) -> Vec<impl ToStreamIdent> {
             let dst: Vec<(Uuid, Vec<u8>, u64)> = vec![];
 
