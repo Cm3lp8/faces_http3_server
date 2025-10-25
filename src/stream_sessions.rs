@@ -11,8 +11,12 @@ mod stream_sessions {
         sync::{Arc, Mutex},
     };
 
+    use stream_framer::FrameWriter;
+
     use crate::{
-        request_response::ChunkingStation, stream_sessions::UserUuid, StreamBridgeOps, StreamIdent,
+        request_response::{BodyRequest, BodyType, ChunkingStation},
+        stream_sessions::UserUuid,
+        StreamBridgeOps, StreamIdent,
     };
 
     use super::{
@@ -77,6 +81,45 @@ mod stream_sessions {
                 Err(())
             }
         }
+        fn get_stream_session(&self, cb: impl FnOnce(&StreamSessionsInner<T>)) -> Result<(), ()> {
+            let guard = &mut *self.inner.lock().unwrap();
+
+            cb(guard);
+            Ok(())
+        }
+        fn send_message_to_subscriber_on_path(
+            &self,
+            user_id: UserUuid,
+            message: Vec<u8>,
+            path: &str,
+        ) -> Result<(), String> {
+            self.get_stream_session(|session| {
+                let Some(stream) = session.sessions.get(path) else {
+                    return ();
+                };
+                let ids: Vec<(Vec<u8>, u64)> = stream
+                    .registered_sessions()
+                    .get_connection_ids_on_user_ids(&[user_id])
+                    .into_iter()
+                    .filter_map(|it| {
+                        let stream_ident = it.to_stream_ident();
+
+                        match stream_ident {
+                            Ok(id) => Some((id.dcid, id.stream_id)),
+                            Err(e) => None,
+                        }
+                    })
+                    .collect();
+
+                let ids_ref: Vec<(&[u8], u64)> = ids.iter().map(|i| (&i.0[..], i.1)).collect();
+                match session.send_data_on_stream(&ids_ref, message) {
+                    Ok(_) => {}
+                    Err(e) => error!("Failed To send message to [{:?}] ", user_id),
+                }
+                ()
+            })
+            .map_err(|e| String::from("Failed to send message to subscriber"))
+        }
         fn clean_closed_connexions(&self, scid: &[u8]) {
             let guard = &mut *self.inner.lock().unwrap();
 
@@ -124,6 +167,41 @@ mod stream_sessions {
             } else {
                 Err(())
             }
+        }
+        fn send_data_on_stream(
+            &self,
+            connection_ids: &[(&[u8], u64)],
+            data: Vec<u8>,
+        ) -> Result<(), ()> {
+            let framed_data = match data.prepend_frame() {
+                Ok(frame) => frame,
+                Err(e) => {
+                    error!("failed to prepend_frame [{:?}]", e);
+                    return Err(());
+                }
+            };
+
+            for conn_ids in connection_ids {
+                if let Some(chunking_station) = &self.chunking_station {
+                    let body_sender = chunking_station.get_body_sender(*conn_ids);
+
+                    let body_request =
+                        BodyRequest::new(conn_ids.1, "", conn_ids.0, 0, framed_data.clone(), false);
+
+                    if let Some(sender) = body_sender {
+                        if let Err(e) = sender.send(
+                            crate::request_response::QueuedRequest::StreamData(body_request),
+                        ) {
+                            error!("failed to send payload");
+                        } else {
+                            if let Err(e) = chunking_station.wake_poll() {
+                                error!("failed to wake poll");
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(())
         }
     }
 
@@ -179,6 +257,11 @@ mod stream_sessions_traits {
             stream_path: &str,
             peer_id: UserUuid,
         ) -> Result<StreamIdent, ()>;
+        fn send_data_on_stream(
+            &self,
+            connection_ids: &[(&[u8], u64)],
+            data: Vec<u8>,
+        ) -> Result<(), ()>;
     }
 
     pub trait StreamCreation<T: UserSessions<Output = T>> {
@@ -234,6 +317,14 @@ mod stream_sessions_traits {
             path: &str,
             cb: impl FnOnce(&mut Stream<T>),
         ) -> Result<(), ()>;
+        fn get_stream_session(&self, cb: impl FnOnce(&StreamSessionsInner<T>)) -> Result<(), ()>;
+        /// This handle method can notify an individual id
+        fn send_message_to_subscriber_on_path(
+            &self,
+            user_id: UserUuid,
+            message: Vec<u8>,
+            path: &str,
+        ) -> Result<(), String>;
         fn clean_closed_connexions(&self, scid: &[u8]);
     }
 

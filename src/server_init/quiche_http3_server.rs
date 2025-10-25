@@ -661,9 +661,19 @@ mod quiche_implementation {
                                     }
                                     if let Err(_e) = waker_clone.wake() {}
                                 }
+                                QueuedRequest::StreamData(ref mut content) => {
+                                    let b = content.take_data();
+                                    if let Err(_e) = send_body_response_progression(
+                                        client,
+                                        content.stream_id(),
+                                        b,
+                                        false,
+                                    ) {
+                                        client.pending_body_queue.push_item_on_front(request_chunk);
+                                    }
+                                }
                                 QueuedRequest::BodyProgression(ref mut content) => {
                                     let b = content.take_data();
-                                    let p = b.clone();
                                     if let Err(_e) = send_body_response_progression(
                                         client,
                                         content.stream_id(),

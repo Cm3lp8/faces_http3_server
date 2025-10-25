@@ -247,7 +247,14 @@ mod response_queue {
 
             chunking_station
         }
+        pub fn get_body_sender(&self, conn_ids: (&[u8], u64)) -> Option<ChunkSender> {
+            let chunk_dispatch_channel = self.get_chunking_dispatch_channel();
 
+            chunk_dispatch_channel.get_low_priority_sender(conn_ids.1, conn_ids.0)
+        }
+        pub fn wake_poll(&self) -> Result<(), std::io::Error> {
+            self.waker.wake()
+        }
         pub fn get_chunking_dispatch_channel(&self) -> ChunksDispatchChannel {
             self.chunk_dispatch_channel.clone()
         }
@@ -371,6 +378,7 @@ mod response_queue {
                 QueuedRequest::Header(content) => content.stream_id,
                 QueuedRequest::Body(content) => content.stream_id,
                 QueuedRequest::BodyProgression(content) => content.stream_id,
+                QueuedRequest::StreamData(content) => content.stream_id,
             }
         }
         fn is_last_item(&self) -> bool {
@@ -378,6 +386,7 @@ mod response_queue {
                 QueuedRequest::Header(content) => content.is_end,
                 QueuedRequest::Body(content) => content.is_end,
                 QueuedRequest::BodyProgression(content) => content.is_end,
+                QueuedRequest::StreamData(content) => content.is_end,
             }
         }
         fn scid(&self) -> Vec<u8> {
@@ -385,6 +394,7 @@ mod response_queue {
                 QueuedRequest::Header(content) => content.scid.to_vec(),
                 QueuedRequest::Body(content) => content.scid.to_vec(),
                 QueuedRequest::BodyProgression(content) => content.scid.to_vec(),
+                QueuedRequest::StreamData(content) => content.scid.to_vec(),
             }
         }
         fn len(&self) -> usize {
@@ -392,6 +402,7 @@ mod response_queue {
                 QueuedRequest::Header(content) => content.get_headers_len(),
                 QueuedRequest::Body(content) => content.len(),
                 QueuedRequest::BodyProgression(content) => content.len(),
+                QueuedRequest::StreamData(content) => content.len(),
             }
         }
     }
@@ -401,6 +412,7 @@ mod response_queue {
         Header(HeaderRequest),
         Body(BodyRequest),
         BodyProgression(BodyRequest),
+        StreamData(BodyRequest),
     }
     impl QueuedRequest {
         pub fn new_body(req: BodyRequest) -> Self {
@@ -414,6 +426,7 @@ mod response_queue {
                 Self::Header(header) => 0,
                 Self::Body(body) => body.packet_id,
                 Self::BodyProgression(body) => body.packet_id,
+                Self::StreamData(body) => body.packet_id,
             }
         }
     }
