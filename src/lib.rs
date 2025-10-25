@@ -24,7 +24,7 @@ pub use stream_sessions::StreamBridgeOps;
 pub use stream_sessions::StreamHandle;
 pub use stream_sessions::StreamSessions;
 pub use stream_sessions::UserSessions;
-pub use stream_sessions::{StreamIdent, ToStreamIdent};
+pub use stream_sessions::{StreamIdent, StreamManagement, ToStreamIdent};
 
 use server_init::quiche_http3_server::{BodyReqQueue, QueueTrackableItem};
 mod event_listener;
