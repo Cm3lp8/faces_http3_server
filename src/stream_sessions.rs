@@ -2,13 +2,18 @@ pub use stream_sessions::StreamSessions;
 pub use stream_sessions_traits::*;
 pub use stream_types::{StreamBuilder, StreamIdent, StreamType};
 pub use user_sessions_trait::UserSessions;
+use uuid::Uuid;
+
+type UserUuid = Uuid;
 mod stream_sessions {
     use std::{
         collections::HashMap,
         sync::{Arc, Mutex},
     };
 
-    use crate::{request_response::ChunkingStation, StreamBridgeOps, StreamIdent};
+    use crate::{
+        request_response::ChunkingStation, stream_sessions::UserUuid, StreamBridgeOps, StreamIdent,
+    };
 
     use super::{
         stream_types::{stream_cleaning, Stream},
@@ -95,7 +100,7 @@ mod stream_sessions {
         fn get_connection_ids_on_stream_path_by_user_id(
             &self,
             stream_path: &str,
-            peer_id: usize,
+            peer_id: UserUuid,
         ) -> Result<crate::StreamIdent, ()> {
             if let Some(stream) = self.sessions.get(stream_path) {
                 let mut stream_ident: Vec<StreamIdent> = stream
@@ -158,7 +163,7 @@ mod stream_sessions {
 mod stream_sessions_traits {
     use std::any::Any;
 
-    use crate::{FinishedEvent, UserSessions};
+    use crate::{stream_sessions::UserUuid, FinishedEvent, UserSessions};
 
     use super::{
         stream_sessions::StreamSessionsInner,
@@ -172,7 +177,7 @@ mod stream_sessions_traits {
         fn get_connection_ids_on_stream_path_by_user_id(
             &self,
             stream_path: &str,
-            peer_id: usize,
+            peer_id: UserUuid,
         ) -> Result<StreamIdent, ()>;
     }
 
@@ -237,18 +242,18 @@ mod stream_sessions_traits {
     }
 
     mod to_stream_ident_foreign_implementations {
-        use crate::stream_sessions::stream_types::StreamIdent;
+        use crate::stream_sessions::{stream_types::StreamIdent, UserUuid};
 
         use super::ToStreamIdent;
 
-        impl ToStreamIdent for (usize, Vec<u8>, u64) {
+        impl ToStreamIdent for (UserUuid, Vec<u8>, u64) {
             fn to_stream_ident(
                 self,
             ) -> Result<crate::stream_sessions::stream_types::StreamIdent, ()> {
                 Ok(StreamIdent::new(self.0, self.1, self.2))
             }
         }
-        impl ToStreamIdent for (usize, &[u8], u64) {
+        impl ToStreamIdent for (UserUuid, &[u8], u64) {
             fn to_stream_ident(
                 self,
             ) -> Result<crate::stream_sessions::stream_types::StreamIdent, ()> {
@@ -261,17 +266,17 @@ mod stream_sessions_traits {
 mod stream_types {
     use std::{collections::HashMap, sync::Arc};
 
-    use crate::{handler_dispatcher, MiddleWare};
+    use crate::{handler_dispatcher, stream_sessions::UserUuid, MiddleWare};
 
     use super::{user_sessions_trait::UserSessions, StreamHandle};
 
     pub struct StreamIdent {
-        pub user_id: usize,
+        pub user_id: UserUuid,
         pub dcid: Vec<u8>, //
         pub stream_id: u64,
     }
     impl StreamIdent {
-        pub fn new(user_id: usize, dcid: Vec<u8>, stream_id: u64) -> Self {
+        pub fn new(user_id: UserUuid, dcid: Vec<u8>, stream_id: u64) -> Self {
             Self {
                 user_id,
                 dcid,
@@ -395,15 +400,19 @@ mod stream_types {
 mod user_sessions_trait {
     use std::fmt::Debug;
 
+    use uuid::Uuid;
+
+    use crate::stream_sessions::UserUuid;
+
     use super::ToStreamIdent;
 
     pub trait UserSessions: Send + Sync + 'static {
         type Output;
         fn new() -> Self::Output;
         fn user_sessions(&self) -> &Self::Output;
-        fn get_connection_ids_on_user_ids(&self, keys: &[usize]) -> Vec<impl ToStreamIdent>;
+        fn get_connection_ids_on_user_ids(&self, keys: &[UserUuid]) -> Vec<impl ToStreamIdent>;
         fn get_all_connections(&self) -> Vec<impl ToStreamIdent + Debug>;
-        fn register_sessions(&mut self, user_id: usize, conn_ids: (Vec<u8>, u64));
+        fn register_sessions(&mut self, user_id: UserUuid, conn_ids: (Vec<u8>, u64));
         fn remove_sessions_by_connection(&mut self, conn_id: &[u8]) -> Vec<usize>;
     }
 }

@@ -11,6 +11,7 @@ use std::{thread, usize};
 use faces_quic_server::prelude::*;
 use log::{error, info, warn};
 use quiche::h3;
+use uuid::Uuid;
 fn main() {
     env_logger::init();
     let addr = "192.168.1.22:3000";
@@ -42,13 +43,13 @@ fn main() {
                 register: Arc::new(Mutex::new(HashMap::new())),
             }
         }
-        fn get_connection_ids_on_user_ids(&self, keys: &[usize]) -> Vec<impl ToStreamIdent> {
-            let dst: Vec<(usize, Vec<u8>, u64)> = vec![];
+        fn get_connection_ids_on_user_ids(&self, keys: &[Uuid]) -> Vec<impl ToStreamIdent> {
+            let dst: Vec<(Uuid, Vec<u8>, u64)> = vec![];
 
             dst
         }
         fn get_all_connections(&self) -> Vec<impl ToStreamIdent + Debug> {
-            let dst: Vec<(usize, Vec<u8>, u64)> = vec![];
+            let dst: Vec<(Uuid, Vec<u8>, u64)> = vec![];
 
             dst
         }
@@ -57,7 +58,7 @@ fn main() {
             self
         }
 
-        fn register_sessions(&mut self, user_id: usize, conn_ids: (Scid, StreamId)) {}
+        fn register_sessions(&mut self, user_id: Uuid, conn_ids: (Scid, StreamId)) {}
         fn remove_sessions_by_connection(&mut self, conn_id: &[u8]) -> Vec<usize> {
             vec![0]
         }
