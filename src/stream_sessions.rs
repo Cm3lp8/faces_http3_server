@@ -1,6 +1,6 @@
 pub use stream_sessions::StreamSessions;
 pub use stream_sessions_traits::*;
-pub use stream_types::{StreamBuilder, StreamIdent, StreamType};
+pub use stream_types::{StreamBuilder, StreamIdent, StreamMessageCapsule, StreamType};
 pub use user_sessions_trait::UserSessions;
 use uuid::Uuid;
 
@@ -11,9 +11,11 @@ mod stream_sessions {
         sync::{Arc, Mutex},
     };
 
+    use bincode::{Decode, Encode};
     use stream_framer::FrameWriter;
 
     use crate::{
+        prelude::StreamMessageCapsule,
         request_response::{BodyRequest, BodyType, ChunkingStation},
         stream_sessions::UserUuid,
         StreamBridgeOps, StreamIdent,
@@ -80,21 +82,23 @@ mod stream_sessions {
                 Err(())
             }
         }
-        fn get_stream_session(&self, cb: impl FnOnce(&StreamSessionsInner<T>)) -> Result<(), ()> {
+        fn get_stream_session<V>(
+            &self,
+            cb: impl FnOnce(&StreamSessionsInner<T>) -> Result<V, String>,
+        ) -> Result<V, String> {
             let guard = &mut *self.inner.lock().unwrap();
 
-            cb(guard);
-            Ok(())
+            cb(guard)
         }
-        fn send_message_to_subscriber_on_path(
+        fn send_message_to_subscriber_on_path<U: Decode<()> + Encode + Clone>(
             &self,
             user_id: UserUuid,
-            message: Vec<u8>,
+            message: U,
             path: &str,
-        ) -> Result<(), String> {
+        ) -> Result<Vec<StreamMessageCapsule<U>>, String> {
             self.get_stream_session(|session| {
                 let Some(stream) = session.sessions.get(path) else {
-                    return ();
+                    return Err("Stream on path : No Session found ".to_string());
                 };
                 let ids: Vec<(Vec<u8>, u64)> = stream
                     .registered_sessions()
@@ -111,11 +115,21 @@ mod stream_sessions {
                     .collect();
 
                 let ids_ref: Vec<(&[u8], u64)> = ids.iter().map(|i| (&i.0[..], i.1)).collect();
-                match session.send_data_on_stream(&ids_ref, message) {
-                    Ok(_) => {}
-                    Err(e) => error!("Failed To send message to [{:?}] ", user_id),
+                match session.send_data_on_stream(&ids_ref, || {
+                    let enc = bincode::encode_to_vec(&message, bincode::config::standard())
+                        .map_err(|e| e.to_string());
+
+                    match enc {
+                        Ok(res) => Ok((StreamMessageCapsule::new(&message), res)),
+                        Err(e) => Err(e),
+                    }
+                }) {
+                    Ok(messages) => Ok(messages),
+                    Err(e) => {
+                        error!("Failed To send message to [{:?}] ", user_id);
+                        Err(e)
+                    }
                 }
-                ()
             })
             .map_err(|e| String::from("Failed to send message to subscriber"))
         }
@@ -174,20 +188,23 @@ mod stream_sessions {
                 false
             }
         }
-        fn send_data_on_stream(
+        fn send_data_on_stream<U: Decode<()> + Encode + Clone>(
             &self,
             connection_ids: &[(&[u8], u64)],
-            data: Vec<u8>,
-        ) -> Result<(), ()> {
-            let framed_data = match data.prepend_frame() {
-                Ok(frame) => frame,
-                Err(e) => {
-                    error!("failed to prepend_frame [{:?}]", e);
-                    return Err(());
-                }
-            };
-
+            data_cb: impl Fn() -> Result<(StreamMessageCapsule<U>, Vec<u8>), String>,
+        ) -> Result<Vec<StreamMessageCapsule<U>>, String> {
+            let mut capsules: Vec<StreamMessageCapsule<U>> = vec![];
             for conn_ids in connection_ids {
+                let Ok((capsule, data)) = (data_cb)() else {
+                    return Err(String::from("Failed to encode capsule"));
+                };
+                let framed_data = match data.prepend_frame() {
+                    Ok(frame) => frame,
+                    Err(e) => {
+                        error!("failed to prepend_frame [{:?}]", e);
+                        return Err("failed to prepend_frame".to_owned());
+                    }
+                };
                 if let Some(chunking_station) = &self.chunking_station {
                     let body_sender = chunking_station.get_body_sender(*conn_ids);
 
@@ -206,8 +223,9 @@ mod stream_sessions {
                         }
                     }
                 }
+                capsules.push(capsule);
             }
-            Ok(())
+            Ok(capsules)
         }
     }
 
@@ -247,7 +265,11 @@ mod stream_sessions {
 mod stream_sessions_traits {
     use std::any::Any;
 
-    use crate::{stream_sessions::UserUuid, FinishedEvent, UserSessions};
+    use bincode::{Decode, Encode};
+
+    use crate::{
+        prelude::StreamMessageCapsule, stream_sessions::UserUuid, FinishedEvent, UserSessions,
+    };
 
     use super::{
         stream_sessions::StreamSessionsInner,
@@ -263,11 +285,11 @@ mod stream_sessions_traits {
             stream_path: &str,
             peer_id: UserUuid,
         ) -> Result<StreamIdent, ()>;
-        fn send_data_on_stream(
+        fn send_data_on_stream<U: Decode<()> + Encode + Clone>(
             &self,
             connection_ids: &[(&[u8], u64)],
-            data: Vec<u8>,
-        ) -> Result<(), ()>;
+            data_cb: impl Fn() -> Result<(StreamMessageCapsule<U>, Vec<u8>), String>,
+        ) -> Result<Vec<StreamMessageCapsule<U>>, String>;
         fn is_connected(&self, stream_path: &str, peer_id: UserUuid) -> bool;
     }
 
@@ -323,14 +345,17 @@ mod stream_sessions_traits {
             path: &str,
             cb: impl FnOnce(&mut Stream<T>),
         ) -> Result<(), ()>;
-        fn get_stream_session(&self, cb: impl FnOnce(&StreamSessionsInner<T>)) -> Result<(), ()>;
+        fn get_stream_session<V>(
+            &self,
+            cb: impl FnOnce(&StreamSessionsInner<T>) -> Result<V, String>,
+        ) -> Result<V, String>;
         /// This handle method can notify an individual id
-        fn send_message_to_subscriber_on_path(
+        fn send_message_to_subscriber_on_path<U: Decode<()> + Encode + Clone>(
             &self,
             user_id: UserUuid,
-            message: Vec<u8>,
+            message: U,
             path: &str,
-        ) -> Result<(), String>;
+        ) -> Result<Vec<StreamMessageCapsule<U>>, String>;
         fn clean_closed_connexions(&self, scid: &[u8]);
     }
 
@@ -363,9 +388,42 @@ mod stream_sessions_traits {
 mod stream_types {
     use std::{collections::HashMap, sync::Arc};
 
+    use bincode::{Decode, Encode};
+    use serde::{Deserialize, Serialize};
+    use uuid::Uuid;
+
     use crate::{handler_dispatcher, stream_sessions::UserUuid, MiddleWare};
 
     use super::{user_sessions_trait::UserSessions, StreamHandle};
+
+    // an Id field to make possible request confirmation when client responds
+
+    #[derive(Encode, Decode, Clone)]
+    pub struct StreamMessageCapsule<T>
+    where
+        T: Encode + Decode<()> + Clone,
+    {
+        capsule_uuid: [u8; 16],
+        message: T,
+    }
+
+    impl<T> StreamMessageCapsule<T>
+    where
+        T: Encode + Decode<()> + Clone,
+    {
+        pub fn new(message: &T) -> Self {
+            Self {
+                capsule_uuid: Uuid::now_v7().into_bytes(),
+                message: message.clone(),
+            }
+        }
+        pub fn get_capsule_uuid(&self) -> Uuid {
+            Uuid::from_bytes(self.capsule_uuid)
+        }
+        pub fn message(&self) -> &T {
+            &self.message
+        }
+    }
 
     pub struct StreamIdent {
         pub user_id: UserUuid,

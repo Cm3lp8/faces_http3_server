@@ -60,6 +60,7 @@ pub mod prelude {
         RouteManagerBuilder, ServerConfig,
     };
     pub use crate::server_init::Http3Server;
+    pub use crate::stream_sessions::StreamMessageCapsule;
     pub use crate::StreamBridge;
     pub use crate::StreamHandle;
     pub use crate::StreamIdent;
