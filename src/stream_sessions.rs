@@ -513,6 +513,7 @@ mod user_sessions_trait {
         fn get_all_connections(&self) -> Vec<impl ToStreamIdent + Debug>;
         fn register_sessions(&mut self, user_id: UserUuid, conn_ids: (Vec<u8>, u64));
         fn remove_sessions_by_connection(&mut self, conn_id: &[u8]) -> Option<UserUuid>;
+        //        fn remove_sessions_by_user_id(&mut self, conn_id: User) -> Option<UserUuid>;
         fn is_user_connected(&self, user_id: UserUuid) -> bool;
     }
 }
