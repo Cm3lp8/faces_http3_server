@@ -642,7 +642,6 @@ mod quiche_implementation {
                                         content.is_end(),
                                     ) {
                                         client.pending_body_queue.push_item_on_front(request_chunk);
-                                        info!("pushed [[{}]]", p_id);
 
                                         if let Err(_e) = waker_clone.wake() {
                                             error!("failed to wake poll");
@@ -681,7 +680,6 @@ mod quiche_implementation {
                                         false,
                                     ) {
                                         client.pending_body_queue.push_item_on_front(request_chunk);
-                                        info!("pushed [[{}]]", p_id);
                                     }
                                 }
                                 QueuedRequest::Header(ref mut content) => {

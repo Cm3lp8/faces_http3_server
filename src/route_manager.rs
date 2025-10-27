@@ -136,7 +136,6 @@ mod route_mngr {
             if let Some(stream_sessions) = guard.stream_sessions() {
                 Some(stream_sessions.clone())
             } else {
-                info!("no stream_sessions");
                 None
             }
         }
@@ -486,8 +485,6 @@ mod route_mngr {
             route_configuration: (),
             stream_builder_cb: impl FnOnce(&mut StreamBuilder<T>),
         ) -> &mut Self {
-            info!("will create stream");
-
             if let Some(stream_session) = &mut self.stream_sessions {
                 stream_session.create_stream(
                     path,
@@ -495,7 +492,6 @@ mod route_mngr {
                     route_configuration,
                     stream_builder_cb,
                 );
-                info!("ok created stream !!");
             }
             self
         }
@@ -531,7 +527,6 @@ mod route_mngr {
             route_form.add_global_middlewares(self.global_middlewares.clone());
 
             let route = route_form.build();
-            info!("added route  [{:?}]", route.path);
             self.add_new_route(route);
             self
         }

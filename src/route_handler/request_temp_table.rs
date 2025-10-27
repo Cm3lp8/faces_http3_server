@@ -348,7 +348,6 @@ mod req_temp_table {
                         path.push(uuid);
 
                         if let Ok(file) = File::create(path.clone()) {
-                            info!("file created for [{:?}]", path);
                             file_opened = Some(Arc::new(Mutex::new(BufWriter::new(file))));
                         } else {
                             error!("Failed creating [{:?}] file", path);
@@ -438,7 +437,6 @@ mod req_temp_table {
                             path.push(uuid);
 
                             if let Ok(file) = File::create(path.clone()) {
-                                info!("A file created for [{:?}]", path);
                                 file_opened = Some(Arc::new(Mutex::new(BufWriter::new(file))));
                             } else {
                                 error!("Failed creating [{:?}] file", path);

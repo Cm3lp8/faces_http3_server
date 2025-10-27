@@ -77,7 +77,6 @@ mod stream_sessions {
                 cb(stream);
                 Ok(())
             } else {
-                warn!("no path registered for [{:?}]", path);
                 Err(())
             }
         }
@@ -301,7 +300,6 @@ mod stream_sessions_traits {
             user_session: &mut T,
             app_state: &dyn Any,
         ) -> Result<(), ()> {
-            info!("ici Callback Stream handle for C");
             match app_state.downcast_ref::<C::State>() {
                 Some(state) => self.callback(event, user_session, &state),
                 None => Err(()),
@@ -436,10 +434,6 @@ mod stream_types {
             handler: &Arc<dyn StreamHandle<T> + Send + Sync + 'static>,
         ) -> &mut Self {
             self.stream_handler = Some(handler.clone());
-            info!(
-                "stream handler is set ? [{}]",
-                self.stream_handler.is_some()
-            );
             self
         }
         pub fn set_stream_type(&mut self, stream_type: StreamType) -> &mut Self {
@@ -491,7 +485,6 @@ mod stream_types {
             let user_id = stream
                 .registered_sessions
                 .remove_sessions_by_connection(scid);
-            info!("CLEANED [{:?}] connection !", user_id);
         }
     }
 }
