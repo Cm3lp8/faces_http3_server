@@ -821,8 +821,6 @@ mod route_handle_implementation {
                                 let callback = stream.stream_handler_callback().clone();
                                 let user_session = stream.registered_sessions_mut();
                                 if let Ok(res) = callback.call(event, user_session, &app_state) {
-                                    info!("Stream sessions called ! [{:?}]", res);
-                                    //
                                 } else {
                                     error!("Stream sessions not called ! []");
 
