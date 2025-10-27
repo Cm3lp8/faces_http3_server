@@ -62,8 +62,8 @@ fn main() {
         }
 
         fn register_sessions(&mut self, user_id: Uuid, conn_ids: (Scid, StreamId)) {}
-        fn remove_sessions_by_connection(&mut self, conn_id: &[u8]) -> Vec<Uuid> {
-            vec![]
+        fn remove_sessions_by_connection(&mut self, conn_id: &[u8]) -> Option<Uuid> {
+            None
         }
     }
 
