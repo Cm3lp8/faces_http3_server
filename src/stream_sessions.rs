@@ -476,7 +476,7 @@ mod stream_types {
 
     // an Id field to make possible request confirmation when client responds
 
-    #[derive(Encode, Decode, Clone)]
+    #[derive(Encode, Decode, Clone, Debug)]
     pub struct StreamMessageCapsule<T>
     where
         T: Encode + Decode<()> + Clone,
