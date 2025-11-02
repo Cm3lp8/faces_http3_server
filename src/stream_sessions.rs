@@ -172,7 +172,9 @@ mod stream_sessions {
 
     impl<T: UserSessions<Output = T>> StreamBridge<T> for StreamSessions<T> {
         fn user_session<U>(&self, cb: impl FnOnce(&StreamSessionsInner<T>) -> U) -> U {
+            info!("taking lock ... ");
             let guard = &*self.inner.lock().unwrap();
+            info!("lock taken ! ... ");
 
             cb(guard)
         }
