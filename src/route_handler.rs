@@ -815,22 +815,29 @@ mod route_handle_implementation {
             if let Some(stream_sessions) = route_handler.stream_sessions() {
                 if let Some(route_event) = route_event {
                     let app_state = route_handler.app_state();
-                    let _ = stream_sessions.get_stream_from_path(path.as_str(), |stream| {
-                        match route_event {
-                            RouteEvent::OnFinished(event) => {
-                                let callback = stream.stream_handler_callback().clone();
-                                let user_session = stream.registered_sessions_mut();
-                                if let Ok(res) = callback.call(event, &stream_sessions, &app_state)
-                                {
-                                } else {
-                                    error!("Stream sessions not called ! []");
+                    let Ok(callback) =
+                        stream_sessions.get_stream_from_path(path.as_str(), |stream| {
+                            match route_event {
+                                RouteEvent::OnFinished(event) => {
+                                    let callback = stream.stream_handler_callback().clone();
 
-                                    // send error + close mecanism
+                                    Some((event, callback))
                                 }
+                                _ => None,
                             }
-                            _ => {}
-                        };
-                    });
+                        })
+                    else {
+                        return;
+                    };
+
+                    if let Some((event, callback)) = callback {
+                        if let Ok(res) = callback.call(event, &stream_sessions, &app_state) {
+                        } else {
+                            error!("Stream sessions not called ! []");
+
+                            // send error + close mecanism
+                        }
+                    }
                 }
             };
         } else {

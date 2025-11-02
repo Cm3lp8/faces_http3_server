@@ -68,16 +68,15 @@ mod stream_sessions {
     }
 
     impl<T: UserSessions<Output = T>> StreamManagement<T> for StreamSessions<T> {
-        fn get_stream_from_path(
+        fn get_stream_from_path<R>(
             &self,
             path: &str,
-            cb: impl FnOnce(&mut Stream<T>),
-        ) -> Result<(), ()> {
+            cb: impl FnOnce(&mut Stream<T>) -> R,
+        ) -> Result<R, ()> {
             let guard = &mut *self.inner.lock().unwrap();
 
             if let Some(stream) = guard.sessions.get_mut(path) {
-                cb(stream);
-                Ok(())
+                Ok(cb(stream))
             } else {
                 Err(())
             }
@@ -415,11 +414,11 @@ mod stream_sessions_traits {
     }
 
     pub trait StreamManagement<T: UserSessions<Output = T>> {
-        fn get_stream_from_path(
+        fn get_stream_from_path<R>(
             &self,
             path: &str,
-            cb: impl FnOnce(&mut Stream<T>),
-        ) -> Result<(), ()>;
+            cb: impl FnOnce(&mut Stream<T>) -> R,
+        ) -> Result<R, ()>;
         fn get_stream_session<V>(
             &self,
             cb: impl FnOnce(&StreamSessionsInner<T>) -> Result<V, String>,
