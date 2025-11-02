@@ -336,7 +336,8 @@ mod stream_sessions_traits {
     use bincode::{Decode, Encode};
 
     use crate::{
-        prelude::StreamMessageCapsule, stream_sessions::UserUuid, FinishedEvent, UserSessions,
+        prelude::StreamMessageCapsule, stream_sessions::UserUuid, FinishedEvent, StreamSessions,
+        UserSessions,
     };
 
     use super::{
@@ -381,7 +382,7 @@ mod stream_sessions_traits {
         fn call(
             &self,
             event: FinishedEvent,
-            user_session: &mut T,
+            user_session: &StreamSessions<T>,
             app_state: &dyn Any,
         ) -> Result<(), ()>;
     }
@@ -393,7 +394,7 @@ mod stream_sessions_traits {
         fn call(
             &self,
             event: FinishedEvent,
-            user_session: &mut T,
+            user_session: &StreamSessions<T>,
             app_state: &dyn Any,
         ) -> Result<(), ()> {
             match app_state.downcast_ref::<C::State>() {
@@ -408,7 +409,7 @@ mod stream_sessions_traits {
         fn callback(
             &self,
             event: FinishedEvent,
-            user_session: &mut T,
+            user_session: &StreamSessions<T>,
             app_state: &Self::State,
         ) -> Result<(), ()>;
     }

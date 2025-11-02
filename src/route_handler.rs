@@ -820,7 +820,8 @@ mod route_handle_implementation {
                             RouteEvent::OnFinished(event) => {
                                 let callback = stream.stream_handler_callback().clone();
                                 let user_session = stream.registered_sessions_mut();
-                                if let Ok(res) = callback.call(event, user_session, &app_state) {
+                                if let Ok(res) = callback.call(event, &stream_sessions, &app_state)
+                                {
                                 } else {
                                     error!("Stream sessions not called ! []");
 

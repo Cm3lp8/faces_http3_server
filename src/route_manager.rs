@@ -324,7 +324,7 @@ mod route_mngr {
             self.app_state.clone()
         }
         pub fn to_stream_handler<
-            F: Fn(FinishedEvent, &mut T, &S) -> Result<(), ()> + Sync + Send + 'static,
+            F: Fn(FinishedEvent, &StreamSessions<T>, &S) -> Result<(), ()> + Sync + Send + 'static,
         >(
             &self,
             cb: &'static F,
@@ -332,7 +332,7 @@ mod route_mngr {
             #[derive(Clone)]
             pub struct Anon<S: 'static, T: UserSessions<Output = T>>(
                 Arc<
-                    &'static (dyn Fn(FinishedEvent, &mut T, &S) -> Result<(), ()>
+                    &'static (dyn Fn(FinishedEvent, &StreamSessions<T>, &S) -> Result<(), ()>
                                   + Sync
                                   + Send
                                   + 'static),
@@ -347,7 +347,7 @@ mod route_mngr {
                 fn callback(
                     &self,
                     event: FinishedEvent,
-                    user_session: &mut T,
+                    user_session: &StreamSessions<T>,
                     app_state: &Self::State,
                 ) -> Result<(), ()> {
                     (*self.0)(event, user_session, app_state)
