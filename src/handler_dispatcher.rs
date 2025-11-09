@@ -58,6 +58,7 @@ mod route_response {
         ERROR409(Vec<u8>),
         ERROR503(Vec<u8>),
         ERROR401(Vec<u8>),
+        ERROR422(Vec<u8>),
     }
 }
 mod dispatcher {
@@ -123,6 +124,13 @@ mod dispatcher {
             Response {
                 finished_event: Some(from_event),
                 response: RouteResponse::ERROR409(error_body),
+            }
+        }
+        /// unprocessable entity code 422
+        pub fn error_422(from_event: FinishedEvent, error_body: Vec<u8>) -> Response {
+            Response {
+                finished_event: Some(from_event),
+                response: RouteResponse::ERROR422(error_body),
             }
         }
         pub fn response(&mut self) -> Response {

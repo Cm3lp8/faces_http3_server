@@ -59,6 +59,7 @@ mod event_response_channel {
                 RouteResponse::ERROR409(data) => self.send_error_409(data),
                 RouteResponse::ERROR503(data) => self.send_error_503(data),
                 RouteResponse::ERROR401(data) => self.send_error_401(data),
+                RouteResponse::ERROR422(data) => self.send_error_422(data),
             }
         }
         pub fn send_ok_200_with_data(
@@ -116,6 +117,17 @@ mod event_response_channel {
             let conn_id = &self.conn_id;
             let scid = &self.scid;
             self.sender.send(RequestResponse::new_409_with_data(
+                stream_id, scid, conn_id, data,
+            ))
+        }
+        pub fn send_error_422(
+            &self,
+            data: Vec<u8>,
+        ) -> Result<(), crossbeam_channel::SendError<RequestResponse>> {
+            let stream_id = self.stream_id;
+            let conn_id = &self.conn_id;
+            let scid = &self.scid;
+            self.sender.send(RequestResponse::new_422_with_data(
                 stream_id, scid, conn_id, data,
             ))
         }

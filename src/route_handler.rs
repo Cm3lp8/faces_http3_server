@@ -155,6 +155,9 @@ mod request_hndlr {
                 RouteResponse::ERROR401(buf) => Some(RequestResponse::new_401_with_data(
                     stream_id, scid, conn_id, buf,
                 )),
+                RouteResponse::ERROR422(buf) => Some(RequestResponse::new_422_with_data(
+                    stream_id, scid, conn_id, buf,
+                )),
             }
         }
         pub fn send_reception_status_first(
