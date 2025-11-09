@@ -59,6 +59,7 @@ mod route_response {
         ERROR503(Vec<u8>),
         ERROR401(Vec<u8>),
         ERROR422(Vec<u8>),
+        ERROR428(Vec<u8>),
     }
 }
 mod dispatcher {
@@ -131,6 +132,13 @@ mod dispatcher {
             Response {
                 finished_event: Some(from_event),
                 response: RouteResponse::ERROR422(error_body),
+            }
+        }
+        /// precondition required code 428
+        pub fn error_428(from_event: FinishedEvent, error_body: Vec<u8>) -> Response {
+            Response {
+                finished_event: Some(from_event),
+                response: RouteResponse::ERROR428(error_body),
             }
         }
         pub fn response(&mut self) -> Response {
