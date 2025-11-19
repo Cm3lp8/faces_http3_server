@@ -118,6 +118,39 @@ mod stream_sessions {
             })
             .map_err(|e| String::from("Failed to send message to subscriber"))
         }
+        // TODO review the necessity of this
+        fn retry_send_message_to_subscriber_on_path_with_filtered_scids<
+            U: Decode<()> + Encode + Clone,
+        >(
+            &self,
+            user_id: UserUuid,
+            message: StreamMessageCapsule<U>,
+            path: &str,
+            scids: &[&[u8]],
+        ) -> Result<StreamMessageCapsule<U>, String> {
+            self.get_stream_session(|session| {
+                let Some(stream) = session.sessions.get(path) else {
+                    return Err("Stream on path : No Session found ".to_string());
+                };
+
+                let conn_ids = (message.get_scid(), message.stream_id());
+                let conn_ids = (&conn_ids.0[..], conn_ids.1);
+                match session.send_one_message_on_stream(conn_ids, |_| {
+                    let message = message.clone();
+                    let enc = bincode::encode_to_vec(&message, bincode::config::standard())
+                        .map_err(|e| e.to_string())?;
+
+                    Ok((message, enc))
+                }) {
+                    Ok(messages) => Ok(messages),
+                    Err(e) => {
+                        error!("Failed To send message to [{:?}] ", user_id);
+                        Err(e)
+                    }
+                }
+            })
+            .map_err(|e| String::from("Failed to send message to subscriber"))
+        }
         fn send_message_to_subscriber_on_path<U: Decode<()> + Encode + Clone>(
             &self,
             user_id: UserUuid,
@@ -137,6 +170,59 @@ mod stream_sessions {
 
                         match stream_ident {
                             Ok(id) => Some((id.dcid, id.stream_id)),
+                            Err(e) => None,
+                        }
+                    })
+                    .collect();
+
+                let ids_ref: Vec<(&[u8], u64)> = ids.iter().map(|i| (&i.0[..], i.1)).collect();
+                match session.send_one_or_more_message_on_stream(&ids_ref, |(scid, stream_id)| {
+                    let message = StreamMessageCapsule::new(&message, scid, *stream_id);
+                    let enc = bincode::encode_to_vec(&message, bincode::config::standard())
+                        .map_err(|e| e.to_string());
+
+                    match enc {
+                        Ok(res) => Ok((message, res)),
+                        Err(e) => Err(e),
+                    }
+                }) {
+                    Ok(messages) => Ok(messages),
+                    Err(e) => {
+                        error!("Failed To send message to [{:?}] ", user_id);
+                        Err(e)
+                    }
+                }
+            })
+            .map_err(|e| String::from("Failed to send message to subscriber"))
+        }
+        fn send_message_to_subscriber_on_path_with_filtered_scids<
+            U: Decode<()> + Encode + Clone,
+        >(
+            &self,
+            user_id: UserUuid,
+            message: U,
+            path: &str,
+            scids: &[&[u8]],
+        ) -> Result<Vec<StreamMessageCapsule<U>>, String> {
+            self.get_stream_session(|session| {
+                let Some(stream) = session.sessions.get(path) else {
+                    return Err("Stream on path : No Session found ".to_string());
+                };
+                let ids: Vec<(Vec<u8>, u64)> = stream
+                    .registered_sessions()
+                    .get_connection_ids_on_user_ids(&[user_id])
+                    .into_iter()
+                    .filter_map(|it| {
+                        let stream_ident = it.to_stream_ident();
+
+                        match stream_ident {
+                            Ok(id) => {
+                                if scids.contains(&&id.dcid[..]) {
+                                    None
+                                } else {
+                                    Some((id.dcid, id.stream_id))
+                                }
+                            }
                             Err(e) => None,
                         }
                     })
@@ -428,11 +514,27 @@ mod stream_sessions_traits {
             message: U,
             path: &str,
         ) -> Result<Vec<StreamMessageCapsule<U>>, String>;
+        fn send_message_to_subscriber_on_path_with_filtered_scids<U: Decode<()> + Encode + Clone>(
+            &self,
+            user_id: UserUuid,
+            message: U,
+            path: &str,
+            scid: &[&[u8]],
+        ) -> Result<Vec<StreamMessageCapsule<U>>, String>;
         fn retry_send_message_to_subscriber_on_path<U: Decode<()> + Encode + Clone>(
             &self,
             user_id: UserUuid,
             message: StreamMessageCapsule<U>,
             path: &str,
+        ) -> Result<StreamMessageCapsule<U>, String>;
+        fn retry_send_message_to_subscriber_on_path_with_filtered_scids<
+            U: Decode<()> + Encode + Clone,
+        >(
+            &self,
+            user_id: UserUuid,
+            message: StreamMessageCapsule<U>,
+            path: &str,
+            scid: &[&[u8]],
         ) -> Result<StreamMessageCapsule<U>, String>;
         fn clean_closed_connexions(&self, scid: &[u8]);
     }
