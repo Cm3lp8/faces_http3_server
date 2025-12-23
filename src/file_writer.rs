@@ -77,19 +77,15 @@ mod writable_type {
 
     impl<W: Write + Send + 'static> FileWritable for WritableItem<W> {
         fn write_on_disk(&self) -> Result<usize, ()> {
-            let mut data_len = self.data.len();
             let writer = &mut *self.writer.lock().unwrap();
 
-            while let Ok(n) = writer.write(&self.data[..data_len]) {
-                data_len -= n;
-                if data_len == 0 {
-                    if let Err(_) = writer.flush() {
-                        return Err(());
-                    }
-                    return Ok(self.data.len());
+            match writer.write_all(&self.data) {
+                Ok(()) => Ok(self.data.len()),
+                Err(e) => {
+                    error!("[{:?}]", e);
+                    Err(())
                 }
             }
-            Err(())
         }
     }
 }

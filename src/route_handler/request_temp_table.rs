@@ -587,16 +587,22 @@ mod req_temp_table {
             self.body_written_size
         }
         ///
-        ///Drop the file to close it and return the file path.
+        ///Drop the BufWriter<file> to close it and return the file path.
         pub fn close_file(&mut self) -> Option<PathBuf> {
+            if let Some(f) = self.file_opened.as_mut() {
+                let mut retry_attemps = 0;
+                let guard = &mut *f.lock().unwrap();
+                while retry_attemps < 5 {
+                    if let Ok(_) = guard.flush() {
+                        break;
+                    } else {
+                        retry_attemps += 1;
+                    }
+                }
+            }
             self.file_opened.take();
             self.storage_path.clone()
         }
-        /*
-                pub fn storage_type(&self) -> &Option<BodyStorage> {
-                    &self.storage_type
-                }
-        */
         pub fn data_management_type(&self) -> Option<DataManagement> {
             self.data_management_type
         }
