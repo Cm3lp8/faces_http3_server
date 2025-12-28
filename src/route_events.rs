@@ -170,8 +170,9 @@ mod request_event {
 
     use mio::event;
     use quiche::h3;
+    use ring::test::File;
 
-    use crate::{route_handler::ReqArgs, H3Method};
+    use crate::{file_writer::FileWriterHandle, route_handler::ReqArgs, H3Method};
 
     use super::*;
 
@@ -232,6 +233,7 @@ mod request_event {
         method: H3Method,
         args: Option<ReqArgs>,
         file_path: Option<PathBuf>,
+        file_writer: Option<FileWriterHandle<std::fs::File>>,
         bytes_written: usize,
         body: Vec<u8>,
         is_end: bool,
@@ -247,6 +249,7 @@ mod request_event {
             headers: Vec<h3::Header>,
             args: Option<ReqArgs>,
             file_path: Option<PathBuf>,
+            file_writer: Option<FileWriterHandle<std::fs::File>>,
             bytes_written: usize,
             body: Option<Vec<u8>>,
             is_end: bool,
@@ -260,6 +263,7 @@ mod request_event {
                 headers,
                 args,
                 file_path,
+                file_writer,
                 bytes_written,
                 body: body.unwrap_or(vec![]),
                 is_end,
@@ -280,6 +284,12 @@ mod request_event {
         }
         pub fn path(&self) -> &str {
             self.path.as_str()
+        }
+        pub fn file_writer(&self) -> Option<&FileWriterHandle<std::fs::File>> {
+            self.file_writer.as_ref()
+        }
+        pub fn take_file_writer(&mut self) -> Option<FileWriterHandle<std::fs::File>> {
+            self.file_writer.take()
         }
         pub fn method(&self) -> H3Method {
             self.method
@@ -318,6 +328,7 @@ mod request_event {
                 headers: self.headers.clone(),
                 args: self.args.clone(),
                 file_path: self.file_path.clone(),
+                file_writer: self.file_writer.clone(),
                 bytes_written: self.bytes_written,
                 body: self.body.clone(),
                 is_end: self.is_end,
@@ -333,6 +344,7 @@ mod request_event {
                 headers: self.headers.clone(),
                 args: self.args.clone(),
                 file_path: self.file_path.clone(),
+                file_writer: self.file_writer.clone(),
                 bytes_written: self.bytes_written,
                 body: vec![],
                 is_end: self.is_end,

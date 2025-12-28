@@ -3,6 +3,7 @@ extern crate log;
 
 pub use event_listener::{EventLoop, RouteEventListener};
 use file_writer::FileWriter;
+pub use file_writer::FileWriterHandle;
 pub use handler_dispatcher::{ErrorResponse, Response, RouteHandle, RouteResponse};
 pub use middleware::{HeadersColl, MiddleWare, MiddleWareFlow, MiddleWareResult};
 pub use quiche::h3;

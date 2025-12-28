@@ -16,6 +16,7 @@ mod request_hndlr {
         collections::HashMap,
         env::args,
         fmt::Pointer,
+        fs::File,
         io::BufWriter,
         path::PathBuf,
         sync::{Arc, Mutex, MutexGuard},
@@ -23,7 +24,7 @@ mod request_hndlr {
     };
 
     use crate::{
-        file_writer::{FileWritable, FileWriterChannel},
+        file_writer::{FileWritable, FileWriterChannel, FileWriterHandle},
         handler_dispatcher::RouteEventDispatcher,
         header_queue_processing::{HeaderMessage, MiddleWareJob, RouteType},
         middleware,
@@ -417,7 +418,7 @@ mod request_hndlr {
             let guard = &mut *self.inner.lock().unwrap();
 
             let mut file_storage = None::<PathBuf>;
-            let mut file_open = None::<Arc<Mutex<(BufWriter<std::fs::File>, usize)>>>;
+            let mut file_open = None::<FileWriterHandle<std::fs::File>>;
             match response_queue_processing::utils::build_temp_stage_file_storage_path(
                 server_config,
                 headers,

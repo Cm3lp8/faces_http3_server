@@ -88,7 +88,7 @@ mod req_temp_table {
     use uuid::Uuid;
 
     use crate::{
-        file_writer::{FileWritable, FileWriterChannel, WritableItem},
+        file_writer::{FileWritable, FileWriterChannel, FileWriterHandle, WritableItem},
         route_events::{self, DataEvent, EventType, FinishedEvent, HeaderEvent, RouteEvent},
         route_manager::DataManagement,
         server_config, BodyStorage, H3Method, RouteEventListener, ServerConfig,
@@ -125,7 +125,7 @@ mod req_temp_table {
             data_management_type: Option<DataManagement>,
             event_subscriber: Option<Arc<dyn RouteEventListener + 'static + Send + Sync>>,
             storage_path: Option<PathBuf>,
-            file_open: Option<Arc<Mutex<(BufWriter<File>, usize)>>>,
+            file_open: Option<FileWriterHandle<File>>,
         ) {
             self.table
                 .lock()
@@ -330,7 +330,7 @@ mod req_temp_table {
             {
                 return;
             }
-            let mut file_opened: Option<Arc<Mutex<(BufWriter<File>, usize)>>> = None;
+            let mut file_opened: Option<FileWriterHandle<File>> = None;
             let storage_path = if let Some(data_management_type) = data_management_type.as_ref() {
                 if let Some(body_storage) = data_management_type.is_body_storage() {
                     if let BodyStorage::File = body_storage {
@@ -348,7 +348,7 @@ mod req_temp_table {
                         path.push(uuid);
 
                         if let Ok(file) = File::create(path.clone()) {
-                            file_opened = Some(Arc::new(Mutex::new((BufWriter::new(file), 0))));
+                            file_opened = Some(FileWriterHandle::new(file));
                         } else {
                             error!("Failed creating [{:?}] file", path);
                         }
@@ -407,7 +407,7 @@ mod req_temp_table {
             {
                 return;
             }
-            let mut file_opened: Option<Arc<Mutex<(BufWriter<File>, usize)>>> = None;
+            let mut file_opened: Option<FileWriterHandle<File>> = None;
             let storage_path = if let Some(data_management_type) = data_management_type.as_ref() {
                 if let Some(body_storage) = data_management_type.is_body_storage() {
                     match body_storage {
@@ -437,7 +437,7 @@ mod req_temp_table {
                             path.push(uuid);
 
                             if let Ok(file) = File::create(path.clone()) {
-                                file_opened = Some(Arc::new(Mutex::new((BufWriter::new(file), 0))));
+                                file_opened = Some(FileWriterHandle::new(file));
                             } else {
                                 error!("Failed creating [{:?}] file", path);
                             }
@@ -481,7 +481,7 @@ mod req_temp_table {
         data_management_type: Option<DataManagement>,
         event_subscriber: Option<Arc<dyn RouteEventListener + 'static + Send + Sync>>,
         storage_path: Option<PathBuf>,
-        file_opened: Option<Arc<Mutex<(BufWriter<File>, usize)>>>,
+        file_opened: Option<FileWriterHandle<File>>,
         path: Option<String>,
         args: Option<ReqArgs>,
         body_written_size: usize,
@@ -509,7 +509,7 @@ mod req_temp_table {
             data_management_type: Option<DataManagement>,
             event_subscriber: Option<Arc<dyn RouteEventListener + Send + 'static + Sync>>,
             storage_path: Option<PathBuf>,
-            file_opened: Option<Arc<Mutex<(BufWriter<File>, usize)>>>,
+            file_opened: Option<FileWriterHandle<File>>,
             file_writer_channel: FileWriterChannel,
             headers: Option<&[h3::Header]>,
             path: Option<&str>,
@@ -599,12 +599,11 @@ mod req_temp_table {
                         'main: loop {
                             std::thread::sleep(Duration::from_millis(30));
                             info!("wait to close");
-                            let guard = &mut *file_h.lock().unwrap();
-                            if guard.1 >= content_lenght {
+                            if file_h.written() >= content_lenght {
                                 while retry_attemps < 5 {
                                     std::thread::sleep(Duration::from_millis(3));
-                                    if let Ok(_) = guard.0.flush() {
-                                        info!("Flushing file at [{:?}] bytes", guard.1);
+                                    if let Ok(_) = file_h.flush() {
+                                        info!("Flushing file at [{:?}] bytes", file_h.written());
                                         break 'main;
                                     } else {
                                         retry_attemps += 1;
@@ -660,6 +659,7 @@ mod req_temp_table {
                         headers.clone(),
                         self.args.take(),
                         file_path,
+                        self.file_opened.take(),
                         self.body_written_size,
                         Some(std::mem::replace(&mut self.body, vec![])),
                         self.is_end,

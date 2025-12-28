@@ -1,6 +1,7 @@
 pub use file_wrtr::{FileWriter, FileWriterChannel};
 pub use trait_writable::FileWritable;
-pub use writable_type::WritableItem;
+pub use writable_type::{FileWriterHandle, WritableItem};
+
 mod file_wrtr {
     use std::fs::File;
 
@@ -53,24 +54,153 @@ mod trait_writable {
 
 mod writable_type {
     use std::{
+        fs::File,
         io::{BufWriter, Write},
         sync::{Arc, Mutex},
+        time::Duration,
     };
+
+    use quiche::Error;
+
+    use crate::file_writer::FileWriter;
 
     use super::trait_writable::FileWritable;
 
-    pub struct WritableItem<W: std::io::Write> {
-        packet_id: usize,
-        data: Vec<u8>,
-        writer: Arc<Mutex<(BufWriter<W>, usize)>>, // (_, bytes_written)
+    impl<W> Clone for FileWriterHandle<W>
+    where
+        W: std::io::Write + Send + Sync + 'static,
+    {
+        fn clone(&self) -> Self {
+            Self {
+                inner: self.inner.clone(),
+            }
+        }
+    }
+    use std::os::unix::fs::FileExt;
+    #[derive(Debug)]
+    pub struct FileWriterHandle<W>
+    where
+        W: std::io::Write + Sync + Send + 'static,
+    {
+        inner: Arc<Mutex<(BufWriter<W>, usize)>>,
+    }
+    impl<W> FileWriterHandle<W>
+    where
+        W: std::io::Write + Send + Sync + 'static,
+    {
+        pub fn new(writer: W) -> Self {
+            Self {
+                inner: Arc::new(Mutex::new((BufWriter::new(writer), 0))),
+            }
+        }
+        pub fn written(&self) -> usize {
+            let guard = &*self.inner.lock().unwrap();
+
+            guard.1
+        }
+        pub fn flush(&self) -> Result<(), std::io::Error> {
+            let guard = &mut *self.inner.lock().unwrap();
+            guard.0.flush()
+        }
+        fn write_on_disk(&self, data: &[u8]) -> Result<usize, ()> {
+            let writer = &mut *self.inner.lock().unwrap();
+
+            match writer.0.write_all(data) {
+                Ok(()) => {
+                    writer.1 += data.len();
+                    info!("writtent [{:?}]", writer.1);
+                    Ok(data.len())
+                }
+                Err(e) => {
+                    error!("[{:?}]", e);
+                    Err(())
+                }
+            }
+        }
+        ///Drop the BufWriter<file> to close it and return the file path.
+        pub fn close_file(&mut self, content_length_required: usize) -> Result<(), std::io::Error> {
+            let file_h = self.inner.clone();
+            std::thread::spawn(move || {
+                let mut retry_attemps = 0;
+
+                'main: loop {
+                    std::thread::sleep(Duration::from_millis(30));
+                    let guard = &mut *file_h.lock().unwrap();
+                    info!("wait to close");
+                    if guard.1 >= content_length_required {
+                        while retry_attemps < 5 {
+                            std::thread::sleep(Duration::from_millis(3));
+                            if let Ok(_) = guard.0.flush() {
+                                info!("Flushing file at [{:?}] bytes", guard.1);
+                                break 'main;
+                            } else {
+                                retry_attemps += 1;
+                            }
+                        }
+                        if retry_attemps >= 5 {
+                            break 'main;
+                        }
+                    }
+                }
+            });
+            Ok(())
+        }
     }
 
-    impl<W: std::io::Write> WritableItem<W> {
-        pub fn new(
-            data: Vec<u8>,
-            packet_id: usize,
-            writer: Arc<Mutex<(BufWriter<W>, usize)>>,
-        ) -> Self {
+    impl FileWriterHandle<std::fs::File> {
+        pub fn read_128_first_bytes_on_close(
+            &mut self,
+            content_length_required: usize,
+            bytes_to_read: usize,
+            cb: impl FnOnce(Option<Vec<u8>>) + Send + Sync + 'static,
+        ) {
+            let file_h = self.inner.clone();
+            std::thread::spawn(move || {
+                let mut retry_attemps = 0;
+
+                'main: loop {
+                    std::thread::sleep(Duration::from_millis(30));
+                    let guard = &mut *file_h.lock().unwrap();
+                    info!("wait to close");
+                    if guard.1 >= content_length_required {
+                        while retry_attemps < 5 {
+                            std::thread::sleep(Duration::from_millis(3));
+                            if let Ok(_) = guard.0.flush() {
+                                info!("Flushing file at [{:?}] bytes", guard.1);
+                                let file = guard.0.get_ref();
+                                let mut buf: [u8; 128] = [0; 128];
+                                match file.read_at(&mut buf, 0) {
+                                    Ok(_) => cb(Some(buf.to_vec())),
+                                    Err(e) => {
+                                        cb(None);
+                                        {
+                                            info!("Failed to read 128 bytes from file");
+                                        }
+                                    }
+                                }
+
+                                break 'main;
+                            } else {
+                                retry_attemps += 1;
+                            }
+                        }
+                        if retry_attemps >= 5 {
+                            break 'main;
+                        }
+                    }
+                }
+            });
+        }
+    }
+
+    pub struct WritableItem<W: std::io::Write + Send + Sync + 'static> {
+        packet_id: usize,
+        data: Vec<u8>,
+        writer: FileWriterHandle<W>, // (_, bytes_written)
+    }
+
+    impl<W: std::io::Write + Send + Sync + 'static> WritableItem<W> {
+        pub fn new(data: Vec<u8>, packet_id: usize, writer: FileWriterHandle<W>) -> Self {
             Self {
                 packet_id,
                 data,
@@ -79,21 +209,9 @@ mod writable_type {
         }
     }
 
-    impl<W: Write + Send + 'static> FileWritable for WritableItem<W> {
+    impl<W: Write + Send + 'static + Sync> FileWritable for WritableItem<W> {
         fn write_on_disk(&self) -> Result<usize, ()> {
-            let writer = &mut *self.writer.lock().unwrap();
-
-            match writer.0.write_all(&self.data) {
-                Ok(()) => {
-                    writer.1 += self.data.len();
-                    info!("writtent [{:?}]", writer.1);
-                    Ok(self.data.len())
-                }
-                Err(e) => {
-                    error!("[{:?}]", e);
-                    Err(())
-                }
-            }
+            self.writer.write_on_disk(&self.data)
         }
     }
 }

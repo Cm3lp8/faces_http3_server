@@ -6,15 +6,14 @@ use std::{fs::File, sync::Arc};
 use quiche::h3::{self, NameValue};
 use uuid::Uuid;
 
+use crate::file_writer::FileWriterHandle;
 use crate::{server_config, BodyStorage, DataManagement, ServerConfig};
-
-type FileOpen = Arc<Mutex<(BufWriter<File>, usize)>>;
 
 pub fn build_temp_stage_file_storage_path(
     server_config: &ServerConfig,
     headers: &[h3::Header],
     data_management_type: &Option<DataManagement>,
-) -> Option<(PathBuf, FileOpen)> {
+) -> Option<(PathBuf, FileWriterHandle<File>)> {
     let Some(data_management_type) = data_management_type else {
         return None;
     };
@@ -47,7 +46,7 @@ pub fn build_temp_stage_file_storage_path(
 
                 let file_open = if let Ok(file) = File::create(path.clone()) {
                     info!("A file created for [{:?}]", path);
-                    Arc::new(Mutex::new((BufWriter::new(file), 0)))
+                    FileWriterHandle::new(file)
                 } else {
                     error!("Failed creating [{:?}] file", path);
                     return None;
