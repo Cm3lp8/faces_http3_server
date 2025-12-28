@@ -86,6 +86,7 @@ mod writable_type {
             match writer.0.write_all(&self.data) {
                 Ok(()) => {
                     writer.1 += self.data.len();
+                    info!("writtent [{:?}]", writer.1);
                     Ok(self.data.len())
                 }
                 Err(e) => {

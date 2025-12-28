@@ -598,6 +598,7 @@ mod req_temp_table {
 
                         'main: loop {
                             std::thread::sleep(Duration::from_millis(30));
+                            info!("wait to close");
                             let guard = &mut *file_h.lock().unwrap();
                             if guard.1 >= content_lenght {
                                 while retry_attemps < 5 {
