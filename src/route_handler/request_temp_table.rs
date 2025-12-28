@@ -596,18 +596,22 @@ mod req_temp_table {
                     std::thread::spawn(move || {
                         let mut retry_attemps = 0;
 
-                        'main: loop {
+                        loop {
                             std::thread::sleep(Duration::from_millis(30));
                             info!("wait to close");
                             let guard = &mut *file_h.lock().unwrap();
                             if guard.1 >= content_lenght {
                                 while retry_attemps < 5 {
+                                    std::thread::sleep(Duration::from_millis(3));
                                     if let Ok(_) = guard.0.flush() {
                                         info!("Flushing file at [{:?}] bytes", guard.1);
-                                        break 'main;
+                                        return;
                                     } else {
                                         retry_attemps += 1;
                                     }
+                                }
+                                if retry_attemps >= 5 {
+                                    return;
                                 }
                             }
                         }
