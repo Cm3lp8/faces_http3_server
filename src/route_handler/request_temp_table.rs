@@ -589,35 +589,7 @@ mod req_temp_table {
         }
         ///
         ///Drop the BufWriter<file> to close it and return the file path.
-        pub fn close_file(&mut self) -> Option<PathBuf> {
-            let file_handle = self.file_opened.clone();
-            if let Some(content_lenght) = self.content_length {
-                if let Some(file_h) = file_handle {
-                    std::thread::spawn(move || {
-                        let mut retry_attemps = 0;
-
-                        'main: loop {
-                            std::thread::sleep(Duration::from_millis(30));
-                            info!("wait to close");
-                            if file_h.written() >= content_lenght {
-                                while retry_attemps < 5 {
-                                    std::thread::sleep(Duration::from_millis(3));
-                                    if let Ok(_) = file_h.flush() {
-                                        info!("Flushing file at [{:?}] bytes", file_h.written());
-                                        break 'main;
-                                    } else {
-                                        retry_attemps += 1;
-                                    }
-                                }
-                                if retry_attemps >= 5 {
-                                    break 'main;
-                                }
-                            }
-                        }
-                    });
-                }
-            }
-
+        pub fn path_storage(&mut self) -> Option<PathBuf> {
             self.storage_path.clone()
         }
         pub fn data_management_type(&self) -> Option<DataManagement> {
@@ -638,7 +610,7 @@ mod req_temp_table {
             if self.method.is_none() || self.headers.is_none() || self.path.is_none() {
                 return None;
             }
-            let file_path = self.close_file();
+            let file_path = self.path_storage();
             if let Some(headers) = self.headers.as_ref() {
                 match event_type {
                     EventType::OnHeader => Some(RouteEvent::new_header(HeaderEvent::new(
