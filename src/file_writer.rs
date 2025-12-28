@@ -148,10 +148,10 @@ mod writable_type {
     }
 
     impl FileWriterHandle<std::fs::File> {
+        /// [`on_file_written`] trigs a callback when required content is written .
         pub fn on_file_written(
             &mut self,
             content_length_required: usize,
-            bytes_to_read: usize,
             cb: impl FnOnce(usize) + Send + Sync + 'static,
         ) {
             let file_h = self.inner.clone();
