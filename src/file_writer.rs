@@ -144,7 +144,7 @@ mod writable_type {
                 let cdv = &file_h.1;
                 let guard = file_h.0.lock().unwrap();
                 info!("wait to close");
-                if guard.written <= content_length_required {
+                if guard.written < content_length_required {
                     cdv.wait(guard);
                 }
                 info!("has close");
@@ -169,7 +169,7 @@ mod writable_type {
                         "wait to close whyloop content_length_required [{:?}] written [{:?}]?",
                         content_length_required, guard.written
                     );
-                    if guard.written <= content_length_required {
+                    if guard.written < content_length_required {
                         match cdv.wait(guard) {
                             Ok(_) => {
                                 info!("Condvar wake")
