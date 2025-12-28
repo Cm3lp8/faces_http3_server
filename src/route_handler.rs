@@ -417,7 +417,7 @@ mod request_hndlr {
             let guard = &mut *self.inner.lock().unwrap();
 
             let mut file_storage = None::<PathBuf>;
-            let mut file_open = None::<Arc<Mutex<BufWriter<std::fs::File>>>>;
+            let mut file_open = None::<Arc<Mutex<(BufWriter<std::fs::File>, usize)>>>;
             match response_queue_processing::utils::build_temp_stage_file_storage_path(
                 server_config,
                 headers,

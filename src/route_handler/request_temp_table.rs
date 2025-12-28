@@ -83,7 +83,7 @@ mod req_temp_table {
         io::{BufReader, BufWriter, Write},
         path::PathBuf,
         sync::{Arc, Mutex},
-        time::SystemTimeError,
+        time::{Duration, SystemTimeError},
     };
     use uuid::Uuid;
 
@@ -125,7 +125,7 @@ mod req_temp_table {
             data_management_type: Option<DataManagement>,
             event_subscriber: Option<Arc<dyn RouteEventListener + 'static + Send + Sync>>,
             storage_path: Option<PathBuf>,
-            file_open: Option<Arc<Mutex<BufWriter<File>>>>,
+            file_open: Option<Arc<Mutex<(BufWriter<File>, usize)>>>,
         ) {
             self.table
                 .lock()
@@ -330,7 +330,7 @@ mod req_temp_table {
             {
                 return;
             }
-            let mut file_opened: Option<Arc<Mutex<BufWriter<File>>>> = None;
+            let mut file_opened: Option<Arc<Mutex<(BufWriter<File>, usize)>>> = None;
             let storage_path = if let Some(data_management_type) = data_management_type.as_ref() {
                 if let Some(body_storage) = data_management_type.is_body_storage() {
                     if let BodyStorage::File = body_storage {
@@ -348,7 +348,7 @@ mod req_temp_table {
                         path.push(uuid);
 
                         if let Ok(file) = File::create(path.clone()) {
-                            file_opened = Some(Arc::new(Mutex::new(BufWriter::new(file))));
+                            file_opened = Some(Arc::new(Mutex::new((BufWriter::new(file), 0))));
                         } else {
                             error!("Failed creating [{:?}] file", path);
                         }
@@ -407,7 +407,7 @@ mod req_temp_table {
             {
                 return;
             }
-            let mut file_opened: Option<Arc<Mutex<BufWriter<File>>>> = None;
+            let mut file_opened: Option<Arc<Mutex<(BufWriter<File>, usize)>>> = None;
             let storage_path = if let Some(data_management_type) = data_management_type.as_ref() {
                 if let Some(body_storage) = data_management_type.is_body_storage() {
                     match body_storage {
@@ -437,7 +437,7 @@ mod req_temp_table {
                             path.push(uuid);
 
                             if let Ok(file) = File::create(path.clone()) {
-                                file_opened = Some(Arc::new(Mutex::new(BufWriter::new(file))));
+                                file_opened = Some(Arc::new(Mutex::new((BufWriter::new(file), 0))));
                             } else {
                                 error!("Failed creating [{:?}] file", path);
                             }
@@ -481,7 +481,7 @@ mod req_temp_table {
         data_management_type: Option<DataManagement>,
         event_subscriber: Option<Arc<dyn RouteEventListener + 'static + Send + Sync>>,
         storage_path: Option<PathBuf>,
-        file_opened: Option<Arc<Mutex<BufWriter<File>>>>,
+        file_opened: Option<Arc<Mutex<(BufWriter<File>, usize)>>>,
         path: Option<String>,
         args: Option<ReqArgs>,
         body_written_size: usize,
@@ -509,7 +509,7 @@ mod req_temp_table {
             data_management_type: Option<DataManagement>,
             event_subscriber: Option<Arc<dyn RouteEventListener + Send + 'static + Sync>>,
             storage_path: Option<PathBuf>,
-            file_opened: Option<Arc<Mutex<BufWriter<File>>>>,
+            file_opened: Option<Arc<Mutex<(BufWriter<File>, usize)>>>,
             file_writer_channel: FileWriterChannel,
             headers: Option<&[h3::Header]>,
             path: Option<&str>,
@@ -576,6 +576,7 @@ mod req_temp_table {
                     error!("failed to send writable item to file worker thread");
                 };
                 self.body_written_size += packet.len();
+                println!("send to write [{:?}]", self.body_written_size);
             }
         }
         pub fn extend_data(&mut self, packet: &[u8], is_end: bool) {
@@ -589,18 +590,30 @@ mod req_temp_table {
         ///
         ///Drop the BufWriter<file> to close it and return the file path.
         pub fn close_file(&mut self) -> Option<PathBuf> {
-            if let Some(f) = self.file_opened.as_mut() {
-                let mut retry_attemps = 0;
-                let guard = &mut *f.lock().unwrap();
-                while retry_attemps < 5 {
-                    if let Ok(_) = guard.flush() {
-                        break;
-                    } else {
-                        retry_attemps += 1;
-                    }
+            let file_handle = self.file_opened.clone();
+            if let Some(content_lenght) = self.content_length {
+                if let Some(file_h) = file_handle {
+                    std::thread::spawn(move || {
+                        let mut retry_attemps = 0;
+
+                        'main: loop {
+                            std::thread::sleep(Duration::from_millis(30));
+                            let guard = &mut *file_h.lock().unwrap();
+                            if guard.1 >= content_lenght {
+                                while retry_attemps < 5 {
+                                    if let Ok(_) = guard.0.flush() {
+                                        info!("Flushing file at [{:?}] bytes", guard.1);
+                                        break 'main;
+                                    } else {
+                                        retry_attemps += 1;
+                                    }
+                                }
+                            }
+                        }
+                    });
                 }
             }
-            self.file_opened.take();
+
             self.storage_path.clone()
         }
         pub fn data_management_type(&self) -> Option<DataManagement> {

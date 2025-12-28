@@ -62,11 +62,15 @@ mod writable_type {
     pub struct WritableItem<W: std::io::Write> {
         packet_id: usize,
         data: Vec<u8>,
-        writer: Arc<Mutex<BufWriter<W>>>,
+        writer: Arc<Mutex<(BufWriter<W>, usize)>>, // (_, bytes_written)
     }
 
     impl<W: std::io::Write> WritableItem<W> {
-        pub fn new(data: Vec<u8>, packet_id: usize, writer: Arc<Mutex<BufWriter<W>>>) -> Self {
+        pub fn new(
+            data: Vec<u8>,
+            packet_id: usize,
+            writer: Arc<Mutex<(BufWriter<W>, usize)>>,
+        ) -> Self {
             Self {
                 packet_id,
                 data,
@@ -79,8 +83,11 @@ mod writable_type {
         fn write_on_disk(&self) -> Result<usize, ()> {
             let writer = &mut *self.writer.lock().unwrap();
 
-            match writer.write_all(&self.data) {
-                Ok(()) => Ok(self.data.len()),
+            match writer.0.write_all(&self.data) {
+                Ok(()) => {
+                    writer.1 += self.data.len();
+                    Ok(self.data.len())
+                }
                 Err(e) => {
                     error!("[{:?}]", e);
                     Err(())

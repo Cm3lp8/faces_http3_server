@@ -545,6 +545,7 @@ mod quiche_implementation {
                                 }
                                 let trace_id = client.conn.trace_id().to_string();
 
+                                /*
                                 if let Err(_) =
                                     route_manager.routes_handler().send_reception_status(
                                         client,
@@ -557,6 +558,7 @@ mod quiche_implementation {
                                 {
                                     error!("Failed to send progress response status")
                                 }
+                                */
                             }
                             Ok((stream_id, quiche::h3::Event::Finished)) => {
                                 let trace_id = client.conn.trace_id().to_owned();

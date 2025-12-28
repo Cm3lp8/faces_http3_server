@@ -8,7 +8,7 @@ use uuid::Uuid;
 
 use crate::{server_config, BodyStorage, DataManagement, ServerConfig};
 
-type FileOpen = Arc<Mutex<BufWriter<File>>>;
+type FileOpen = Arc<Mutex<(BufWriter<File>, usize)>>;
 
 pub fn build_temp_stage_file_storage_path(
     server_config: &ServerConfig,
@@ -47,7 +47,7 @@ pub fn build_temp_stage_file_storage_path(
 
                 let file_open = if let Ok(file) = File::create(path.clone()) {
                     info!("A file created for [{:?}]", path);
-                    Arc::new(Mutex::new(BufWriter::new(file)))
+                    Arc::new(Mutex::new((BufWriter::new(file), 0)))
                 } else {
                     error!("Failed creating [{:?}] file", path);
                     return None;
