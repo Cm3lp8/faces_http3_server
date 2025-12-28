@@ -55,8 +55,8 @@ mod trait_writable {
 mod writable_type {
     use std::{
         fs::File,
-        io::{BufWriter, Write},
-        sync::{Arc, Mutex},
+        io::{BufWriter, ErrorKind, Write},
+        sync::{Arc, Condvar, Mutex},
         time::Duration,
     };
 
@@ -76,13 +76,22 @@ mod writable_type {
             }
         }
     }
-    use std::os::unix::fs::FileExt;
+    #[derive(Debug)]
+    struct State<W>
+    where
+        W: std::io::Write + Send + Sync + 'static,
+    {
+        writer: BufWriter<W>,
+        written: usize,
+        closed: bool,
+    }
+
     #[derive(Debug)]
     pub struct FileWriterHandle<W>
     where
         W: std::io::Write + Sync + Send + 'static,
     {
-        inner: Arc<Mutex<(BufWriter<W>, usize)>>,
+        inner: Arc<(Mutex<State<W>>, Condvar)>,
     }
     impl<W> FileWriterHandle<W>
     where
@@ -90,25 +99,34 @@ mod writable_type {
     {
         pub fn new(writer: W) -> Self {
             Self {
-                inner: Arc::new(Mutex::new((BufWriter::new(writer), 0))),
+                inner: Arc::new((
+                    Mutex::new(State {
+                        writer: BufWriter::new(writer),
+                        written: 0,
+                        closed: false,
+                    }),
+                    Condvar::new(),
+                )),
             }
         }
         pub fn written(&self) -> usize {
-            let guard = &*self.inner.lock().unwrap();
+            let guard = &*self.inner.0.lock().unwrap();
 
-            guard.1
+            guard.written
         }
         pub fn flush(&self) -> Result<(), std::io::Error> {
-            let guard = &mut *self.inner.lock().unwrap();
-            guard.0.flush()
+            let guard = &mut *self.inner.0.lock().unwrap();
+            guard.writer.flush()
         }
         fn write_on_disk(&self, data: &[u8]) -> Result<usize, ()> {
-            let writer = &mut *self.inner.lock().unwrap();
+            let writer = &mut *self.inner.0.lock().unwrap();
+            let cdv = &self.inner.1;
 
-            match writer.0.write_all(data) {
+            match writer.writer.write_all(data) {
                 Ok(()) => {
-                    writer.1 += data.len();
-                    info!("writtent [{:?}]", writer.1);
+                    writer.written += data.len();
+                    info!("writtent [{:?}]", writer.written);
+                    cdv.notify_all();
                     Ok(data.len())
                 }
                 Err(e) => {
@@ -123,24 +141,11 @@ mod writable_type {
             std::thread::spawn(move || {
                 let mut retry_attemps = 0;
 
-                'main: loop {
-                    std::thread::sleep(Duration::from_millis(30));
-                    let guard = &mut *file_h.lock().unwrap();
-                    info!("wait to close");
-                    if guard.1 >= content_length_required {
-                        while retry_attemps < 5 {
-                            std::thread::sleep(Duration::from_millis(3));
-                            if let Ok(_) = guard.0.flush() {
-                                info!("Flushing file at [{:?}] bytes", guard.1);
-                                break 'main;
-                            } else {
-                                retry_attemps += 1;
-                            }
-                        }
-                        if retry_attemps >= 5 {
-                            break 'main;
-                        }
-                    }
+                let cdv = &file_h.1;
+                let guard = file_h.0.lock().unwrap();
+                info!("wait to close");
+                if guard.written <= content_length_required && !guard.closed {
+                    cdv.wait(guard);
                 }
             });
             Ok(())
@@ -156,29 +161,36 @@ mod writable_type {
         ) {
             let file_h = self.inner.clone();
             std::thread::spawn(move || {
-                let mut retry_attemps = 0;
+                let cdv = &file_h.1;
+                let guard = file_h.0.lock().unwrap();
+                info!("wait to close");
+                if guard.written <= content_length_required {
+                    match cdv.wait(guard) {
+                        Ok(_) => {}
+                        Err(e) => {}
+                    }
+                }
 
-                'main: loop {
-                    std::thread::sleep(Duration::from_millis(30));
-                    let guard = &mut *file_h.lock().unwrap();
-                    info!("wait to close");
-                    if guard.1 >= content_length_required {
-                        while retry_attemps < 5 {
-                            std::thread::sleep(Duration::from_millis(3));
-                            if let Ok(_) = guard.0.flush() {
-                                info!("Flushing file at [{:?}] bytes", guard.1);
-                                cb(guard.1);
+                let guard = &mut *file_h.0.lock().unwrap();
+                let mut retry = 0;
+                loop {
+                    match guard.writer.flush() {
+                        Ok(_) => break,
+                        Err(e) if e.kind() == ErrorKind::Interrupted => {
+                            retry += 1;
 
-                                break 'main;
-                            } else {
-                                retry_attemps += 1;
+                            if retry >= 5 {
+                                break;
                             }
                         }
-                        if retry_attemps >= 5 {
-                            break 'main;
+                        _ => {
+                            break;
                         }
                     }
                 }
+
+                info!("File written !!");
+                cb(content_length_required)
             });
         }
     }
