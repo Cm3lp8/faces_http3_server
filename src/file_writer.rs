@@ -144,9 +144,10 @@ mod writable_type {
                 let cdv = &file_h.1;
                 let guard = file_h.0.lock().unwrap();
                 info!("wait to close");
-                if guard.written <= content_length_required && !guard.closed {
+                if guard.written <= content_length_required {
                     cdv.wait(guard);
                 }
+                info!("has close");
             });
             Ok(())
         }
@@ -162,18 +163,26 @@ mod writable_type {
             let file_h = self.inner.clone();
             std::thread::spawn(move || {
                 let cdv = &file_h.1;
-                let guard = file_h.0.lock().unwrap();
-                info!("wait to close whyloop ?");
-                if guard.written <= content_length_required {
-                    match cdv.wait(guard) {
-                        Ok(_) => {}
-                        Err(e) => {}
+                {
+                    let guard = file_h.0.lock().unwrap();
+                    info!(
+                        "wait to close whyloop content_length_required [{:?}] written [{:?}]?",
+                        content_length_required, guard.written
+                    );
+                    if guard.written <= content_length_required {
+                        match cdv.wait(guard) {
+                            Ok(_) => {
+                                info!("Condvar wake")
+                            }
+                            Err(e) => {}
+                        }
                     }
                 }
 
                 let guard = &mut *file_h.0.lock().unwrap();
                 let mut retry = 0;
                 loop {
+                    info!("Before fflush");
                     match guard.writer.flush() {
                         Ok(_) => break,
                         Err(e) if e.kind() == ErrorKind::Interrupted => {
