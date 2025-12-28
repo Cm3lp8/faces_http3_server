@@ -148,11 +148,11 @@ mod writable_type {
     }
 
     impl FileWriterHandle<std::fs::File> {
-        pub fn read_128_first_bytes_on_close(
+        pub fn on_file_written(
             &mut self,
             content_length_required: usize,
             bytes_to_read: usize,
-            cb: impl FnOnce(Option<Vec<u8>>) + Send + Sync + 'static,
+            cb: impl FnOnce(usize) + Send + Sync + 'static,
         ) {
             let file_h = self.inner.clone();
             std::thread::spawn(move || {
@@ -167,17 +167,7 @@ mod writable_type {
                             std::thread::sleep(Duration::from_millis(3));
                             if let Ok(_) = guard.0.flush() {
                                 info!("Flushing file at [{:?}] bytes", guard.1);
-                                let file = guard.0.get_ref();
-                                let mut buf: [u8; 128] = [0; 128];
-                                match file.read_at(&mut buf, 0) {
-                                    Ok(_) => cb(Some(buf.to_vec())),
-                                    Err(e) => {
-                                        cb(None);
-                                        {
-                                            info!("Failed to read 128 bytes from file");
-                                        }
-                                    }
-                                }
+                                cb(guard.1);
 
                                 break 'main;
                             } else {
