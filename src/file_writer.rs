@@ -163,7 +163,7 @@ mod writable_type {
             std::thread::spawn(move || {
                 let cdv = &file_h.1;
                 let guard = file_h.0.lock().unwrap();
-                info!("wait to close");
+                info!("wait to close whyloop ?");
                 if guard.written <= content_length_required {
                     match cdv.wait(guard) {
                         Ok(_) => {}
