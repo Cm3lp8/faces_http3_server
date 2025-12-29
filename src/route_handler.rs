@@ -55,7 +55,7 @@ mod request_hndlr {
     use super::*;
 
     pub struct RouteHandler<S: Sync + Send + 'static, T: UserSessions<Output = T>> {
-        inner: Arc<Mutex<RouteManagerInner<S, T>>>,
+        inner: Arc<RouteManagerInner<S, T>>,
     }
     impl<S: Sync + Send + 'static, T: UserSessions<Output = T>> Clone for RouteHandler<S, T> {
         fn clone(&self) -> Self {
@@ -66,14 +66,34 @@ mod request_hndlr {
     }
 
     impl<S: Send + Sync + 'static + Clone, T: UserSessions<Output = T>> RouteHandler<S, T> {
-        pub fn new(route_mngr_inner: Arc<Mutex<RouteManagerInner<S, T>>>) -> Self {
+        pub fn new(route_mngr_inner: Arc<RouteManagerInner<S, T>>) -> Self {
             RouteHandler {
                 inner: route_mngr_inner,
             }
         }
         pub fn app_state(&self) -> S {
-            let guard = &*self.inner.lock().unwrap();
+            let guard = &*self.inner;
             guard.app_state().clone()
+        }
+        pub fn get_routes_from_path_and_method<'b>(
+            &self,
+            path: &'b str,
+            methode: H3Method,
+        ) -> Option<(Arc<RouteForm<S>>, Option<ReqArgs>)> {
+            //if param in path
+            //
+
+            let (path, req_args) = ReqArgs::parse_args(&path);
+
+            if let Some(route_coll) = self.inner.get_routes_from_path(path.as_str()) {
+                if let Some(found_route) = route_coll.iter().find(|item| item.method() == &methode)
+                {
+                    return Some((found_route.clone(), req_args));
+                }
+                None
+            } else {
+                None
+            }
         }
         pub fn send_header_work(
             &self,
@@ -109,14 +129,14 @@ mod request_hndlr {
             Some(middleware_job)
         }
         pub fn set_intermediate_headers_send(&self, stream_id: u64, client: &Client) {
-            let guard = &*self.inner.lock().unwrap();
+            let guard = &*self.inner;
             let conn_id = client.conn_ref().trace_id();
             guard
                 .routes_states()
                 .set_intermediate_headers_send(stream_id, conn_id.to_string());
         }
         pub fn stream_sessions(&self) -> Option<StreamSessions<T>> {
-            let guard = &*self.inner.lock().unwrap();
+            let guard = &*self.inner;
 
             if let Some(stream_sessions) = guard.stream_sessions() {
                 Some(stream_sessions.clone())
@@ -132,10 +152,10 @@ mod request_hndlr {
             scid: &[u8],
             event: FinishedEvent,
         ) -> Option<RequestResponse> {
-            let guard = self.inner.lock().unwrap();
-            match guard
+            let inner = &self.inner;
+            match inner
                 .route_event_dispatcher()
-                .dispatch_finished(event, &guard.app_state())
+                .dispatch_finished(event, &inner.app_state())
             {
                 RouteResponse::OK200 => Some(RequestResponse::new_ok_200(stream_id, scid, conn_id)),
                 RouteResponse::OK200_FILE(path) => Some(RequestResponse::new_200_with_file(
@@ -171,7 +191,7 @@ mod request_hndlr {
             conn_id: &str,
             chunk_dispatch_channel: &ChunksDispatchChannel,
         ) -> Result<usize, ()> {
-            let guard = &*self.inner.lock().unwrap();
+            let inner = &*self.inner;
             let sender = chunk_dispatch_channel.insert_new_channel(stream_id, &scid);
 
             let headers = vec![
@@ -224,9 +244,9 @@ mod request_hndlr {
             conn_id: &str,
             chunk_dispatch_channel: &ChunksDispatchChannel,
         ) -> Result<usize, ()> {
-            let guard = &*self.inner.lock().unwrap();
+            let inner = &*self.inner;
             let scid = client.conn().source_id().as_ref().to_vec();
-            let reception_status = guard
+            let reception_status = inner
                 .routes_states()
                 .get_reception_status_infos(stream_id, conn_id.to_owned());
 
@@ -279,8 +299,8 @@ mod request_hndlr {
             packet: &[u8],
             end: bool,
         ) -> Result<usize, ()> {
-            let guard = &*self.inner.lock().unwrap();
-            let written_data = guard.routes_states().write_body_packet(
+            let inner = &self.inner;
+            let written_data = inner.routes_states().write_body_packet(
                 conn_id.to_owned(),
                 scid,
                 stream_id,
@@ -290,8 +310,8 @@ mod request_hndlr {
             written_data
         }
         pub fn print_entries(&self) {
-            let guard = &*self.inner.lock().unwrap();
-            for i in guard.routes_formats().iter() {
+            let inner = &*self.inner;
+            for i in inner.routes_formats().iter() {
                 println!("entrie [{}]", i.0);
             }
         }
@@ -307,8 +327,8 @@ mod request_hndlr {
             path: &str,
             cb: impl FnOnce(Option<&Vec<Arc<RouteForm<S>>>>),
         ) {
-            let guard = &*self.inner.lock().unwrap();
-            cb(guard.routes_formats().get(path));
+            let inner = &self.inner;
+            cb(inner.routes_formats().get(path));
         }
         pub fn handle_finished_stream(
             &self,
@@ -340,8 +360,8 @@ mod request_hndlr {
             more_frames: bool,
             file_writer_channel: FileWriterChannel,
         ) {
-            let guard = self.inner.lock().unwrap();
-            guard.routes_states().add_partial_request(
+            let inner = &self.inner;
+            inner.routes_states().add_partial_request(
                 server_config,
                 conn_id.to_string(),
                 stream_id,
@@ -355,9 +375,9 @@ mod request_hndlr {
                 file_writer_channel,
             );
         }
-        pub fn inner_mut(&self, cb: impl FnOnce(&mut RouteManagerInner<S, T>)) {
-            let guard = &mut *self.inner.lock().unwrap();
-            cb(guard);
+        pub fn inner(&self, cb: impl FnOnce(&RouteManagerInner<S, T>)) {
+            let inner = &self.inner;
+            cb(inner);
         }
         pub fn get_routes_from_path_and_method_and_request_type(
             &self,
@@ -388,19 +408,15 @@ mod request_hndlr {
             Option<DataManagement>,
             Option<Arc<dyn RouteEventListener + Send + Sync + 'static>>,
         ) {
-            let guard = &*self.inner.lock().unwrap();
+            let inner = &self.inner;
 
-            if let Some((route_form, _)) = guard.get_routes_from_path_and_method(path, method) {
+            if let Some((route_form, _)) = inner.get_routes_from_path_and_method(path, method) {
                 return (
                     route_form.data_management_type(),
                     route_form.event_subscriber(),
                 );
             }
             (None, None)
-        }
-        pub fn mutex_guard(&self) -> MutexGuard<RouteManagerInner<S, T>> {
-            let a = self.inner.lock().unwrap();
-            a
         }
 
         pub fn complete_request_entry_in_table(
@@ -415,7 +431,7 @@ mod request_hndlr {
             data_management_type: Option<DataManagement>,
             event_subscriber: Option<Arc<dyn RouteEventListener + 'static + Send + Sync>>,
         ) {
-            let guard = &mut *self.inner.lock().unwrap();
+            let inner = &self.inner;
 
             let mut file_storage = None::<PathBuf>;
             let mut file_open = None::<FileWriterHandle<std::fs::File>>;
@@ -431,7 +447,7 @@ mod request_hndlr {
                 None => {}
             };
 
-            guard.routes_states().complete_request_entry_in_table(
+            inner.routes_states().complete_request_entry_in_table(
                 stream_id,
                 conn_id,
                 method,
@@ -456,19 +472,19 @@ mod request_hndlr {
             server_config: &Arc<ServerConfig>,
             file_writer_channel: &FileWriterChannel,
         ) {
-            let guard = &mut *self.inner.lock().unwrap();
+            let inner = &self.inner;
             let mut data_management: Option<DataManagement> =
                 Some(DataManagement::Storage(BodyStorage::InMemory));
             let mut event_subscriber: Option<Arc<dyn RouteEventListener + Sync + Send>> = None;
             if let Some((route_form, req_args)) =
-                guard.get_routes_from_path_and_method(path, method)
+                inner.get_routes_from_path_and_method(path, method)
             {
                 data_management = route_form.data_management_type();
                 event_subscriber = route_form.event_subscriber();
                 //   event_subscriber.as_ref().unwrap().on_header();
             }
 
-            guard.routes_states().add_partial_request(
+            inner.routes_states().add_partial_request(
                 server_config,
                 conn_id.to_string(),
                 stream_id,
@@ -483,11 +499,14 @@ mod request_hndlr {
             );
         }
         pub fn is_request_set_in_table(&self, stream_id: u64, conn_id: &str) -> bool {
-            let guard = &self.inner.lock().unwrap();
+            let inner = &self.inner;
 
-            guard
+            inner
                 .routes_states()
                 .is_entry_partial_reponse_set(stream_id, conn_id)
+        }
+        pub fn routes_states(&self) -> &RequestsTable {
+            self.inner.routes_states()
         }
     }
 
@@ -789,7 +808,6 @@ mod route_handle_implementation {
         let chunk_dispatch_channel = chunking_station.get_chunking_dispatch_channel();
         let mut route_event: Option<RouteEvent> = None;
         if let Ok(rt_event) = route_handler
-            .mutex_guard()
             .routes_states()
             .build_route_event(conn_id, scid, stream_id, event_type)
         {
@@ -803,7 +821,6 @@ mod route_handle_implementation {
         let route_form = if let Some(ref route_event) = route_event {
             path = route_event.path().to_string();
             let route_form = if let Some((route_form, _)) = route_handler
-                .mutex_guard()
                 .get_routes_from_path_and_method(route_event.path(), route_event.method())
             {
                 Some(Box::new(route_form))
@@ -814,8 +831,6 @@ mod route_handle_implementation {
         } else {
             None
         };
-
-        use crate::stream_sessions::StreamHandleCallback;
 
         // If route forme none, maybe path will match in streams table
         if route_form.is_none() {

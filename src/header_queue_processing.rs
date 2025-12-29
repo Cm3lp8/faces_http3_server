@@ -288,9 +288,8 @@ mod workers {
                 };
 
                 let path = path.unwrap();
-                if let Some((route_form, _)) = route_handler
-                    .mutex_guard()
-                    .get_routes_from_path_and_method(path.as_str(), method)
+                if let Some((route_form, _)) =
+                    route_handler.get_routes_from_path_and_method(path.as_str(), method)
                 {
                     let middleware_coll = (*route_form.clone()).to_middleware_coll();
                     if let Some(middleware_job) = route_handler.send_header_work(
@@ -325,7 +324,7 @@ mod workers {
                         continue;
                     }
                 }
-                route_handler.inner_mut(|guard| {
+                route_handler.inner(|guard| {
                     send_404(
                         "/404",
                         guard,
@@ -355,7 +354,7 @@ mod workers {
                         stream_id,
                         scid,
                     } => {
-                        route_handler.inner_mut(|guard| {
+                        route_handler.inner(|guard| {
                             log::error!("middleware error ... aborting");
                             warn!("TODO => Clean file cache if any data was written in between !!");
                             send_error(

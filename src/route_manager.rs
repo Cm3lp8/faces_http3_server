@@ -96,7 +96,7 @@ mod route_mngr {
     type ReqPath = &'static str;
 
     pub struct RouteManager<S: Send + Sync + 'static, T: UserSessions<Output = T>> {
-        inner: Arc<Mutex<RouteManagerInner<S, T>>>,
+        inner: Arc<RouteManagerInner<S, T>>,
     }
     impl<S: Send + Sync + 'static, T: UserSessions<Output = T>> Clone for RouteManager<S, T> {
         fn clone(&self) -> Self {
@@ -126,12 +126,12 @@ mod route_mngr {
             path: &str,
             cb: impl FnOnce(Option<&Vec<Arc<RouteForm<S>>>>),
         ) {
-            let guard = &*self.inner.lock().unwrap();
+            let guard = &*self.inner;
 
             cb(guard.get_routes_from_path(path));
         }
         pub fn stream_sessions(&self) -> Option<StreamSessions<T>> {
-            let guard = &*self.inner.lock().unwrap();
+            let guard = &*self.inner;
 
             if let Some(stream_sessions) = guard.stream_sessions() {
                 Some(stream_sessions.clone())
@@ -146,7 +146,7 @@ mod route_mngr {
             request_type: RequestType,
             cb: impl FnOnce(Option<&RouteForm<S>>),
         ) {
-            let guard = &*self.inner.lock().unwrap();
+            let guard = &*self.inner;
 
             cb(guard.get_routes_from_path_and_method_b(path, methode));
         }
@@ -154,7 +154,7 @@ mod route_mngr {
             RouteHandler::new(self.inner.clone())
         }
         pub fn is_request_set_in_table(&self, stream_id: u64, conn_id: &str) -> bool {
-            let guard = &self.inner.lock().unwrap();
+            let guard = &self.inner;
 
             guard
                 .routes_states()
@@ -174,7 +174,6 @@ mod route_mngr {
                 None;
 
             route_handler
-                .mutex_guard()
                 .routes_states()
                 .add_partial_request_before_header_treatment(
                     server_config,
@@ -317,7 +316,7 @@ mod route_mngr {
             };
 
             RouteManager {
-                inner: Arc::new(Mutex::new(request_manager_inner)),
+                inner: Arc::new(request_manager_inner),
             }
         }
         pub fn app_state(&self) -> Option<S> {
