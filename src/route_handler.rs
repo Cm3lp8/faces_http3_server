@@ -806,7 +806,6 @@ mod route_handle_implementation {
         header_priority: HeaderPriority,
     ) {
         let chunk_dispatch_channel = chunking_station.get_chunking_dispatch_channel();
-        info!("Final Call preparation path  stream_id [{:?}]", stream_id);
         let mut route_event: Option<RouteEvent> = None;
         if let Ok(rt_event) = route_handler
             .routes_states()
@@ -835,10 +834,6 @@ mod route_handle_implementation {
 
         // If route forme none, maybe path will match in streams table
         if route_form.is_none() {
-            info!(
-                "Final Call preparation path route forme None  stream_id [{:?}]",
-                stream_id
-            );
             if let Some(stream_sessions) = route_handler.stream_sessions() {
                 if let Some(route_event) = route_event {
                     let app_state = route_handler.app_state();
@@ -870,11 +865,6 @@ mod route_handle_implementation {
         } else {
             let mut is_end = true;
 
-            info!(
-                "before handler process stream_id [{:?}] route_event is_some [{:?}]",
-                stream_id,
-                route_event.is_some()
-            );
             let mut response = if let Some(route_event) = route_event {
                 match route_event {
                     RouteEvent::OnFinished(event) => {
