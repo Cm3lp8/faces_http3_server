@@ -113,7 +113,6 @@ mod response_buff {
                 );
                 // unideal solution for the race condition,
                 // only to try it
-                self.channel.0.send(response_injection.req_id());
                 self.table
                     .lock()
                     .unwrap()
@@ -186,8 +185,7 @@ mod signal_receiver {
         let waker = waker.clone();
         std::thread::spawn(move || {
             while let Ok(signal) = receiver.recv() {
-                let table_lck = table.lock().unwrap();
-                if let Some(entry) = table_lck.get(&signal) {
+                if let Some(entry) = table.lock().unwrap().get(&signal) {
                     let scid = entry.scid();
                     let stream_id = entry.stream_id();
                     let conn_id = entry.conn_id();
@@ -211,8 +209,7 @@ mod signal_receiver {
                     info!("NEW signal_set injection for  stream_id [{:?}]", signal.0);
                     // if condition is false, a finished event has already feed this HashSet,
                     // meaning function can call response_preparation_with_route_handler
-                    let signal_set_lck = &mut *signal_set.lock().unwrap();
-                    signal_set_lck.insert(signal.clone());
+                    signal_set.lock().unwrap().insert(signal.clone());
                     //part of the unideal solution:
                 };
             }
