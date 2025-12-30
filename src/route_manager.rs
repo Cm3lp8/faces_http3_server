@@ -322,7 +322,14 @@ mod route_mngr {
                 .keys()
                 .map(|it| *it)
                 .collect::<HashSet<&'static str>>();
-            let in_flight_streams_path_verification = InFlightStreamsPathVerifier::new(path_set);
+            let stream_pathes_set_opt = if let Some(stream_session) = self.stream_sessions.as_ref()
+            {
+                Some(stream_session.stream_path_set())
+            } else {
+                None
+            };
+            let in_flight_streams_path_verification =
+                InFlightStreamsPathVerifier::new(path_set, stream_pathes_set_opt);
             let request_manager_inner = RouteManagerInner {
                 stream_sessions: self.stream_sessions.take().unwrap(),
                 in_flight_streams_path_verification,

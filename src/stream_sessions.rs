@@ -7,7 +7,7 @@ use uuid::Uuid;
 type UserUuid = Uuid;
 mod stream_sessions {
     use std::{
-        collections::HashMap,
+        collections::{HashMap, HashSet},
         sync::{Arc, Mutex},
     };
 
@@ -53,6 +53,9 @@ mod stream_sessions {
             Self {
                 inner: Arc::new(Mutex::new(StreamSessionsInner::new())),
             }
+        }
+        pub fn stream_path_set(&self) -> HashSet<String> {
+            self.inner.lock().unwrap().stream_pathes_set()
         }
 
         fn mut_access(&self, cb: impl FnOnce(&mut StreamSessionsInner<T>)) {
@@ -386,6 +389,9 @@ mod stream_sessions {
                 sessions: HashMap::new(),
                 chunking_station: None,
             }
+        }
+        fn stream_pathes_set(&self) -> HashSet<String> {
+            self.sessions.keys().map(|it| it.to_owned()).collect()
         }
     }
 

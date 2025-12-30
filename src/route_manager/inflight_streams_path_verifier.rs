@@ -27,14 +27,19 @@ impl ConnPathK {
 
 pub struct InFlightStreamsPathVerifier {
     accepted_route_pathes: HashSet<&'static str>,
+    accepted_route_stream_pathes: Option<HashSet<String>>,
     stream_map: DashMap<ConnStreamK, ConnPathK>,
     path_map: DashMap<ConnPathK, u64>,
 }
 
 impl InFlightStreamsPathVerifier {
-    pub fn new(route_format: HashSet<&'static str>) -> Self {
+    pub fn new(
+        route_format: HashSet<&'static str>,
+        stream_pathes_set: Option<HashSet<String>>,
+    ) -> Self {
         Self {
             accepted_route_pathes: route_format,
+            accepted_route_stream_pathes: stream_pathes_set,
             stream_map: DashMap::new(),
             path_map: DashMap::new(),
         }
@@ -48,6 +53,11 @@ impl InFlightStreamsPathVerifier {
         if !self.accepted_route_pathes.contains(path) {
             return false;
         };
+        if let Some(stream_path_set) = self.accepted_route_stream_pathes.as_ref() {
+            if !stream_path_set.contains(path) {
+                return false;
+            }
+        }
 
         let k_0 = ConnStreamK::new(stream_id, conn_id.clone());
         let k = ConnPathK::new(path.to_string(), conn_id);
