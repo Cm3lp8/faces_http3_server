@@ -79,6 +79,10 @@ mod response_buff {
             }
         }
         pub fn register(&self, response_injection: ResponseInjection) {
+            info!(
+                "NEW injection for  stream_id [{:?}]",
+                response_injection.stream_id()
+            );
             if self.is_request_signal_in_queue(response_injection.req_id()) {
                 //Send immediatly if all the necessary middleware validation and data process is
                 //done
@@ -100,6 +104,11 @@ mod response_buff {
                 // If req process (middleware or async data processing) is not finished, wait for
                 // it in the table
                 //
+
+                info!(
+                    "injection B path  stream_id [{:?}]",
+                    response_injection.stream_id()
+                );
                 self.table
                     .lock()
                     .unwrap()
@@ -188,6 +197,7 @@ mod signal_receiver {
                         HeaderPriority::SendAdditionnalHeader,
                     );
                 } else {
+                    info!("NEW signal_set injection for  stream_id [{:?}]", signal.0);
                     signal_set.lock().unwrap().insert(signal);
                 }
             }
