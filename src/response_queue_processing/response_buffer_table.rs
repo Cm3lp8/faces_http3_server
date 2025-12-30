@@ -78,7 +78,16 @@ mod response_buff {
                 waker: waker.clone(),
             }
         }
-        pub fn register(&self, response_injection: ResponseInjection) {
+        /// [`register()`] is called on  Quiche's Finished Event. It prepares data for response
+        /// and call the route handler logic. Before calling the route handler logic,
+        /// make sure the middlewares have been processed.
+        ///
+        /// If [`register()`] can't make the response preparation, it will return the
+        /// [`ResponseInjection`] . The [`register()`] caller can requeue it for retry.
+        pub fn register(
+            &self,
+            response_injection: ResponseInjection,
+        ) -> Result<(), ResponseInjection> {
             info!(
                 "NEW injection for  stream_id [{:?}]",
                 response_injection.stream_id()
@@ -102,23 +111,14 @@ mod response_buff {
                     EventType::OnFinished,
                     HeaderPriority::SendAdditionnalHeader,
                 );
+                Ok(())
             } else {
                 // If req process (middleware or async data processing) is not finished, wait for
                 // it in the table
                 //
 
-                info!(
-                    "injection B path  stream_id [{:?}]",
-                    response_injection.stream_id()
-                );
-                // unideal solution for the race condition,
-                // only to try it
-                self.table
-                    .lock()
-                    .unwrap()
-                    .insert(response_injection.req_id(), response_injection);
+                Err(response_injection)
             }
-            ()
         }
         pub fn get_signal_sender(&self) -> SignalNewRequest {
             SignalNewRequest::new(self.channel.0.clone())
@@ -185,33 +185,9 @@ mod signal_receiver {
         let waker = waker.clone();
         std::thread::spawn(move || {
             while let Ok(signal) = receiver.recv() {
-                if let Some(entry) = table.lock().unwrap().get(&signal) {
-                    let scid = entry.scid();
-                    let stream_id = entry.stream_id();
-                    let conn_id = entry.conn_id();
-
-                    response_preparation_with_route_handler(
-                        &route_handler,
-                        &waker,
-                        &chunking_station,
-                        conn_id.as_str(),
-                        &scid,
-                        stream_id,
-                        EventType::OnFinished,
-                        HeaderPriority::SendAdditionnalHeader,
-                    );
-                } else {
-                    // this is only mean for the condition where mdw process + partial req response
-                    // build is made before finishedStream
-                    //
-                    // if the Finished Stream is finished before and call directly this,
-                    // it is a race condition and req will be never handled
-                    info!("NEW signal_set injection for  stream_id [{:?}]", signal.0);
-                    // if condition is false, a finished event has already feed this HashSet,
-                    // meaning function can call response_preparation_with_route_handler
-                    signal_set.lock().unwrap().insert(signal.clone());
-                    //part of the unideal solution:
-                };
+                info!("NEW signal_set injection for  stream_id [{:?}]", signal.0);
+                // This signal indicates that the middlewares have been processed
+                signal_set.lock().unwrap().insert(signal.clone());
             }
         });
     }

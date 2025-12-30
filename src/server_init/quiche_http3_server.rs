@@ -272,7 +272,7 @@ mod quiche_implementation {
 
         header_queue_processing.run();
         response_pool_processing.run(move |response_injection, response_injection_buffer| {
-            response_injection_buffer.register(response_injection);
+            response_injection_buffer.register(response_injection)
         });
 
         // Create the configuration for the QUIC connections.

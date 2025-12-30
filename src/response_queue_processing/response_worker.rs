@@ -27,7 +27,13 @@ mod reponse_process_thread_pool {
             ),
             app_state: S,
             worker_cb: Arc<
-                impl Fn(ResponseInjection, &ResponseInjectionBuffer<S, T>) + Send + Sync + 'static,
+                impl Fn(
+                        ResponseInjection,
+                        &ResponseInjectionBuffer<S, T>,
+                    ) -> Result<(), ResponseInjection>
+                    + Send
+                    + Sync
+                    + 'static,
             >,
             response_injection_buffer: &ResponseInjectionBuffer<S, T>,
         ) -> Self {
@@ -36,7 +42,7 @@ mod reponse_process_thread_pool {
             for i in 0..amount {
                 workers.push(ResponseWorker::new(
                     i,
-                    job_channel.1.clone(),
+                    job_channel.clone(),
                     app_state.clone(),
                     worker_cb.clone(),
                     response_injection_buffer,
@@ -59,17 +65,34 @@ mod reponse_process_thread_pool {
     impl ResponseWorker {
         pub fn new<S: Send + Clone + Sync + 'static, T: UserSessions<Output = T>>(
             id: usize,
-            injection_channel: crossbeam_channel::Receiver<ResponseInjection>,
+            injection_channel: (
+                crossbeam_channel::Sender<ResponseInjection>,
+                crossbeam_channel::Receiver<ResponseInjection>,
+            ),
             app_state: S,
             worker_cb: Arc<
-                impl Fn(ResponseInjection, &ResponseInjectionBuffer<S, T>) + Send + Sync + 'static,
+                impl Fn(
+                        ResponseInjection,
+                        &ResponseInjectionBuffer<S, T>,
+                    ) -> Result<(), ResponseInjection>
+                    + Send
+                    + Sync
+                    + 'static,
             >,
             response_injection_buffer: &ResponseInjectionBuffer<S, T>,
         ) -> Self {
             let response_injection_buffer_clone = response_injection_buffer.clone();
             let worker = std::thread::spawn(move || {
-                while let Ok(response_injection) = injection_channel.recv() {
-                    worker_cb(response_injection, &response_injection_buffer_clone);
+                // TODO secure this with a retry logic
+                while let Ok(response_injection) = injection_channel.1.recv() {
+                    match worker_cb(response_injection, &response_injection_buffer_clone) {
+                        Ok(_) => {}
+                        Err(response_injection) => {
+                            if let Err(e) = injection_channel.0.send(response_injection) {
+                                error!("Faces_quic_server: failed to send response_injection")
+                            }
+                        }
+                    }
                 }
             });
 

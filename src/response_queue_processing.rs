@@ -113,7 +113,10 @@ mod response_pool_processing {
         }
         pub fn run(
             &self,
-            worker_cb: impl Fn(ResponseInjection, &ResponseInjectionBuffer<S, T>)
+            worker_cb: impl Fn(
+                    ResponseInjection,
+                    &ResponseInjectionBuffer<S, T>,
+                ) -> Result<(), ResponseInjection>
                 + Send
                 + Sync
                 + 'static,
