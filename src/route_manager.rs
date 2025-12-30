@@ -64,7 +64,7 @@ mod route_mngr {
     use std::{
         any::Any,
         borrow::BorrowMut,
-        collections::{hash_map, HashMap},
+        collections::{hash_map, HashMap, HashSet},
         fmt::Debug,
         hash::Hash,
         process::Output,
@@ -316,10 +316,17 @@ mod route_mngr {
         }
         pub fn build(&mut self) -> RouteManager<S, T> {
             let handle_dispatcher = self.build_route_event_dispatcher();
+
+            let routes_formats = std::mem::replace(&mut self.routes_formats, HashMap::new());
+            let path_set: HashSet<&'static str> = routes_formats
+                .keys()
+                .map(|it| *it)
+                .collect::<HashSet<&'static str>>();
+            let in_flight_streams_path_verification = InFlightStreamsPathVerifier::new(path_set);
             let request_manager_inner = RouteManagerInner {
-                routes_formats: std::mem::replace(&mut self.routes_formats, HashMap::new()),
-                in_flight_streams_path_verification: InFlightStreamsPathVerifier::new(),
                 stream_sessions: self.stream_sessions.take().unwrap(),
+                in_flight_streams_path_verification,
+                routes_formats,
                 error_formats: std::mem::replace(&mut self.error_formats, HashMap::new()),
                 app_state: self.app_state.take().unwrap(),
                 route_states: RequestsTable::new(),
