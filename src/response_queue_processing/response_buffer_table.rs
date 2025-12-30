@@ -86,6 +86,8 @@ mod response_buff {
             if self.is_request_signal_in_queue(response_injection.req_id()) {
                 //Send immediatly if all the necessary middleware validation and data process is
                 //done
+                //WARNING race confidtion here : middleware may be called before finished req but
+                //signal to this system is made after finished req
                 let stream_id = response_injection.stream_id();
                 let scid = response_injection.scid();
                 let conn_id = response_injection.conn_id();
@@ -109,6 +111,9 @@ mod response_buff {
                     "injection B path  stream_id [{:?}]",
                     response_injection.stream_id()
                 );
+                // unideal solution for the race condition,
+                // only to try it
+                self.channel.0.send(response_injection.req_id());
                 self.table
                     .lock()
                     .unwrap()
@@ -181,9 +186,11 @@ mod signal_receiver {
         let waker = waker.clone();
         std::thread::spawn(move || {
             while let Ok(signal) = receiver.recv() {
-                if let Some(entry) = table.lock().unwrap().get(&signal) {
-                    let stream_id = entry.stream_id();
+                let table_lck = table.lock().unwrap();
+                let signal_set_lck = &mut *signal_set.lock().unwrap();
+                if let Some(entry) = table_lck.get(&signal) {
                     let scid = entry.scid();
+                    let stream_id = entry.stream_id();
                     let conn_id = entry.conn_id();
 
                     response_preparation_with_route_handler(
@@ -197,8 +204,35 @@ mod signal_receiver {
                         HeaderPriority::SendAdditionnalHeader,
                     );
                 } else {
+                    // this is only mean for the condition where mdw process + partial req response
+                    // build is made before finishedStream
+                    //
+                    // if the Finished Stream is finished before and call directly this,
+                    // it is a race condition and req will be never handled
                     info!("NEW signal_set injection for  stream_id [{:?}]", signal.0);
-                    signal_set.lock().unwrap().insert(signal);
+                    // if condition is false, a finished event has already feed this HashSet,
+                    // meaning function can call response_preparation_with_route_handler
+                    if !signal_set_lck.insert(signal.clone()) {
+                        //part of the unideal solution:
+                        if let Some(entry) = table_lck.get(&signal) {
+                            let scid = entry.scid();
+                            let stream_id = entry.stream_id();
+                            let conn_id = entry.conn_id();
+
+                            response_preparation_with_route_handler(
+                                &route_handler,
+                                &waker,
+                                &chunking_station,
+                                conn_id.as_str(),
+                                &scid,
+                                stream_id,
+                                EventType::OnFinished,
+                                HeaderPriority::SendAdditionnalHeader,
+                            );
+                        } else {
+                            warn!("For stream_id [{:?}] not better solution", signal.0)
+                        }
+                    }
                 }
             }
         });
