@@ -50,13 +50,14 @@ impl InFlightStreamsPathVerifier {
         stream_id: u64,
         path: &str,
     ) -> bool {
-        if !self.accepted_route_pathes.contains(path) {
-            return false;
-        };
         if let Some(stream_path_set) = self.accepted_route_stream_pathes.as_ref() {
-            if !stream_path_set.contains(path) {
+            if !stream_path_set.contains(path) && !self.accepted_route_pathes.contains(path) {
                 return false;
             }
+        } else {
+            if !self.accepted_route_pathes.contains(path) {
+                return false;
+            };
         }
 
         let k_0 = ConnStreamK::new(stream_id, conn_id.clone());
