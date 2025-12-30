@@ -187,7 +187,6 @@ mod signal_receiver {
         std::thread::spawn(move || {
             while let Ok(signal) = receiver.recv() {
                 let table_lck = table.lock().unwrap();
-                let signal_set_lck = &mut *signal_set.lock().unwrap();
                 if let Some(entry) = table_lck.get(&signal) {
                     let scid = entry.scid();
                     let stream_id = entry.stream_id();
@@ -212,28 +211,10 @@ mod signal_receiver {
                     info!("NEW signal_set injection for  stream_id [{:?}]", signal.0);
                     // if condition is false, a finished event has already feed this HashSet,
                     // meaning function can call response_preparation_with_route_handler
-                    if !signal_set_lck.insert(signal.clone()) {
-                        //part of the unideal solution:
-                        if let Some(entry) = table_lck.get(&signal) {
-                            let scid = entry.scid();
-                            let stream_id = entry.stream_id();
-                            let conn_id = entry.conn_id();
-
-                            response_preparation_with_route_handler(
-                                &route_handler,
-                                &waker,
-                                &chunking_station,
-                                conn_id.as_str(),
-                                &scid,
-                                stream_id,
-                                EventType::OnFinished,
-                                HeaderPriority::SendAdditionnalHeader,
-                            );
-                        } else {
-                            warn!("For stream_id [{:?}] not better solution", signal.0)
-                        }
-                    }
-                }
+                    let signal_set_lck = &mut *signal_set.lock().unwrap();
+                    signal_set_lck.insert(signal.clone());
+                    //part of the unideal solution:
+                };
             }
         });
     }
