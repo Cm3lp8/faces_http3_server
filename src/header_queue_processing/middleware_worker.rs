@@ -253,9 +253,6 @@ mod thread_pool {
                     event_listener,
                 );
             } else {
-                if let Err(e) = new_request_signal.send_signal((stream_id, conn_id.to_string())) {
-                    error!("Failed sending response signal");
-                }
                 route_handler.create_new_request_in_table(
                     path,
                     stream_id,
@@ -279,6 +276,9 @@ mod thread_pool {
             }
 
             let _ = waker.wake();
+            if let Err(e) = new_request_signal.send_signal((stream_id, conn_id.to_string())) {
+                error!("Failed sending response signal");
+            }
         }
         pub fn stream_request_partial_response_table_update<
             S: Send + Sync + Clone + 'static,
