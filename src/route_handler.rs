@@ -865,6 +865,11 @@ mod route_handle_implementation {
         } else {
             let mut is_end = true;
 
+            info!(
+                "before handler process stream_id [{:?}] route_event is_some [{:?}]",
+                stream_id,
+                route_event.is_some()
+            );
             let mut response = if let Some(route_event) = route_event {
                 match route_event {
                     RouteEvent::OnFinished(event) => {

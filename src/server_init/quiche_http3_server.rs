@@ -496,6 +496,7 @@ mod quiche_implementation {
                         let http3_conn = client.http3_conn.as_mut().unwrap();
                         match http3_conn.poll(&mut client.conn) {
                             Ok((stream_id, quiche::h3::Event::Headers { list, more_frames })) => {
+                                info!("started stream_id [{:?}]", stream_id);
                                 if more_frames {
                                     log::info!("new _hdr [{:#?}]", list)
                                 }
@@ -564,6 +565,7 @@ mod quiche_implementation {
                                 let trace_id = client.conn.trace_id().to_owned();
                                 let scid = client.conn.source_id().as_ref().to_vec();
 
+                                info!("Finished stream_id [{:?}]", stream_id);
                                 route_manager.routes_handler().handle_finished_stream(
                                     trace_id.as_str(),
                                     &scid,
@@ -579,7 +581,7 @@ mod quiche_implementation {
                                 ()
                             }
                             Ok((_goaway_id, quiche::h3::Event::GoAway)) => {
-                                debug!("GoAway");
+                                error!("GoAway");
                                 ()
                             }
                             Err(quiche::h3::Error::Done) => {
