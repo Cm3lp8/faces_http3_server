@@ -182,7 +182,7 @@ mod quiche_implementation {
 
     use crate::{
         file_writer::{self, FileWriter, FileWriterChannel, WritableItem},
-        header_queue_processing::{self, HeaderProcessing},
+        header_queue_processing::{self, extract_path_from_hdr, HeaderProcessing},
         request_response::{
             BodyRequest, ChunkingStation, ChunksDispatchChannel, HeaderPriority, ResponseQueue,
         },
@@ -502,13 +502,24 @@ mod quiche_implementation {
                                 }
                                 let scid = client.conn.source_id().as_ref().to_vec();
                                 let conn_id = client.conn.trace_id().to_string();
-                                header_queue_processing.process_header(
-                                    stream_id,
-                                    scid,
-                                    conn_id,
-                                    list.clone(),
-                                    more_frames,
-                                );
+                                let request_path = extract_path_from_hdr(&list);
+
+                                if let Some(path) = request_path {
+                                    route_manager
+                                        .in_flight_streams_path_verification()
+                                        .insert_stream_path_for_conn(
+                                            scid.clone(),
+                                            stream_id,
+                                            &path,
+                                        );
+                                    header_queue_processing.process_header(
+                                        stream_id,
+                                        scid,
+                                        conn_id,
+                                        list.clone(),
+                                        more_frames,
+                                    );
+                                }
                             }
                             Ok((stream_id, quiche::h3::Event::Data)) => {
                                 while let Ok(read) =
@@ -566,13 +577,18 @@ mod quiche_implementation {
                                 let scid = client.conn.source_id().as_ref().to_vec();
 
                                 info!("Finished stream_id [{:?}]", stream_id);
-                                route_manager.routes_handler().handle_finished_stream(
-                                    trace_id.as_str(),
-                                    &scid,
-                                    stream_id,
-                                    &waker_clone,
-                                    &response_injection,
-                                );
+                                if route_manager
+                                    .in_flight_streams_path_verification()
+                                    .is_finished_request_a_valid_path(scid.clone(), stream_id)
+                                {
+                                    route_manager.routes_handler().handle_finished_stream(
+                                        trace_id.as_str(),
+                                        &scid,
+                                        stream_id,
+                                        &waker_clone,
+                                        &response_injection,
+                                    );
+                                }
                                 ()
                             }
                             Ok((_stream_id, quiche::h3::Event::Reset { .. })) => (),

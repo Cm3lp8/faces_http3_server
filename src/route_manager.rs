@@ -6,6 +6,7 @@ pub use route_mngr::{
     ErrorType, H3Method, RequestType, RouteForm, RouteFormBuilder, RouteManager,
     RouteManagerBuilder,
 };
+mod inflight_streams_path_verifier;
 
 mod route_config {
     use std::default;
@@ -79,6 +80,7 @@ mod route_mngr {
         request_response::{BodyType, RequestResponse},
         route_events::RouteEvent,
         route_handler::{self, ReqArgs, RequestsTable},
+        route_manager::inflight_streams_path_verifier::InFlightStreamsPathVerifier,
         server_config,
         stream_sessions::{
             self, StreamBuilder, StreamHandle, StreamHandleCallback, StreamSessions, StreamType,
@@ -129,6 +131,10 @@ mod route_mngr {
             let guard = &*self.inner;
 
             cb(guard.get_routes_from_path(path));
+        }
+
+        pub fn in_flight_streams_path_verification(&self) -> &InFlightStreamsPathVerifier {
+            &self.inner.in_flight_streams_path_verification
         }
         pub fn stream_sessions(&self) -> Option<StreamSessions<T>> {
             let guard = &*self.inner;
@@ -189,6 +195,7 @@ mod route_mngr {
 
     pub struct RouteManagerInner<S: Send + Sync + 'static, T: UserSessions<Output = T>> {
         routes_formats: HashMap<ReqPath, Vec<Arc<RouteForm<S>>>>,
+        in_flight_streams_path_verification: InFlightStreamsPathVerifier,
         stream_sessions: StreamSessions<T>,
         error_formats: HashMap<ErrorType, ErrorForm>,
         app_state: S,
@@ -217,6 +224,9 @@ mod route_mngr {
         }*/
         pub fn app_state(&self) -> &S {
             &self.app_state
+        }
+        pub fn in_flight_streams_path_verification(&self) -> &InFlightStreamsPathVerifier {
+            &self.in_flight_streams_path_verification
         }
         pub fn is_request_set_in_table(&self, stream_id: u64, conn_id: &str) -> bool {
             self.routes_states()
@@ -308,6 +318,7 @@ mod route_mngr {
             let handle_dispatcher = self.build_route_event_dispatcher();
             let request_manager_inner = RouteManagerInner {
                 routes_formats: std::mem::replace(&mut self.routes_formats, HashMap::new()),
+                in_flight_streams_path_verification: InFlightStreamsPathVerifier::new(),
                 stream_sessions: self.stream_sessions.take().unwrap(),
                 error_formats: std::mem::replace(&mut self.error_formats, HashMap::new()),
                 app_state: self.app_state.take().unwrap(),

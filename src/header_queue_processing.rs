@@ -1,6 +1,7 @@
 #![allow(warnings)]
 pub use header_reception::{HeaderMessage, HeaderProcessing};
 pub use middleware_worker::{MiddleWareJob, RouteType};
+pub use workers::extract_path_from_hdr;
 
 mod middleware_worker;
 mod header_reception {
@@ -399,6 +400,19 @@ mod workers {
         });
     }
 
+    pub fn extract_path_from_hdr(headers: &[h3::Header]) -> Option<String> {
+        let mut path: Option<String> = None;
+
+        {
+            for hdr in headers {
+                match hdr.name() {
+                    b":path" => path = Some(String::from_utf8(hdr.value().to_vec()).unwrap()),
+                    _ => {}
+                }
+            }
+        }
+        path
+    }
     fn extract_method_path_content_length(
         headers: &[h3::Header],
     ) -> (Option<Vec<u8>>, Option<String>, Option<usize>) {
