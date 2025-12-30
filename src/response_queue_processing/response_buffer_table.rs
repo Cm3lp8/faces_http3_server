@@ -60,14 +60,7 @@ mod response_buff {
             let signal: Arc<Mutex<HashSet<ReqId>>> = Arc::new(Mutex::new(HashSet::new()));
             let table = Arc::new(Mutex::new(HashMap::new()));
 
-            signal_receiver::run(
-                channel.1.clone(),
-                signal.clone(),
-                table.clone(),
-                route_handler.clone(),
-                chunking_station.clone(),
-                waker,
-            );
+            signal_receiver::run(channel.1.clone(), signal.clone());
             Self {
                 channel,
                 table,
@@ -88,10 +81,6 @@ mod response_buff {
             &self,
             response_injection: ResponseInjection,
         ) -> Result<(), ResponseInjection> {
-            info!(
-                "NEW injection for  stream_id [{:?}]",
-                response_injection.stream_id()
-            );
             if self.is_request_signal_in_queue(response_injection.req_id()) {
                 //Send immediatly if all the necessary middleware validation and data process is
                 //done
@@ -155,37 +144,19 @@ mod response_buff {
     }
 }
 mod signal_receiver {
-    use mio::Waker;
-
-    use crate::{
-        request_response::{ChunkingStation, HeaderPriority},
-        response_queue_processing::ResponseInjection,
-        route_events::EventType,
-        route_handler::response_preparation_with_route_handler,
-        stream_sessions::UserSessions,
-        RouteHandler,
-    };
 
     use super::*;
     use std::{
-        collections::{HashMap, HashSet},
-        hash::Hash,
+        collections::HashSet,
         sync::{Arc, Mutex},
-        task::Wake,
     };
 
-    pub fn run<S: Send + Sync + 'static + Clone, T: UserSessions<Output = T>>(
+    pub fn run(
         receiver: crossbeam_channel::Receiver<ReqId>,
         signal_set: Arc<Mutex<HashSet<ReqId>>>,
-        table: Arc<Mutex<HashMap<ReqId, ResponseInjection>>>,
-        route_handler: RouteHandler<S, T>,
-        chunking_station: ChunkingStation,
-        waker: &Arc<Waker>,
     ) {
-        let waker = waker.clone();
         std::thread::spawn(move || {
             while let Ok(signal) = receiver.recv() {
-                info!("NEW signal_set injection for  stream_id [{:?}]", signal.0);
                 // This signal indicates that the middlewares have been processed
                 signal_set.lock().unwrap().insert(signal.clone());
             }

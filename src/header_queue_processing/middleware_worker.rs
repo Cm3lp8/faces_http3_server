@@ -110,7 +110,6 @@ mod thread_pool {
                                 Ok(middleware_res) => {
                                     match middleware_res {
                                         MiddleWareFlow::Continue(headers) => {
-                                            info!("Middleware ok for [{:?}]", headers);
                                             temps_headers = headers
                                         }
                                         MiddleWareFlow::Abort(error_response) => {
@@ -232,7 +231,6 @@ mod thread_pool {
             waker: &Waker,
             new_request_signal: &SignalNewRequest,
         ) {
-            info!("after mdw, setin partial response table [{:?}]", stream_id);
             //if the thread reached here,create an entry in partial response table
             if route_handler.is_request_set_in_table(stream_id, conn_id) {
                 let (data_management_type, event_listener) =
