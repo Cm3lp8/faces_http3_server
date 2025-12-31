@@ -46,7 +46,6 @@ pub fn build_temp_stage_file_storage_path(
                 path.push(uuid);
 
                 let file_open = if let Ok(file) = File::create(path.clone()) {
-                    info!("A file created for [{:?}]", path);
                     file_writer_manager.create_file_writer_handle(file)
                 } else {
                     error!("Failed creating [{:?}] file", path);

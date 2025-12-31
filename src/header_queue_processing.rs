@@ -357,7 +357,6 @@ mod workers {
                     } => {
                         route_handler.inner(|guard| {
                             log::error!("middleware error ... aborting");
-                            warn!("TODO => Clean file cache if any data was written in between !!");
                             send_error(
                                 error_response,
                                 guard,
