@@ -6,13 +6,14 @@ use std::{fs::File, sync::Arc};
 use quiche::h3::{self, NameValue};
 use uuid::Uuid;
 
-use crate::file_writer::FileWriterHandle;
+use crate::file_writer::{self, FileWriter, FileWriterHandle, WritableItem};
 use crate::{server_config, BodyStorage, DataManagement, ServerConfig};
 
 pub fn build_temp_stage_file_storage_path(
     server_config: &ServerConfig,
     headers: &[h3::Header],
     data_management_type: &Option<DataManagement>,
+    file_writer_manager: &Arc<FileWriter<WritableItem<File>>>,
 ) -> Option<(PathBuf, FileWriterHandle<File>)> {
     let Some(data_management_type) = data_management_type else {
         return None;
@@ -46,7 +47,7 @@ pub fn build_temp_stage_file_storage_path(
 
                 let file_open = if let Ok(file) = File::create(path.clone()) {
                     info!("A file created for [{:?}]", path);
-                    FileWriterHandle::new(file)
+                    file_writer_manager.create_file_writer_handle(file)
                 } else {
                     error!("Failed creating [{:?}] file", path);
                     return None;

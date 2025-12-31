@@ -127,8 +127,8 @@ mod req_temp_table {
             content_length: Option<usize>,
             data_management_type: Option<DataManagement>,
             event_subscriber: Option<Arc<dyn RouteEventListener + 'static + Send + Sync>>,
-            storage_path: Option<PathBuf>,
-            file_open: Option<FileWriterHandle<File>>,
+            //storage_path: Option<PathBuf>,
+            // file_open: Option<FileWriterHandle<File>>,
         ) {
             self.table
                 .entry((conn_id.to_string(), stream_id))
@@ -137,8 +137,8 @@ mod req_temp_table {
                     entry.path = Some(path.to_string());
                     entry.event_subscriber = event_subscriber;
                     entry.data_management_type = data_management_type;
-                    entry.storage_path = storage_path;
-                    entry.file_opened = file_open;
+                    //        entry.storage_path = storage_path;
+                    //       entry.file_opened = file_open;
                     entry.content_length = content_length;
                     entry.headers = Some(headers.to_vec());
                 });
@@ -311,7 +311,7 @@ mod req_temp_table {
                     if let BodyStorage::File = body_storage {
                         let mut path = server_config.get_storage_path();
 
-                        let mut extension: Option<String> = None;
+                        let extension: Option<String> = None;
 
                         let uuid = Uuid::new_v4();
                         let mut uuid = uuid.to_string();
@@ -323,7 +323,7 @@ mod req_temp_table {
                         path.push(uuid);
 
                         if let Ok(file) = File::create(path.clone()) {
-                            file_opened = Some(FileWriterHandle::new(file));
+                            file_opened = Some(file_writer_manager.create_file_writer_handle(file));
                         } else {
                             error!("Failed creating [{:?}] file", path);
                         }
@@ -369,7 +369,7 @@ mod req_temp_table {
             path: &str,
             content_length: Option<usize>,
             is_end: bool,
-            file_writer_channel: Arc<FileWriter<WritableItem<File>>>,
+            file_writer_manager: Arc<FileWriter<WritableItem<File>>>,
         ) {
             if let Some(_entry) = self.table.get(&(conn_id.to_string(), stream_id)) {
                 return;
@@ -404,7 +404,8 @@ mod req_temp_table {
                             path.push(uuid);
 
                             if let Ok(file) = File::create(path.clone()) {
-                                file_opened = Some(FileWriterHandle::new(file));
+                                file_opened =
+                                    Some(file_writer_manager.create_file_writer_handle(file));
                             } else {
                                 error!("Failed creating [{:?}] file", path);
                             }
@@ -428,7 +429,7 @@ mod req_temp_table {
                 event_subscriber,
                 storage_path,
                 file_opened,
-                file_writer_channel,
+                file_writer_manager,
                 Some(headers),
                 Some(path),
                 content_length,

@@ -229,7 +229,7 @@ mod thread_pool {
             content_length: Option<usize>,
             has_more_frames: bool,
             server_config: &Arc<ServerConfig>,
-            file_writer_channel: &Arc<FileWriter<WritableItem<std::fs::File>>>,
+            file_writer_manager: &Arc<FileWriter<WritableItem<std::fs::File>>>,
             chunking_station: &ChunkingStation,
             waker: &Waker,
             new_request_signal: &SignalNewRequest,
@@ -242,6 +242,7 @@ mod thread_pool {
                 // the partial was partially set on the first data packet
                 // but path, methods, headers was not known because
                 // header wasn't entirelly processed.
+                // file was not created yet
                 route_handler.complete_request_entry_in_table(
                     server_config,
                     stream_id,
@@ -252,6 +253,7 @@ mod thread_pool {
                     content_length,
                     data_management_type,
                     event_listener,
+                    file_writer_manager,
                 );
             } else {
                 route_handler.create_new_request_in_table(
@@ -263,7 +265,7 @@ mod thread_pool {
                     content_length,
                     has_more_frames,
                     server_config,
-                    file_writer_channel,
+                    file_writer_manager,
                 );
             }
             if let Err(_) = route_handler.send_reception_status_first(
@@ -312,6 +314,7 @@ mod thread_pool {
                     content_length,
                     Some(DataManagement::Storage(crate::BodyStorage::InMemory)),
                     None,
+                    file_writer_manager,
                 );
             } else {
                 route_handler.create_new_request_in_table(

@@ -7,8 +7,9 @@ mod file_wrtr {
     use std::fs::File;
 
     use crossbeam_channel::SendError;
+    use uuid::Uuid;
 
-    use crate::file_writer::pending_files_map::PendingFilesMap;
+    use crate::{file_writer::pending_files_map::PendingFilesMap, FileWriterHandle};
 
     use super::{file_writer_worker, trait_writable::FileWritable, WritableItem};
 
@@ -48,6 +49,16 @@ mod file_wrtr {
                 pending_files_map,
             }
         }
+        pub fn create_file_writer_handle(&self, file: std::fs::File) -> FileWriterHandle<File> {
+            let file_write_uuid = Uuid::now_v7();
+
+            let file_writer_handle =
+                FileWriterHandle::new(file, file_write_uuid, &self.pending_files_map);
+
+            self.pending_files_map
+                .insert_pending_writer(file_write_uuid, &file_writer_handle);
+            file_writer_handle
+        }
         pub fn get_file_writer_sender(&self) -> FileWriterChannel {
             let sender = self.channel.0.clone();
             FileWriterChannel { sender }
@@ -70,8 +81,12 @@ mod writable_type {
     };
 
     use quiche::Error;
+    use uuid::Uuid;
 
-    use crate::file_writer::FileWriter;
+    use crate::file_writer::{
+        pending_files_map::{self, PendingFilesMap},
+        FileWriter,
+    };
 
     use super::trait_writable::FileWritable;
 
@@ -81,6 +96,8 @@ mod writable_type {
     {
         fn clone(&self) -> Self {
             Self {
+                pending_file_map_ref: self.pending_file_map_ref.clone(),
+                handle_id: self.handle_id.clone(),
                 inner: self.inner.clone(),
             }
         }
@@ -100,14 +117,18 @@ mod writable_type {
     where
         W: std::io::Write + Sync + Send + 'static,
     {
+        handle_id: Uuid,
+        pending_file_map_ref: PendingFilesMap,
         inner: Arc<(Mutex<State<W>>, Condvar)>,
     }
     impl<W> FileWriterHandle<W>
     where
         W: std::io::Write + Send + Sync + 'static,
     {
-        pub fn new(writer: W) -> Self {
+        pub fn new(writer: W, handle_id: Uuid, pending_file_map_ref: &PendingFilesMap) -> Self {
             Self {
+                handle_id,
+                pending_file_map_ref: pending_file_map_ref.clone(),
                 inner: Arc::new((
                     Mutex::new(State {
                         writer: BufWriter::new(writer),
@@ -117,6 +138,9 @@ mod writable_type {
                     Condvar::new(),
                 )),
             }
+        }
+        pub fn get_file_writer_id(&self) -> Uuid {
+            self.handle_id
         }
         pub fn written(&self) -> usize {
             let guard = &*self.inner.0.lock().unwrap();
@@ -170,6 +194,8 @@ mod writable_type {
             cb: impl FnOnce(usize) + Send + Sync + 'static,
         ) {
             let file_h = self.inner.clone();
+            let pending_files_map_c = self.pending_file_map_ref.clone();
+            let handle_id = self.handle_id;
             std::thread::spawn(move || {
                 let cdv = &file_h.1;
                 {
@@ -208,7 +234,10 @@ mod writable_type {
                 }
 
                 info!("File written !!");
-                cb(content_length_required)
+                cb(content_length_required);
+                if pending_files_map_c.yeild_writer_by_id(handle_id) {
+                    info!("File writer has been drop after complete file write ");
+                }
             });
         }
     }

@@ -410,22 +410,25 @@ mod request_hndlr {
             content_length: Option<usize>,
             data_management_type: Option<DataManagement>,
             event_subscriber: Option<Arc<dyn RouteEventListener + 'static + Send + Sync>>,
+            file_writer_manager: &Arc<FileWriter<WritableItem<File>>>,
         ) {
             let inner = &self.inner;
 
             let mut file_storage = None::<PathBuf>;
-            let mut file_open = None::<FileWriterHandle<std::fs::File>>;
-            match response_queue_processing::utils::build_temp_stage_file_storage_path(
-                server_config,
-                headers,
-                &data_management_type,
-            ) {
-                Some(file_s) => {
-                    file_storage = Some(file_s.0);
-                    file_open = Some(file_s.1)
-                }
-                None => {}
-            };
+            /* let mut file_open = None::<FileWriterHandle<std::fs::File>>;
+             match response_queue_processing::utils::build_temp_stage_file_storage_path(
+                 server_config,
+                 headers,
+                 &data_management_type,
+                 file_writer_manager,
+             ) {
+                 Some(file_s) => {
+                     file_storage = Some(file_s.0);
+                     file_open = Some(file_s.1)
+                 }
+                 None => {}
+             };
+            */
 
             inner.routes_states().complete_request_entry_in_table(
                 stream_id,
@@ -436,8 +439,6 @@ mod request_hndlr {
                 content_length,
                 data_management_type,
                 event_subscriber,
-                file_storage,
-                file_open,
             )
         }
         pub fn create_new_request_in_table(
