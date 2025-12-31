@@ -175,8 +175,8 @@ mod route_mngr {
             file_writer_channel: &crate::file_writer::FileWriterChannel,
         ) {
             let route_handler = self.routes_handler();
-            let mut data_management: Option<DataManagement> = Some(DataManagement::default());
-            let mut event_subscriber: Option<Arc<dyn RouteEventListener + Send + Sync + 'static>> =
+            let data_management: Option<DataManagement> = Some(DataManagement::default());
+            let event_subscriber: Option<Arc<dyn RouteEventListener + Send + Sync + 'static>> =
                 None;
 
             route_handler

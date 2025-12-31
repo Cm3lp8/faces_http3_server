@@ -1,3 +1,4 @@
+use dashmap::DashMap;
 pub use dispatcher::{Response, RouteEventDispatcher};
 pub use error_response::ErrorResponse;
 pub use handler_trait::RouteHandle;
@@ -68,6 +69,8 @@ mod dispatcher {
         path::Path,
         sync::{Arc, Mutex},
     };
+
+    use dashmap::DashMap;
 
     use crate::{route_events::FinishedEvent, H3Method, RouteEvent, RouteForm, RouteHandle};
 
@@ -157,25 +160,20 @@ mod dispatcher {
     }
 
     pub struct RouteEventDispatcher<S: Send + Sync + 'static> {
-        inner: Arc<
-            Mutex<
-                HashMap<(String, H3Method), Vec<Arc<dyn RouteHandle<S> + Sync + Send + 'static>>>,
-            >,
-        >,
+        inner:
+            Arc<DashMap<(String, H3Method), Vec<Arc<dyn RouteHandle<S> + Sync + Send + 'static>>>>,
     }
     type ReqPath = &'static str;
     impl<S: Sync + Send + 'static + Clone> RouteEventDispatcher<S> {
         pub fn new() -> Self {
             Self {
-                inner: Arc::new(Mutex::new(HashMap::new())),
+                inner: Arc::new(DashMap::new()),
             }
         }
         pub fn set_handles(&mut self, routes_formats: &HashMap<ReqPath, Vec<Arc<RouteForm<S>>>>) {
-            let guard = &mut *self.inner.lock().unwrap();
-
             for (path, route_coll) in routes_formats.iter() {
                 for route in route_coll.iter() {
-                    guard
+                    self.inner
                         .entry((path.to_string(), *route.method()))
                         .and_modify(|coll| coll.extend(route.handles()))
                         .or_insert(route.handles());
@@ -189,8 +187,8 @@ mod dispatcher {
             let path = event.path();
             let method = event.method();
             let mut status_response: RouteResponse = RouteResponse::OK200;
-            if let Some(entry) = self.inner.lock().unwrap().get(&(path.to_string(), method)) {
-                for handle in entry {
+            if let Some(entry) = self.inner.get(&(path.to_string(), method)) {
+                for handle in &*entry {
                     let mut response = handle.call(event, app_state, status_response).response();
 
                     event = response.retake_event();
