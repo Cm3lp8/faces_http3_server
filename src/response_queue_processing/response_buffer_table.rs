@@ -3,6 +3,7 @@ type ReqId = (u64, String);
 mod response_buff {
     use dashmap::DashSet;
     use mio::Waker;
+    use ring::test::File;
 
     use super::*;
     use std::{
@@ -12,7 +13,7 @@ mod response_buff {
     };
 
     use crate::{
-        file_writer::FileWriterChannel,
+        file_writer::{FileWriter, FileWriterChannel, WritableItem},
         request_response::{ChunkingStation, HeaderPriority},
         response_queue_processing::ResponseInjection,
         route_events::EventType,
@@ -27,7 +28,7 @@ mod response_buff {
             crossbeam_channel::Receiver<ReqId>,
         ),
         route_handler: RouteHandler<S, T>,
-        file_writer_channel: FileWriterChannel,
+        file_writer_manager: Arc<FileWriter<WritableItem<std::fs::File>>>,
         chunking_station: ChunkingStation,
         signal: Arc<DashSet<ReqId>>,
         waker: Arc<Waker>,
@@ -39,7 +40,7 @@ mod response_buff {
             Self {
                 channel: self.channel.clone(),
                 signal: self.signal.clone(),
-                file_writer_channel: self.file_writer_channel.clone(),
+                file_writer_manager: self.file_writer_manager.clone(),
                 chunking_station: self.chunking_station.clone(),
                 waker: self.waker.clone(),
                 route_handler: self.route_handler.clone(),
@@ -51,7 +52,7 @@ mod response_buff {
         pub fn new(
             route_handler: RouteHandler<S, T>,
             server_config: &Arc<ServerConfig>,
-            file_writer_channel: FileWriterChannel,
+            file_writer_manager: Arc<FileWriter<WritableItem<std::fs::File>>>,
             chunking_station: ChunkingStation,
             waker: &Arc<Waker>,
         ) -> Self {
@@ -62,7 +63,7 @@ mod response_buff {
             Self {
                 channel,
                 signal,
-                file_writer_channel,
+                file_writer_manager,
                 chunking_station,
                 route_handler,
                 waker: waker.clone(),

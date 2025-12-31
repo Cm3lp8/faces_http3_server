@@ -1,11 +1,14 @@
 pub use file_wrtr::{FileWriter, FileWriterChannel};
 pub use trait_writable::FileWritable;
 pub use writable_type::{FileWriterHandle, WritableItem};
+mod pending_files_map;
 
 mod file_wrtr {
     use std::fs::File;
 
     use crossbeam_channel::SendError;
+
+    use crate::file_writer::pending_files_map::PendingFilesMap;
 
     use super::{file_writer_worker, trait_writable::FileWritable, WritableItem};
 
@@ -27,8 +30,10 @@ mod file_wrtr {
             self.sender.send(writable_item)
         }
     }
+    #[derive(Clone)]
     pub struct FileWriter<T: FileWritable> {
         channel: (crossbeam_channel::Sender<T>, crossbeam_channel::Receiver<T>),
+        pending_files_map: PendingFilesMap,
     }
 
     impl FileWriter<WritableItem<File>> {
@@ -36,8 +41,12 @@ mod file_wrtr {
             let channel = crossbeam_channel::unbounded::<WritableItem<File>>();
 
             file_writer_worker::run(channel.1.clone());
+            let pending_files_map = PendingFilesMap::new();
 
-            Self { channel }
+            Self {
+                channel,
+                pending_files_map,
+            }
         }
         pub fn get_file_writer_sender(&self) -> FileWriterChannel {
             let sender = self.channel.0.clone();
@@ -204,6 +213,7 @@ mod writable_type {
         }
     }
 
+    #[derive(Clone)]
     pub struct WritableItem<W: std::io::Write + Send + Sync + 'static> {
         packet_id: usize,
         data: Vec<u8>,
@@ -237,7 +247,6 @@ mod file_writer_worker {
             .stack_size(1024 * 1024 * 2)
             .spawn(move || {
                 while let Ok(writable_item) = receiver.recv() {
-                    //   std::thread::sleep(Duration::from_micros(20));
                     if let Err(_) = writable_item.write_on_disk() {
                         error!("Failed to write data on disk");
                     }

@@ -8,7 +8,7 @@ mod thread_pool {
     use quiche::h3;
 
     use crate::{
-        file_writer::{self, FileWriterChannel},
+        file_writer::{self, FileWriter, FileWriterChannel, WritableItem},
         request_response::ChunkingStation,
         response_queue_processing::SignalNewRequest,
         server_config,
@@ -37,7 +37,7 @@ mod thread_pool {
             app_state: S,
             route_handler: &RouteHandler<S, T>,
             server_config: &Arc<ServerConfig>,
-            file_writer_channel: &FileWriterChannel,
+            file_writer_manager: &Arc<FileWriter<WritableItem<std::fs::File>>>,
             response_signal_sender: &SignalNewRequest,
             chunking_station: &ChunkingStation,
             waker: &Arc<Waker>,
@@ -52,7 +52,7 @@ mod thread_pool {
                     app_state.clone(),
                     route_handler,
                     server_config,
-                    file_writer_channel,
+                    file_writer_manager,
                     response_signal_sender,
                     chunking_station.clone(),
                     waker,
@@ -80,13 +80,13 @@ mod thread_pool {
             app_state: S,
             route_handler: &RouteHandler<S, T>,
             server_config: &Arc<ServerConfig>,
-            file_writer_channel: &crate::file_writer::FileWriterChannel,
+            file_writer_manager: &Arc<crate::file_writer::FileWriter<WritableItem<std::fs::File>>>,
             response_signal_sender: &SignalNewRequest,
             chunking_station: ChunkingStation,
             waker: &Arc<mio::Waker>,
         ) -> Self {
             let server_config = server_config.clone();
-            let file_writer_channel = file_writer_channel.clone();
+            let file_writer_manager = file_writer_manager.clone();
             let route_handler = route_handler.clone();
             let response_signal_sender = response_signal_sender.clone();
             let waker = waker.clone();
@@ -158,7 +158,7 @@ mod thread_pool {
                                 content_length,
                                 has_more_frames,
                                 &server_config,
-                                &file_writer_channel,
+                                &file_writer_manager,
                                 &chunking_station,
                                 &waker,
                                 &response_signal_sender,
@@ -174,7 +174,7 @@ mod thread_pool {
                                 content_length,
                                 has_more_frames,
                                 &server_config,
-                                &file_writer_channel,
+                                &file_writer_manager,
                                 &chunking_station,
                                 &waker,
                                 &response_signal_sender,
@@ -207,9 +207,12 @@ mod thread_pool {
         use quiche::h3;
 
         use crate::{
-            event_listener, file_writer::FileWriterChannel, request_response::ChunkingStation,
-            response_queue_processing::SignalNewRequest, route_handler, server_config,
-            DataManagement, H3Method, RouteHandler, ServerConfig, UserSessions,
+            event_listener,
+            file_writer::{FileWriter, FileWriterChannel, WritableItem},
+            request_response::ChunkingStation,
+            response_queue_processing::SignalNewRequest,
+            route_handler, server_config, DataManagement, H3Method, RouteHandler, ServerConfig,
+            UserSessions,
         };
 
         pub fn regular_request_partial_response_table_update<
@@ -226,7 +229,7 @@ mod thread_pool {
             content_length: Option<usize>,
             has_more_frames: bool,
             server_config: &Arc<ServerConfig>,
-            file_writer_channel: &FileWriterChannel,
+            file_writer_channel: &Arc<FileWriter<WritableItem<std::fs::File>>>,
             chunking_station: &ChunkingStation,
             waker: &Waker,
             new_request_signal: &SignalNewRequest,
@@ -292,7 +295,7 @@ mod thread_pool {
             content_length: Option<usize>,
             has_more_frames: bool,
             server_config: &Arc<ServerConfig>,
-            file_writer_channel: &FileWriterChannel,
+            file_writer_manager: &Arc<FileWriter<WritableItem<std::fs::File>>>,
             chunking_station: &ChunkingStation,
             waker: &Waker,
             new_request_signal: &SignalNewRequest,
@@ -320,7 +323,7 @@ mod thread_pool {
                     content_length,
                     true,
                     server_config,
-                    file_writer_channel,
+                    file_writer_manager,
                 );
             }
             if let Err(_) = route_handler.send_reception_status_first(

@@ -13,7 +13,7 @@ mod response_pool_processing {
     use rusqlite::ToSql;
 
     use crate::{
-        file_writer::{FileWriter, FileWriterChannel},
+        file_writer::{FileWriter, FileWriterChannel, WritableItem},
         request_response::ChunkingStation,
         stream_sessions::UserSessions,
         H3Method, RouteHandler, ServerConfig,
@@ -86,7 +86,7 @@ mod response_pool_processing {
         server_config: Arc<ServerConfig>,
         chunking_station: ChunkingStation,
         waker: Arc<Waker>,
-        file_writer_channel: FileWriterChannel,
+        file_writer_manager: Arc<FileWriter<WritableItem<std::fs::File>>>,
         app_state: S,
         response_injection_table: ResponseInjectionBuffer<S, T>,
     }
@@ -96,7 +96,7 @@ mod response_pool_processing {
             server_config: Arc<ServerConfig>,
             chunking_station: ChunkingStation,
             waker: Arc<Waker>,
-            file_writer_channel: FileWriterChannel,
+            file_writer_manager: Arc<FileWriter<WritableItem<std::fs::File>>>,
             app_state: S,
             response_injection_buffer: &ResponseInjectionBuffer<S, T>,
         ) -> Self {
@@ -106,7 +106,7 @@ mod response_pool_processing {
                 server_config,
                 chunking_station,
                 waker,
-                file_writer_channel,
+                file_writer_manager,
                 app_state,
                 response_injection_table: response_injection_buffer.clone(),
             }

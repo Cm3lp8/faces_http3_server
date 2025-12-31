@@ -89,7 +89,9 @@ mod req_temp_table {
     use uuid::Uuid;
 
     use crate::{
-        file_writer::{FileWritable, FileWriterChannel, FileWriterHandle, WritableItem},
+        file_writer::{
+            FileWritable, FileWriter, FileWriterChannel, FileWriterHandle, WritableItem,
+        },
         route_events::{self, DataEvent, EventType, FinishedEvent, HeaderEvent, RouteEvent},
         route_manager::DataManagement,
         server_config, BodyStorage, H3Method, RouteEventListener, ServerConfig,
@@ -298,7 +300,7 @@ mod req_temp_table {
             data_management_type: Option<DataManagement>,
             event_subscriber: Option<Arc<dyn RouteEventListener + 'static + Send + Sync>>,
             is_end: bool,
-            file_writer_channel: FileWriterChannel,
+            file_writer_manager: Arc<FileWriter<WritableItem<File>>>,
         ) {
             if let Some(_entry) = self.table.get(&(conn_id.to_string(), stream_id)) {
                 return;
@@ -345,7 +347,7 @@ mod req_temp_table {
                 event_subscriber,
                 storage_path,
                 file_opened,
-                file_writer_channel,
+                file_writer_manager,
                 None, //header
                 None, //path
                 None, //content_length
@@ -367,7 +369,7 @@ mod req_temp_table {
             path: &str,
             content_length: Option<usize>,
             is_end: bool,
-            file_writer_channel: FileWriterChannel,
+            file_writer_channel: Arc<FileWriter<WritableItem<File>>>,
         ) {
             if let Some(_entry) = self.table.get(&(conn_id.to_string(), stream_id)) {
                 return;
@@ -449,7 +451,7 @@ mod req_temp_table {
         body_written_size: usize,
         content_length: Option<usize>,
         precedent_percentage_written: Option<f32>,
-        file_writer_channel: FileWriterChannel,
+        file_writer_manager: Arc<FileWriter<WritableItem<File>>>,
         progress_header_sent: bool,
         body: Vec<u8>,
         is_end: bool,
@@ -472,7 +474,7 @@ mod req_temp_table {
             event_subscriber: Option<Arc<dyn RouteEventListener + Send + 'static + Sync>>,
             storage_path: Option<PathBuf>,
             file_opened: Option<FileWriterHandle<File>>,
-            file_writer_channel: FileWriterChannel,
+            file_writer_manager: Arc<FileWriter<WritableItem<File>>>,
             headers: Option<&[h3::Header]>,
             path: Option<&str>,
             content_length: Option<usize>,
@@ -496,7 +498,7 @@ mod req_temp_table {
                     precedent_percentage_written: None,
                     progress_header_sent: false,
                     body: vec![],
-                    file_writer_channel,
+                    file_writer_manager,
                     is_end,
                 }
             } else {
@@ -516,7 +518,7 @@ mod req_temp_table {
                     precedent_percentage_written: None,
                     progress_header_sent: false,
                     body: vec![],
-                    file_writer_channel,
+                    file_writer_manager,
                     is_end,
                 }
             }
@@ -528,13 +530,17 @@ mod req_temp_table {
             self.is_end = is_end;
 
             if let Some(file_writer) = &self.file_opened {
-                if let Err(_) = self.file_writer_channel.send(WritableItem::new(
-                    packet.to_vec(),
-                    packet_id,
-                    file_writer.clone(),
-                    //self.body_written_size
-                    //self.content_length
-                )) {
+                if let Err(_) =
+                    self.file_writer_manager
+                        .get_file_writer_sender()
+                        .send(WritableItem::new(
+                            packet.to_vec(),
+                            packet_id,
+                            file_writer.clone(),
+                            //self.body_written_size
+                            //self.content_length
+                        ))
+                {
                     error!("failed to send writable item to file worker thread");
                 };
                 self.body_written_size += packet.len();

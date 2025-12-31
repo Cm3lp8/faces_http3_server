@@ -4,53 +4,33 @@ pub use route_handle_implementation::{
 };
 
 use crate::request_response::QueuedRequest;
-pub use crate::route_manager::{
-    H3Method, RequestType, RouteForm, RouteFormBuilder, RouteManager, RouteManagerBuilder,
-};
+pub use crate::route_manager::{H3Method, RequestType, RouteForm};
 pub use request_temp_table::ReqArgs;
 pub use request_temp_table::RequestsTable;
 mod request_temp_table;
 mod request_hndlr {
 
-    use std::{
-        collections::HashMap,
-        env::args,
-        fmt::Pointer,
-        fs::File,
-        io::BufWriter,
-        path::PathBuf,
-        sync::{Arc, Mutex, MutexGuard},
-        time::Duration,
-    };
+    use crate::file_writer::WritableItem;
+    use crate::FileWriter;
+    use std::fs::File;
+
+    use std::{path::PathBuf, sync::Arc};
 
     use crate::{
-        file_writer::{FileWritable, FileWriterChannel, FileWriterHandle},
-        handler_dispatcher::RouteEventDispatcher,
+        file_writer::{FileWriterChannel, FileWriterHandle},
         header_queue_processing::{HeaderMessage, MiddleWareJob, RouteType},
-        middleware,
-        request_response::{
-            BodyRequest, ChunkSender, ChunkingStation, ChunksDispatchChannel, HeaderPriority,
-            HeaderRequest,
-        },
-        response_queue_processing::{self, ResponseInjection, ResponsePoolProcessingSender},
-        route_events::{self, EventType, RouteEvent},
+        request_response::{BodyRequest, ChunkSender, ChunksDispatchChannel, HeaderRequest},
+        response_queue_processing::{self, ResponsePoolProcessingSender},
         route_manager::{DataManagement, RouteManagerInner},
-        server_config,
         server_init::quiche_http3_server::{self, Client},
         stream_sessions::{StreamSessions, UserSessions},
-        BodyStorage, FinishedEvent, HeadersColl, MiddleWare, MiddleWareFlow, MiddleWareResult,
-        RequestResponse, RouteEventListener, RouteResponse, ServerConfig,
+        BodyStorage, FinishedEvent, MiddleWare, MiddleWareResult, RequestResponse,
+        RouteEventListener, RouteResponse, ServerConfig,
     };
-    use mio::{net::UdpSocket, Waker};
-    use quiche::{
-        h3::{self, NameValue},
-        Connection,
-    };
-    use request_hndlr::route_handle_implementation::{send_404, send_error};
+    use mio::Waker;
+    use quiche::h3::{self};
 
-    use self::{
-        request_temp_table::RequestsTable, route_handle_implementation::response_preparation,
-    };
+    use self::request_temp_table::RequestsTable;
 
     use super::*;
 
@@ -358,7 +338,7 @@ mod request_hndlr {
             path: String,
             content_length: Option<usize>,
             more_frames: bool,
-            file_writer_channel: FileWriterChannel,
+            file_writer_manager: Arc<FileWriter<WritableItem<File>>>,
         ) {
             let inner = &self.inner;
             inner.routes_states().add_partial_request(
@@ -372,7 +352,7 @@ mod request_hndlr {
                 path.as_str(),
                 content_length,
                 !more_frames,
-                file_writer_channel,
+                file_writer_manager,
             );
         }
         pub fn inner(&self, cb: impl FnOnce(&RouteManagerInner<S, T>)) {
@@ -470,7 +450,7 @@ mod request_hndlr {
             content_length: Option<usize>,
             more_frames: bool,
             server_config: &Arc<ServerConfig>,
-            file_writer_channel: &FileWriterChannel,
+            file_writer_manager: &Arc<FileWriter<WritableItem<File>>>,
         ) {
             let inner = &self.inner;
             let mut data_management: Option<DataManagement> =
@@ -495,7 +475,7 @@ mod request_hndlr {
                 path,
                 content_length,
                 !more_frames,
-                file_writer_channel.clone(),
+                file_writer_manager.clone(),
             );
         }
         pub fn is_request_set_in_table(&self, stream_id: u64, conn_id: &str) -> bool {

@@ -228,8 +228,7 @@ mod quiche_implementation {
         let waker_clone = waker.clone();
         // init the request Response queue with mio waker
         let response_queue = ResponseQueue::<QueuedRequest>::new(waker_clone.clone());
-        let file_writer_worker = FileWriter::<WritableItem<File>>::new();
-        let file_writer_channel = file_writer_worker.get_file_writer_sender();
+        let file_writer_manager = Arc::new(FileWriter::<WritableItem<File>>::new());
 
         let mut last_time_spend = Arc::new(Mutex::new(Duration::from_micros(100)));
         let mut socket_time = Duration::from_micros(33);
@@ -243,7 +242,7 @@ mod quiche_implementation {
         let response_injection_buffer = ResponseInjectionBuffer::new(
             route_manager.routes_handler(),
             &server_config,
-            file_writer_channel.clone(),
+            file_writer_manager.clone(),
             chunking_station.clone(),
             &waker_clone,
         );
@@ -252,7 +251,7 @@ mod quiche_implementation {
             server_config.clone(),
             chunking_station.clone(),
             waker.clone(),
-            file_writer_channel.clone(),
+            file_writer_manager.clone(),
             route_manager.routes_handler().app_state(),
             &response_injection_buffer,
         );
@@ -264,7 +263,7 @@ mod quiche_implementation {
             server_config.clone(),
             chunking_station.clone(),
             waker.clone(),
-            file_writer_channel.clone(),
+            file_writer_manager.clone(),
             route_manager.routes_handler().app_state(),
             response_pool_processing.get_response_pool_processing_sender(),
             response_injection_buffer.get_signal_sender(),
@@ -534,7 +533,7 @@ mod quiche_implementation {
                                             trace_id.as_str(),
                                             &scid,
                                             &server_config,
-                                            &file_writer_channel,
+                                            &file_writer_manager,
                                         );
                                     }
                                     let scid = client.conn.source_id().as_ref().to_vec();

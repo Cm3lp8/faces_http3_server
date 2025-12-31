@@ -20,6 +20,7 @@ mod chunking_implementation {
         usize,
     };
 
+    use dashmap::DashMap;
     use mio::Waker;
     use ring::test::File;
 
@@ -104,7 +105,7 @@ mod chunking_implementation {
         waker: &Arc<Waker>,
         receiver: crossbeam_channel::Receiver<ChunkableBody>,
         resender: crossbeam_channel::Sender<ChunkableBody>,
-        pending_buffer_usage_map: Arc<Mutex<HashMap<Scid, HashMap<StreamId, usize>>>>,
+        pending_buffer_usage_map: Arc<DashMap<Scid, HashMap<StreamId, usize>>>,
         chunk_station: ChunksDispatchChannel,
     ) {
         let waker = waker.clone();
@@ -112,9 +113,6 @@ mod chunking_implementation {
         let last_time_spend = last_time_spend.clone();
         let mut sended = 0usize;
         type Ids = (u64, Vec<u8>);
-        let pending_items: Arc<Mutex<HashMap<Ids, VecDeque<(ChunkSender, QueuedRequest)>>>> =
-            Arc::new(Mutex::new(HashMap::new()));
-        let pending_items_clone = pending_items.clone();
         std::thread::spawn(move || {
             let mut buf_read_high = vec![0; CHUNK_SIZE];
             let mut buf_read_low = vec![0; CHUNK_SIZE];
@@ -197,6 +195,7 @@ mod response_queue {
         time::Duration,
     };
 
+    use dashmap::DashMap;
     use mio::Waker;
     use quiche::h3;
 
@@ -220,13 +219,13 @@ mod response_queue {
             crossbeam_channel::Receiver<ChunkableBody>,
         ),
         waker: Arc<Waker>,
-        pending_buffer_usage_map: Arc<Mutex<HashMap<Scid, HashMap<StreamId, usize>>>>,
+        pending_buffer_usage_map: Arc<DashMap<Scid, HashMap<StreamId, usize>>>,
         chunk_dispatch_channel: ChunksDispatchChannel,
     }
 
     impl ChunkingStation {
         pub fn new(waker: Arc<Waker>, last_time_spend: Arc<Mutex<Duration>>) -> Self {
-            let pending_buffer_usage_map = Arc::new(Mutex::new(HashMap::new()));
+            let pending_buffer_usage_map = Arc::new(DashMap::new());
 
             let chunk_dispatch_channel = ChunksDispatchChannel::new();
             let chunking_station = Self {
@@ -259,9 +258,6 @@ mod response_queue {
             self.chunk_dispatch_channel.clone()
         }
 
-        pub fn set_pending_buffers_usage(&self, map: HashMap<Vec<u8>, HashMap<u64, usize>>) {
-            *self.pending_buffer_usage_map.lock().unwrap() = map;
-        }
         pub fn send_response(&self, msg: BodyType) {
             match msg {
                 BodyType::Data {

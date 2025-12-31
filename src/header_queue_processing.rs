@@ -11,7 +11,7 @@ mod header_reception {
     use quiche::h3;
 
     use crate::{
-        file_writer::FileWriterChannel,
+        file_writer::{FileWriter, FileWriterChannel, WritableItem},
         request_response::{ChunkingStation, ChunksDispatchChannel},
         response_queue_processing::{ResponsePoolProcessingSender, SignalNewRequest},
         route_handler,
@@ -75,7 +75,7 @@ mod header_reception {
             crossbeam_channel::Sender<HeaderMessage>,
             crossbeam_channel::Receiver<HeaderMessage>,
         ),
-        file_writer_channel: FileWriterChannel,
+        file_writer_manager: Arc<FileWriter<WritableItem<std::fs::File>>>,
         workers: Arc<ThreadPool<T>>,
         response_processing_pool_injector: ResponsePoolProcessingSender,
     }
@@ -86,7 +86,7 @@ mod header_reception {
             server_config: Arc<ServerConfig>,
             chunking_station: ChunkingStation,
             waker: Arc<Waker>,
-            file_writer_channel: FileWriterChannel,
+            file_writer_manager: Arc<FileWriter<WritableItem<std::fs::File>>>,
             app_state: S,
             response_processing_pool_injector: ResponsePoolProcessingSender,
             response_signal_sender: SignalNewRequest,
@@ -96,7 +96,7 @@ mod header_reception {
                 app_state,
                 &route_handler,
                 &server_config,
-                &file_writer_channel,
+                &file_writer_manager,
                 &response_signal_sender,
                 &chunking_station,
                 &waker,
@@ -105,7 +105,7 @@ mod header_reception {
                 server_config,
                 route_handler,
                 incoming_header_channel: crossbeam_channel::unbounded(),
-                file_writer_channel,
+                file_writer_manager,
                 chunking_station,
                 waker,
                 workers,

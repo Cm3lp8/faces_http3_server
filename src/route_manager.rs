@@ -6,6 +6,7 @@ pub use route_mngr::{
     ErrorType, H3Method, RequestType, RouteForm, RouteFormBuilder, RouteManager,
     RouteManagerBuilder,
 };
+use std::fs::File;
 mod inflight_streams_path_verifier;
 
 mod route_config {
@@ -61,6 +62,8 @@ mod route_config {
 }
 
 mod route_mngr {
+    use crate::file_writer::WritableItem;
+
     use std::{
         any::Any,
         borrow::BorrowMut,
@@ -172,7 +175,7 @@ mod route_mngr {
             conn_id: &str,
             scid: &[u8],
             server_config: &Arc<ServerConfig>,
-            file_writer_channel: &crate::file_writer::FileWriterChannel,
+            file_writer_manager: &Arc<crate::file_writer::FileWriter<WritableItem<File>>>,
         ) {
             let route_handler = self.routes_handler();
             let data_management: Option<DataManagement> = Some(DataManagement::default());
@@ -188,7 +191,7 @@ mod route_mngr {
                     data_management,
                     event_subscriber.clone(),
                     !true,
-                    file_writer_channel.clone(),
+                    file_writer_manager.clone(),
                 );
         }
     }
