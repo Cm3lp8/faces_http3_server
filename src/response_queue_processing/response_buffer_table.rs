@@ -1,7 +1,6 @@
 pub use response_buff::{ResponseInjectionBuffer, SignalNewRequest};
 type ReqId = (u64, String);
 mod response_buff {
-    use dashmap::DashSet;
     use mio::Waker;
 
     use super::*;
@@ -30,7 +29,7 @@ mod response_buff {
         route_handler: RouteHandler<S, T>,
         file_writer_channel: FileWriterChannel,
         chunking_station: ChunkingStation,
-        signal: DashSet<ReqId>,
+        signal: Arc<Mutex<HashSet<ReqId>>>,
         waker: Arc<Waker>,
     }
     impl<S: Send + Sync + 'static, T: UserSessions<Output = T>> Clone
@@ -58,7 +57,7 @@ mod response_buff {
             waker: &Arc<Waker>,
         ) -> Self {
             let channel = crossbeam_channel::unbounded();
-            let signal: DashSet<ReqId> = DashSet::new();
+            let signal: Arc<Mutex<HashSet<ReqId>>> = Arc::new(Mutex::new(HashSet::new()));
             let table = Arc::new(Mutex::new(HashMap::new()));
 
             signal_receiver::run(channel.1.clone(), signal.clone());
@@ -114,8 +113,9 @@ mod response_buff {
             SignalNewRequest::new(self.channel.0.clone())
         }
         fn is_request_signal_in_queue(&self, response_injection_id: ReqId) -> bool {
-            if self.signal.contains(&response_injection_id) {
-                self.signal.remove(&response_injection_id);
+            let guard = &mut *self.signal.lock().unwrap();
+            if guard.contains(&response_injection_id) {
+                guard.remove(&response_injection_id);
                 return true;
             }
             false
@@ -145,15 +145,20 @@ mod response_buff {
 }
 mod signal_receiver {
 
-    use dashmap::DashSet;
-
     use super::*;
+    use std::{
+        collections::HashSet,
+        sync::{Arc, Mutex},
+    };
 
-    pub fn run(receiver: crossbeam_channel::Receiver<ReqId>, signal_set: DashSet<ReqId>) {
+    pub fn run(
+        receiver: crossbeam_channel::Receiver<ReqId>,
+        signal_set: Arc<Mutex<HashSet<ReqId>>>,
+    ) {
         std::thread::spawn(move || {
             while let Ok(signal) = receiver.recv() {
                 // This signal indicates that the middlewares have been processed
-                signal_set.insert(signal.clone());
+                signal_set.lock().unwrap().insert(signal.clone());
             }
         });
     }
