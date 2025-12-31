@@ -78,24 +78,19 @@ mod req_temp_table {
     use quiche::h3::{self, NameValue};
     use request_argument_parser::ReqArgs;
     use std::{
-        collections::HashMap,
         fmt::{Debug, Formatter},
-        fs::{File, Permissions},
-        io::{BufReader, BufWriter, Write},
+        fs::File,
         path::PathBuf,
-        sync::{Arc, Mutex},
-        time::{Duration, SystemTimeError},
+        sync::Arc,
     };
     use uuid::Uuid;
 
     use crate::{
-        file_writer::{
-            FileWritable, FileWriter, FileWriterChannel, FileWriterHandle, WritableItem,
-        },
-        route_events::{self, DataEvent, EventType, FinishedEvent, HeaderEvent, RouteEvent},
+        file_writer::{FileWriter, FileWriterHandle, WritableItem},
+        route_events::{DataEvent, EventType, FinishedEvent, HeaderEvent, RouteEvent},
         route_handler::request_temp_table::req_temp_table::partial_request_completion_helper::fetch_first_in_memory_body_packet_if_any,
         route_manager::DataManagement,
-        server_config, BodyStorage, H3Method, RouteEventListener, ServerConfig,
+        BodyStorage, H3Method, RouteEventListener, ServerConfig,
     };
 
     use self::reception_status::ReceptionStatus;
@@ -131,7 +126,6 @@ mod req_temp_table {
             storage_path: Option<PathBuf>,
             file_open: Option<FileWriterHandle<File>>,
         ) {
-            warn!("Stream [{:?}] complete request in table", stream_id);
             // TODO fetch first InMemory data if any
 
             let first_in_memory_body_packet = fetch_first_in_memory_body_packet_if_any(
@@ -158,13 +152,6 @@ mod req_temp_table {
                     entry.content_length = content_length;
                     entry.headers = Some(headers.to_vec());
                 });
-
-            if let Some(entry) = self.table.get(&(conn_id.to_string(), stream_id)) {
-                warn!(
-                    "Stream [{:?}] completedreq  Storage path [{:?}] in table",
-                    stream_id, entry.storage_path
-                );
-            }
         }
         pub fn is_entry_partial_reponse_set(&self, stream_id: u64, conn_id: &str) -> bool {
             if let Some(_entry) = self.table.get(&(conn_id.to_string(), stream_id)) {
@@ -250,7 +237,6 @@ mod req_temp_table {
                 let request_event =
                     partial_req.to_route_event(stream_id, scid, conn_id, event_type);
 
-                warn!("Stream [{:?}] route_event_builded in table", stream_id);
                 can_clean = true;
                 if let Some(req_event) = request_event {
                     Ok(req_event)
@@ -362,10 +348,6 @@ mod req_temp_table {
             } else {
                 None
             };
-            warn!(
-                "Stream [{:?}] add_partial_request_headerbeforetreatment Storage path [{:?}] in table",
-                stream_id, storage_path
-            );
 
             let partial_request = PartialReq::new(
                 conn_id.clone(),
@@ -382,10 +364,6 @@ mod req_temp_table {
                 is_end,
             );
 
-            warn!(
-                "Stream [{:?}] add_partial_request_before_header_treatment in table",
-                stream_id
-            );
             self.table
                 .entry((conn_id, stream_id))
                 .or_insert_with(|| partial_request);
@@ -461,10 +439,6 @@ mod req_temp_table {
                 None
             };
 
-            warn!(
-                "Stream [{:?}] add_partial_request__ Storage path [{:?}] in table",
-                stream_id, storage_path
-            );
             let partial_request = PartialReq::new(
                 conn_id.clone(),
                 stream_id,
@@ -479,7 +453,6 @@ mod req_temp_table {
                 content_length,
                 is_end,
             );
-            warn!("Stream [{:?}] add_partial_request in table", stream_id);
             self.table
                 .entry((conn_id, stream_id))
                 .and_modify(|it| {
@@ -605,14 +578,11 @@ mod req_temp_table {
                             packet.to_vec(),
                             packet_id,
                             file_writer.clone(),
-                            //self.body_written_size
-                            //self.content_length
                         ))
                 {
                     error!("failed to send writable item to file worker thread");
                 };
                 self.body_written_size += packet.len();
-                println!("send to write [{:?}]", self.body_written_size);
             }
         }
         pub fn extend_data(&mut self, packet: &[u8], is_end: bool) {
@@ -647,10 +617,6 @@ mod req_temp_table {
                 return None;
             }
             let file_path = self.path_storage();
-            warn!(
-                "TO_route_event stream_id [{:?}  fp[{:?}]",
-                stream_id, file_path
-            );
             if let Some(headers) = self.headers.as_ref() {
                 match event_type {
                     EventType::OnHeader => Some(RouteEvent::new_header(HeaderEvent::new(

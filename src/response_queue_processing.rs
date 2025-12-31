@@ -155,7 +155,6 @@ mod response_pool_processing {
             let response_injection =
                 ResponseInjection::new(stream_id, scid, conn_id, has_more_frames, mio_waker);
 
-            info!("sending injection stream_id [{:?}]", stream_id);
             self.sender.send(response_injection)
         }
     }

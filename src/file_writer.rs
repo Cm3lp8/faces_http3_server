@@ -158,7 +158,6 @@ mod writable_type {
             match writer.writer.write_all(data) {
                 Ok(()) => {
                     writer.written += data.len();
-                    info!("writtent [{:?}]", writer.written);
                     cdv.notify_all();
                     Ok(data.len())
                 }
@@ -176,11 +175,9 @@ mod writable_type {
 
                 let cdv = &file_h.1;
                 let guard = file_h.0.lock().unwrap();
-                info!("wait to close");
                 if guard.written < content_length_required {
                     cdv.wait(guard);
                 }
-                info!("has close");
             });
             Ok(())
         }
@@ -200,15 +197,9 @@ mod writable_type {
                 let cdv = &file_h.1;
                 {
                     let guard = file_h.0.lock().unwrap();
-                    info!(
-                        "wait to close whyloop content_length_required [{:?}] written [{:?}]?",
-                        content_length_required, guard.written
-                    );
                     if guard.written < content_length_required {
                         match cdv.wait(guard) {
-                            Ok(_) => {
-                                info!("Condvar wake")
-                            }
+                            Ok(_) => {}
                             Err(e) => {}
                         }
                     }
@@ -217,7 +208,6 @@ mod writable_type {
                 let guard = &mut *file_h.0.lock().unwrap();
                 let mut retry = 0;
                 loop {
-                    info!("Before fflush");
                     match guard.writer.flush() {
                         Ok(_) => break,
                         Err(e) if e.kind() == ErrorKind::Interrupted => {
