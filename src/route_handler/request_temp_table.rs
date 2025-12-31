@@ -353,7 +353,9 @@ mod req_temp_table {
                 None, //content_length
                 is_end,
             );
-            self.table.insert((conn_id, stream_id), partial_request);
+            self.table
+                .entry((conn_id, stream_id))
+                .or_insert_with(|| partial_request);
         }
         /// Keep track of a client request based on unique connexion_id and stream_id
         /// If the entry already exists, does nothing.
@@ -371,7 +373,12 @@ mod req_temp_table {
             is_end: bool,
             file_writer_manager: Arc<FileWriter<WritableItem<File>>>,
         ) {
-            if let Some(_entry) = self.table.get(&(conn_id.to_string(), stream_id)) {
+            if let Some(entry) = &mut self.table.get_mut(&(conn_id.to_string(), stream_id)) {
+                entry.headers = Some(headers.to_vec());
+                entry.path = Some(path.to_string());
+                entry.content_length = content_length;
+                entry.method = Some(method);
+
                 return;
             }
             let mut file_opened: Option<FileWriterHandle<File>> = None;
@@ -435,7 +442,15 @@ mod req_temp_table {
                 content_length,
                 is_end,
             );
-            self.table.insert((conn_id, stream_id), partial_request);
+            self.table
+                .entry((conn_id, stream_id))
+                .and_modify(|it| {
+                    it.method = Some(method);
+                    it.path = Some(path.to_string());
+                    it.content_length = content_length;
+                    it.headers = Some(headers.to_vec())
+                })
+                .or_insert(partial_request);
         }
     }
     struct PartialReq {
