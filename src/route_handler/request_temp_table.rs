@@ -74,6 +74,7 @@ mod reception_status {
     }
 }
 mod req_temp_table {
+    use dashmap::DashMap;
     use quiche::h3::{self, NameValue};
     use request_argument_parser::ReqArgs;
     use std::{
@@ -100,17 +101,17 @@ mod req_temp_table {
 
     type ReqId = (String, u64);
     pub struct RequestsTable {
-        table: Arc<Mutex<HashMap<ReqId, PartialReq>>>,
+        table: Arc<DashMap<ReqId, PartialReq>>,
     }
 
     impl RequestsTable {
         pub fn new() -> Self {
             Self {
-                table: Arc::new(Mutex::new(HashMap::new())),
+                table: Arc::new(DashMap::new()),
             }
         }
         pub fn set_intermediate_headers_send(&self, stream_id: u64, conn_id: String) {
-            if let Some(entry) = self.table.lock().unwrap().get_mut(&(conn_id, stream_id)) {
+            if let Some(mut entry) = self.table.get_mut(&(conn_id, stream_id)) {
                 entry.progress_header_sent = true;
             }
         }
@@ -128,8 +129,6 @@ mod req_temp_table {
             file_open: Option<FileWriterHandle<File>>,
         ) {
             self.table
-                .lock()
-                .unwrap()
                 .entry((conn_id.to_string(), stream_id))
                 .and_modify(|entry| {
                     entry.method = Some(method);
@@ -143,12 +142,7 @@ mod req_temp_table {
                 });
         }
         pub fn is_entry_partial_reponse_set(&self, stream_id: u64, conn_id: &str) -> bool {
-            if let Some(_entry) = self
-                .table
-                .lock()
-                .unwrap()
-                .get(&(conn_id.to_string(), stream_id))
-            {
+            if let Some(_entry) = self.table.get(&(conn_id.to_string(), stream_id)) {
                 true
             } else {
                 false
@@ -161,12 +155,7 @@ mod req_temp_table {
         ) -> Option<(String, H3Method, Vec<h3::Header>, Option<usize>)> {
             let mut path_and_method: Option<(String, H3Method, Vec<h3::Header>, Option<usize>)> =
                 None;
-            if let Some(entry) = self
-                .table
-                .lock()
-                .unwrap()
-                .get_mut(&(conn_id.to_string(), stream_id))
-            {
+            if let Some(entry) = self.table.get_mut(&(conn_id.to_string(), stream_id)) {
                 if entry.path.is_none() || entry.headers.is_none() || entry.method.is_none() {
                     return None;
                 }
@@ -186,7 +175,7 @@ mod req_temp_table {
             stream_id: u64,
             conn_id: String,
         ) -> Option<(ReceptionStatus, bool)> {
-            if let Some(entry) = self.table.lock().unwrap().get_mut(&(conn_id, stream_id)) {
+            if let Some(mut entry) = self.table.get_mut(&(conn_id, stream_id)) {
                 let headers_send = entry.progress_header_sent;
                 if let Some(content_length) = entry.content_length {
                     let written = entry.written();
@@ -230,11 +219,8 @@ mod req_temp_table {
             event_type: EventType,
         ) -> Result<RouteEvent, ()> {
             let mut can_clean = false;
-            let res = if let Some(partial_req) = self
-                .table
-                .lock()
-                .unwrap()
-                .get_mut(&(conn_id.to_string(), stream_id))
+            let res = if let Some(mut partial_req) =
+                self.table.get_mut(&(conn_id.to_string(), stream_id))
             {
                 let request_event =
                     partial_req.to_route_event(stream_id, scid, conn_id, event_type);
@@ -251,10 +237,7 @@ mod req_temp_table {
             };
 
             if can_clean {
-                self.table
-                    .lock()
-                    .unwrap()
-                    .remove(&(conn_id.to_string(), stream_id));
+                self.table.remove(&(conn_id.to_string(), stream_id));
             }
 
             res
@@ -269,12 +252,7 @@ mod req_temp_table {
             is_end: bool,
         ) -> Result<usize, ()> {
             let mut total_written: Result<usize, ()> = Err(());
-            if let Some(entry) = self
-                .table
-                .lock()
-                .unwrap()
-                .get_mut(&(conn_id.clone(), stream_id))
-            {
+            if let Some(mut entry) = self.table.get_mut(&(conn_id.clone(), stream_id)) {
                 if let Some(data_mngmt) = entry.data_management_type() {
                     match data_mngmt {
                         DataManagement::Stream => {
@@ -322,12 +300,7 @@ mod req_temp_table {
             is_end: bool,
             file_writer_channel: FileWriterChannel,
         ) {
-            if let Some(_entry) = self
-                .table
-                .lock()
-                .unwrap()
-                .get(&(conn_id.to_string(), stream_id))
-            {
+            if let Some(_entry) = self.table.get(&(conn_id.to_string(), stream_id)) {
                 return;
             }
             let mut file_opened: Option<FileWriterHandle<File>> = None;
@@ -378,10 +351,7 @@ mod req_temp_table {
                 None, //content_length
                 is_end,
             );
-            self.table
-                .lock()
-                .unwrap()
-                .insert((conn_id, stream_id), partial_request);
+            self.table.insert((conn_id, stream_id), partial_request);
         }
         /// Keep track of a client request based on unique connexion_id and stream_id
         /// If the entry already exists, does nothing.
@@ -399,12 +369,7 @@ mod req_temp_table {
             is_end: bool,
             file_writer_channel: FileWriterChannel,
         ) {
-            if let Some(_entry) = self
-                .table
-                .lock()
-                .unwrap()
-                .get(&(conn_id.to_string(), stream_id))
-            {
+            if let Some(_entry) = self.table.get(&(conn_id.to_string(), stream_id)) {
                 return;
             }
             let mut file_opened: Option<FileWriterHandle<File>> = None;
@@ -467,10 +432,7 @@ mod req_temp_table {
                 content_length,
                 is_end,
             );
-            self.table
-                .lock()
-                .unwrap()
-                .insert((conn_id, stream_id), partial_request);
+            self.table.insert((conn_id, stream_id), partial_request);
         }
     }
     struct PartialReq {

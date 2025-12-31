@@ -26,7 +26,6 @@ mod response_buff {
             crossbeam_channel::Sender<ReqId>,
             crossbeam_channel::Receiver<ReqId>,
         ),
-        table: Arc<Mutex<HashMap<ReqId, ResponseInjection>>>,
         route_handler: RouteHandler<S, T>,
         file_writer_channel: FileWriterChannel,
         chunking_station: ChunkingStation,
@@ -39,7 +38,6 @@ mod response_buff {
         fn clone(&self) -> Self {
             Self {
                 channel: self.channel.clone(),
-                table: self.table.clone(),
                 signal: self.signal.clone(),
                 file_writer_channel: self.file_writer_channel.clone(),
                 chunking_station: self.chunking_station.clone(),
@@ -59,12 +57,10 @@ mod response_buff {
         ) -> Self {
             let channel = crossbeam_channel::unbounded();
             let signal: Arc<DashSet<ReqId>> = Arc::new(DashSet::new());
-            let table = Arc::new(Mutex::new(HashMap::new()));
 
             signal_receiver::run(channel.1.clone(), signal.clone());
             Self {
                 channel,
-                table,
                 signal,
                 file_writer_channel,
                 chunking_station,
