@@ -849,6 +849,11 @@ mod route_handle_implementation {
             let mut response = if let Some(route_event) = route_event {
                 match route_event {
                     RouteEvent::OnFinished(event) => {
+                        warn!(
+                            "before handler p [{:?}] method [{:?}]",
+                            event.get_file_path(),
+                            event.method()
+                        );
                         is_end = event.is_end();
                         route_handler.process_handler(stream_id, conn_id, scid, event)
                     }

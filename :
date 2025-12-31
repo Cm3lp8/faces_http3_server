@@ -143,13 +143,6 @@ mod req_temp_table {
                     entry.content_length = content_length;
                     entry.headers = Some(headers.to_vec());
                 });
-
-            if let Some(entry) = self.table.get(&(conn_id.to_string(), stream_id)) {
-                warn!(
-                    "Stream [{:?}] completedreq  Storage path [{:?}] in table",
-                    stream_id, entry.storage_path
-                );
-            }
         }
         pub fn is_entry_partial_reponse_set(&self, stream_id: u64, conn_id: &str) -> bool {
             if let Some(_entry) = self.table.get(&(conn_id.to_string(), stream_id)) {
@@ -347,10 +340,6 @@ mod req_temp_table {
             } else {
                 None
             };
-            warn!(
-                "Stream [{:?}] add_partial_request_header Storage path [{:?}] in table",
-                stream_id, storage_path
-            );
 
             let partial_request = PartialReq::new(
                 conn_id.clone(),
@@ -446,10 +435,6 @@ mod req_temp_table {
                 None
             };
 
-            warn!(
-                "Stream [{:?}] add_partial_request__ Storage path [{:?}] in table",
-                stream_id, storage_path
-            );
             let partial_request = PartialReq::new(
                 conn_id.clone(),
                 stream_id,
