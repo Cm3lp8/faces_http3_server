@@ -93,6 +93,7 @@ mod req_temp_table {
             FileWritable, FileWriter, FileWriterChannel, FileWriterHandle, WritableItem,
         },
         route_events::{self, DataEvent, EventType, FinishedEvent, HeaderEvent, RouteEvent},
+        route_handler::request_temp_table::req_temp_table::partial_request_completion_helper::fetch_first_in_memory_body_packet_if_any,
         route_manager::DataManagement,
         server_config, BodyStorage, H3Method, RouteEventListener, ServerConfig,
     };
@@ -127,10 +128,24 @@ mod req_temp_table {
             content_length: Option<usize>,
             data_management_type: Option<DataManagement>,
             event_subscriber: Option<Arc<dyn RouteEventListener + 'static + Send + Sync>>,
-            //storage_path: Option<PathBuf>,
-            // file_open: Option<FileWriterHandle<File>>,
+            storage_path: Option<PathBuf>,
+            file_open: Option<FileWriterHandle<File>>,
         ) {
             warn!("Stream [{:?}] complete request in table", stream_id);
+            // TODO fetch first InMemory data if any
+
+            let first_in_memory_body_packet = fetch_first_in_memory_body_packet_if_any(
+                &self.table,
+                (conn_id.to_string(), stream_id),
+            );
+
+            if let Some(first_bytes) = first_in_memory_body_packet {
+                if let Some(file_open) = &file_open {
+                    if let Err(e) = file_open.write_on_disk(&first_bytes) {
+                        error!("failed to write first bytes ");
+                    }
+                }
+            };
             self.table
                 .entry((conn_id.to_string(), stream_id))
                 .and_modify(|entry| {
@@ -138,8 +153,8 @@ mod req_temp_table {
                     entry.path = Some(path.to_string());
                     entry.event_subscriber = event_subscriber;
                     entry.data_management_type = data_management_type;
-                    //        entry.storage_path = storage_path;
-                    //       entry.file_opened = file_open;
+                    entry.storage_path = storage_path;
+                    entry.file_opened = file_open;
                     entry.content_length = content_length;
                     entry.headers = Some(headers.to_vec());
                 });
@@ -348,7 +363,7 @@ mod req_temp_table {
                 None
             };
             warn!(
-                "Stream [{:?}] add_partial_request_header Storage path [{:?}] in table",
+                "Stream [{:?}] add_partial_request_headerbeforetreatment Storage path [{:?}] in table",
                 stream_id, storage_path
             );
 
@@ -474,6 +489,20 @@ mod req_temp_table {
                     it.headers = Some(headers.to_vec())
                 })
                 .or_insert(partial_request);
+        }
+    }
+    mod partial_request_completion_helper {
+        use std::sync::Arc;
+
+        use dashmap::DashMap;
+
+        use crate::route_handler::request_temp_table::req_temp_table::{PartialReq, ReqId};
+
+        pub fn fetch_first_in_memory_body_packet_if_any(
+            partial_req_table: &Arc<DashMap<ReqId, PartialReq>>,
+            k: (String, u64),
+        ) -> Option<Vec<u8>> {
+            None
         }
     }
     struct PartialReq {

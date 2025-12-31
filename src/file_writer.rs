@@ -151,7 +151,7 @@ mod writable_type {
             let guard = &mut *self.inner.0.lock().unwrap();
             guard.writer.flush()
         }
-        fn write_on_disk(&self, data: &[u8]) -> Result<usize, ()> {
+        pub fn write_on_disk(&self, data: &[u8]) -> Result<usize, ()> {
             let writer = &mut *self.inner.0.lock().unwrap();
             let cdv = &self.inner.1;
 
