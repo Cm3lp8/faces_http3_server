@@ -143,16 +143,13 @@ mod writable_type {
                      *
                      * */
 
-                warn!("A");
                 if let Some(writer) = &mut state.writer {
-                    warn!("B");
                     writer.flush()?;
                 }
 
                 {
                     state.writer.take();
                 }
-                warn!("C");
             }
             let mut temp_buf: Vec<u8> = vec![];
 
