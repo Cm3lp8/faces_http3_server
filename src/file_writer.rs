@@ -145,7 +145,6 @@ mod writable_type {
 
                 if let Some(writer) = &mut state.writer {
                     writer.flush()?;
-                } else {
                 }
 
                 {

@@ -569,6 +569,7 @@ mod req_temp_table {
             if let Some(storage_path) = &self.storage_path {
                 if let Some(file_h) = &self.file_opened {
                     if let Some(storage_path_str) = storage_path.to_str() {
+                        warn!("Start prepend_bytes !!");
                         match prepend_bytes(storage_path_str, &first_bytes, &file_h) {
                             Ok(_) => {}
                             Err(e) => {}
@@ -665,7 +666,7 @@ mod req_temp_table {
         bytes: &[u8],
         file_open: &FileWriterHandle,
     ) -> Result<(), io::Error> {
-        file_open.transfert_bytes_from_temp_file(path, bytes);
+        file_open.transfert_bytes_from_temp_file(path, bytes)?;
 
         Ok(())
     }
