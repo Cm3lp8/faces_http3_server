@@ -572,7 +572,9 @@ mod req_temp_table {
                         warn!("Start prepend_bytes !!");
                         match prepend_bytes(storage_path_str, &first_bytes, &file_h) {
                             Ok(_) => {}
-                            Err(e) => {}
+                            Err(e) => {
+                                error!("e [{:?}", e)
+                            }
                         }
                     }
                 }

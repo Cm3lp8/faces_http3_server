@@ -143,13 +143,16 @@ mod writable_type {
                      *
                      * */
 
+                warn!("A");
                 if let Some(writer) = &mut state.writer {
+                    warn!("B");
                     writer.flush()?;
                 }
 
                 {
                     state.writer.take();
                 }
+                warn!("C");
             }
             let mut temp_buf: Vec<u8> = vec![];
 
@@ -173,6 +176,7 @@ mod writable_type {
             b_writer.flush()?;
             guard.writer = Some(b_writer);
 
+            warn!("D new file should be writen");
             Ok(())
         }
         pub fn get_file_writer_id(&self) -> Uuid {
