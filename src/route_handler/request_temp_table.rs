@@ -80,6 +80,7 @@ mod req_temp_table {
     use std::{
         fmt::{Debug, Formatter},
         fs::File,
+        io::{self, Write},
         path::PathBuf,
         sync::Arc,
     };
@@ -124,22 +125,10 @@ mod req_temp_table {
             data_management_type: Option<DataManagement>,
             event_subscriber: Option<Arc<dyn RouteEventListener + 'static + Send + Sync>>,
             storage_path: Option<PathBuf>,
-            file_open: Option<FileWriterHandle<File>>,
+            file_open: Option<FileWriterHandle>,
         ) {
             // TODO fetch first InMemory data if any
 
-            let first_in_memory_body_packet = fetch_first_in_memory_body_packet_if_any(
-                &self.table,
-                (conn_id.to_string(), stream_id),
-            );
-
-            if let Some(first_bytes) = first_in_memory_body_packet {
-                if let Some(file_open) = &file_open {
-                    if let Err(e) = file_open.write_on_disk(&first_bytes) {
-                        error!("failed to write first bytes ");
-                    }
-                }
-            };
             self.table
                 .entry((conn_id.to_string(), stream_id))
                 .and_modify(|entry| {
@@ -293,6 +282,9 @@ mod req_temp_table {
                                         is_end,
                                     )));
                                 }
+
+                                entry.flush_and_prefix_with_temp_buffer_if_any_bytes();
+
                                 entry.write_file(packet, 0, is_end);
                                 total_written = Ok(entry.written());
                             }
@@ -310,12 +302,12 @@ mod req_temp_table {
             data_management_type: Option<DataManagement>,
             event_subscriber: Option<Arc<dyn RouteEventListener + 'static + Send + Sync>>,
             is_end: bool,
-            file_writer_manager: Arc<FileWriter<WritableItem<File>>>,
+            file_writer_manager: Arc<FileWriter<WritableItem>>,
         ) {
             if let Some(_entry) = self.table.get(&(conn_id.to_string(), stream_id)) {
                 return;
             }
-            let mut file_opened: Option<FileWriterHandle<File>> = None;
+            let mut file_opened: Option<FileWriterHandle> = None;
             let storage_path = if let Some(data_management_type) = data_management_type.as_ref() {
                 if let Some(body_storage) = data_management_type.is_body_storage() {
                     if let BodyStorage::File = body_storage {
@@ -382,7 +374,7 @@ mod req_temp_table {
             path: &str,
             content_length: Option<usize>,
             is_end: bool,
-            file_writer_manager: Arc<FileWriter<WritableItem<File>>>,
+            file_writer_manager: Arc<FileWriter<WritableItem>>,
         ) {
             if let Some(entry) = &mut self.table.get_mut(&(conn_id.to_string(), stream_id)) {
                 entry.headers = Some(headers.to_vec());
@@ -392,7 +384,7 @@ mod req_temp_table {
 
                 return;
             }
-            let mut file_opened: Option<FileWriterHandle<File>> = None;
+            let mut file_opened: Option<FileWriterHandle> = None;
             let storage_path = if let Some(data_management_type) = data_management_type.as_ref() {
                 if let Some(body_storage) = data_management_type.is_body_storage() {
                     match body_storage {
@@ -486,13 +478,13 @@ mod req_temp_table {
         data_management_type: Option<DataManagement>,
         event_subscriber: Option<Arc<dyn RouteEventListener + 'static + Send + Sync>>,
         storage_path: Option<PathBuf>,
-        file_opened: Option<FileWriterHandle<File>>,
+        file_opened: Option<FileWriterHandle>,
         path: Option<String>,
         args: Option<ReqArgs>,
         body_written_size: usize,
         content_length: Option<usize>,
         precedent_percentage_written: Option<f32>,
-        file_writer_manager: Arc<FileWriter<WritableItem<File>>>,
+        file_writer_manager: Arc<FileWriter<WritableItem>>,
         progress_header_sent: bool,
         body: Vec<u8>,
         is_end: bool,
@@ -514,8 +506,8 @@ mod req_temp_table {
             data_management_type: Option<DataManagement>,
             event_subscriber: Option<Arc<dyn RouteEventListener + Send + 'static + Sync>>,
             storage_path: Option<PathBuf>,
-            file_opened: Option<FileWriterHandle<File>>,
-            file_writer_manager: Arc<FileWriter<WritableItem<File>>>,
+            file_opened: Option<FileWriterHandle>,
+            file_writer_manager: Arc<FileWriter<WritableItem>>,
             headers: Option<&[h3::Header]>,
             path: Option<&str>,
             content_length: Option<usize>,
@@ -566,6 +558,24 @@ mod req_temp_table {
         }
         pub fn content_length(&self) -> Option<usize> {
             self.content_length.clone()
+        }
+        pub fn flush_and_prefix_with_temp_buffer_if_any_bytes(&mut self) {
+            if self.body.len() == 0 {
+                return;
+            }
+
+            let first_bytes = std::mem::take(&mut self.body);
+
+            if let Some(storage_path) = &self.storage_path {
+                if let Some(file_h) = &self.file_opened {
+                    if let Some(storage_path_str) = storage_path.to_str() {
+                        match prepend_bytes(storage_path_str, &first_bytes, &file_h) {
+                            Ok(_) => {}
+                            Err(e) => {}
+                        }
+                    }
+                }
+            }
         }
         pub fn write_file(&mut self, packet: &[u8], packet_id: usize, is_end: bool) {
             self.is_end = is_end;
@@ -648,6 +658,16 @@ mod req_temp_table {
                 None
             }
         }
+    }
+
+    fn prepend_bytes(
+        path: &str,
+        bytes: &[u8],
+        file_open: &FileWriterHandle,
+    ) -> Result<(), io::Error> {
+        file_open.transfert_bytes_from_temp_file(path, bytes);
+
+        Ok(())
     }
 }
 

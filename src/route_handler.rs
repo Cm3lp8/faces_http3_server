@@ -338,7 +338,7 @@ mod request_hndlr {
             path: String,
             content_length: Option<usize>,
             more_frames: bool,
-            file_writer_manager: Arc<FileWriter<WritableItem<File>>>,
+            file_writer_manager: Arc<FileWriter<WritableItem>>,
         ) {
             let inner = &self.inner;
             inner.routes_states().add_partial_request(
@@ -410,12 +410,12 @@ mod request_hndlr {
             content_length: Option<usize>,
             data_management_type: Option<DataManagement>,
             event_subscriber: Option<Arc<dyn RouteEventListener + 'static + Send + Sync>>,
-            file_writer_manager: &Arc<FileWriter<WritableItem<File>>>,
+            file_writer_manager: &Arc<FileWriter<WritableItem>>,
         ) {
             let inner = &self.inner;
 
             let mut file_storage = None::<PathBuf>;
-            let mut file_open = None::<FileWriterHandle<std::fs::File>>;
+            let mut file_open = None::<FileWriterHandle>;
             match response_queue_processing::utils::build_temp_stage_file_storage_path(
                 server_config,
                 headers,
@@ -452,7 +452,7 @@ mod request_hndlr {
             content_length: Option<usize>,
             more_frames: bool,
             server_config: &Arc<ServerConfig>,
-            file_writer_manager: &Arc<FileWriter<WritableItem<File>>>,
+            file_writer_manager: &Arc<FileWriter<WritableItem>>,
         ) {
             let inner = &self.inner;
             let mut data_management: Option<DataManagement> =

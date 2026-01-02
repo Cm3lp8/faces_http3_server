@@ -233,7 +233,7 @@ mod request_event {
         method: H3Method,
         args: Option<ReqArgs>,
         file_path: Option<PathBuf>,
-        file_writer: Option<FileWriterHandle<std::fs::File>>,
+        file_writer: Option<FileWriterHandle>,
         bytes_written: usize,
         body: Vec<u8>,
         is_end: bool,
@@ -249,7 +249,7 @@ mod request_event {
             headers: Vec<h3::Header>,
             args: Option<ReqArgs>,
             file_path: Option<PathBuf>,
-            file_writer: Option<FileWriterHandle<std::fs::File>>,
+            file_writer: Option<FileWriterHandle>,
             bytes_written: usize,
             body: Option<Vec<u8>>,
             is_end: bool,
@@ -285,10 +285,10 @@ mod request_event {
         pub fn path(&self) -> &str {
             self.path.as_str()
         }
-        pub fn file_writer(&self) -> Option<&FileWriterHandle<std::fs::File>> {
+        pub fn file_writer(&self) -> Option<&FileWriterHandle> {
             self.file_writer.as_ref()
         }
-        pub fn take_file_writer(&mut self) -> Option<FileWriterHandle<std::fs::File>> {
+        pub fn take_file_writer(&mut self) -> Option<FileWriterHandle> {
             self.file_writer.take()
         }
         pub fn method(&self) -> H3Method {

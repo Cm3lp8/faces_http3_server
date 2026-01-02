@@ -7,7 +7,7 @@ use crate::FileWriterHandle;
 
 #[derive(Clone, Debug)]
 pub struct PendingFilesMap {
-    file_writer_map: Arc<DashMap<Uuid, FileWriterHandle<fs::File>>>,
+    file_writer_map: Arc<DashMap<Uuid, FileWriterHandle>>,
 }
 
 impl PendingFilesMap {
@@ -17,11 +17,7 @@ impl PendingFilesMap {
         }
     }
 
-    pub fn insert_pending_writer(
-        &self,
-        handle_id: Uuid,
-        file_writer_handle: &FileWriterHandle<std::fs::File>,
-    ) {
+    pub fn insert_pending_writer(&self, handle_id: Uuid, file_writer_handle: &FileWriterHandle) {
         self.file_writer_map
             .insert(handle_id, file_writer_handle.clone());
     }

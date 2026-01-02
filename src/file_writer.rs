@@ -14,7 +14,7 @@ mod file_wrtr {
     use super::{file_writer_worker, trait_writable::FileWritable, WritableItem};
 
     pub struct FileWriterChannel {
-        sender: crossbeam_channel::Sender<WritableItem<File>>,
+        sender: crossbeam_channel::Sender<WritableItem>,
     }
     impl Clone for FileWriterChannel {
         fn clone(&self) -> Self {
@@ -24,10 +24,7 @@ mod file_wrtr {
         }
     }
     impl FileWriterChannel {
-        pub fn send(
-            &self,
-            writable_item: WritableItem<File>,
-        ) -> Result<(), SendError<WritableItem<File>>> {
+        pub fn send(&self, writable_item: WritableItem) -> Result<(), SendError<WritableItem>> {
             self.sender.send(writable_item)
         }
     }
@@ -37,9 +34,9 @@ mod file_wrtr {
         pending_files_map: PendingFilesMap,
     }
 
-    impl FileWriter<WritableItem<File>> {
+    impl FileWriter<WritableItem> {
         pub fn new() -> Self {
-            let channel = crossbeam_channel::unbounded::<WritableItem<File>>();
+            let channel = crossbeam_channel::unbounded::<WritableItem>();
 
             file_writer_worker::run(channel.1.clone());
             let pending_files_map = PendingFilesMap::new();
@@ -49,7 +46,7 @@ mod file_wrtr {
                 pending_files_map,
             }
         }
-        pub fn create_file_writer_handle(&self, file: std::fs::File) -> FileWriterHandle<File> {
+        pub fn create_file_writer_handle(&self, file: std::fs::File) -> FileWriterHandle {
             let file_write_uuid = Uuid::now_v7();
 
             let file_writer_handle =
@@ -74,8 +71,8 @@ mod trait_writable {
 
 mod writable_type {
     use std::{
-        fs::File,
-        io::{BufWriter, ErrorKind, Write},
+        fs::{File, OpenOptions},
+        io::{self, BufWriter, ErrorKind, Read, Write},
         sync::{Arc, Condvar, Mutex},
         time::Duration,
     };
@@ -90,10 +87,7 @@ mod writable_type {
 
     use super::trait_writable::FileWritable;
 
-    impl<W> Clone for FileWriterHandle<W>
-    where
-        W: std::io::Write + Send + Sync + 'static,
-    {
+    impl Clone for FileWriterHandle {
         fn clone(&self) -> Self {
             Self {
                 pending_file_map_ref: self.pending_file_map_ref.clone(),
@@ -103,41 +97,84 @@ mod writable_type {
         }
     }
     #[derive(Debug)]
-    struct State<W>
-    where
-        W: std::io::Write + Send + Sync + 'static,
-    {
-        writer: BufWriter<W>,
+    struct State {
+        writer: Option<BufWriter<File>>,
         written: usize,
         closed: bool,
     }
 
     #[derive(Debug)]
-    pub struct FileWriterHandle<W>
-    where
-        W: std::io::Write + Sync + Send + 'static,
-    {
+    pub struct FileWriterHandle {
         handle_id: Uuid,
         pending_file_map_ref: PendingFilesMap,
-        inner: Arc<(Mutex<State<W>>, Condvar)>,
+        inner: Arc<(Mutex<State>, Condvar)>,
     }
-    impl<W> FileWriterHandle<W>
-    where
-        W: std::io::Write + Send + Sync + 'static,
-    {
-        pub fn new(writer: W, handle_id: Uuid, pending_file_map_ref: &PendingFilesMap) -> Self {
+    impl FileWriterHandle {
+        pub fn new(writer: File, handle_id: Uuid, pending_file_map_ref: &PendingFilesMap) -> Self {
             Self {
                 handle_id,
                 pending_file_map_ref: pending_file_map_ref.clone(),
                 inner: Arc::new((
                     Mutex::new(State {
-                        writer: BufWriter::new(writer),
+                        writer: Some(BufWriter::new(writer)),
                         written: 0,
                         closed: false,
                     }),
                     Condvar::new(),
                 )),
             }
+        }
+        pub fn transfert_bytes_from_temp_file(
+            &self,
+            storage_path: &str,
+            bytes: &[u8],
+        ) -> Result<(), io::Error> {
+            {
+                // TODO see how to manage this with a temp file , if necesarry
+                let state = &mut *self.inner.0.lock().unwrap();
+
+                /*
+                     *
+                let temp_path = format!("{}.tmp", path);
+
+                let mut tmp_file = File::create(path)?;
+
+                tmp_file.write_all(bytes)?;
+                     *
+                     * */
+
+                if let Some(writer) = &mut state.writer {
+                    writer.flush()?;
+                } else {
+                }
+
+                {
+                    state.writer.take();
+                }
+            }
+            let mut temp_buf: Vec<u8> = vec![];
+
+            let mut original_file = File::open(storage_path)?;
+
+            original_file.read_to_end(&mut temp_buf)?;
+
+            let mut prefix = bytes.to_vec();
+            prefix.extend(temp_buf);
+
+            let new_file = OpenOptions::new()
+                .write(true)
+                .truncate(true)
+                .open(storage_path)?;
+
+            let guard = &mut *self.inner.0.lock().unwrap();
+
+            let mut b_writer: BufWriter<std::fs::File> = BufWriter::new(new_file);
+
+            b_writer.write_all(&prefix)?;
+            b_writer.flush()?;
+            guard.writer = Some(b_writer);
+
+            Ok(())
         }
         pub fn get_file_writer_id(&self) -> Uuid {
             self.handle_id
@@ -149,22 +186,30 @@ mod writable_type {
         }
         pub fn flush(&self) -> Result<(), std::io::Error> {
             let guard = &mut *self.inner.0.lock().unwrap();
-            guard.writer.flush()
+            if let Some(writer) = &mut guard.writer {
+                writer.flush()
+            } else {
+                Err(io::Error::new(ErrorKind::NotFound, "no bufwriter"))
+            }
         }
         pub fn write_on_disk(&self, data: &[u8]) -> Result<usize, ()> {
             let writer = &mut *self.inner.0.lock().unwrap();
             let cdv = &self.inner.1;
 
-            match writer.writer.write_all(data) {
-                Ok(()) => {
-                    writer.written += data.len();
-                    cdv.notify_all();
-                    Ok(data.len())
+            if let Some(wrtr) = &mut writer.writer {
+                match wrtr.write_all(data) {
+                    Ok(()) => {
+                        writer.written += data.len();
+                        cdv.notify_all();
+                        Ok(data.len())
+                    }
+                    Err(e) => {
+                        error!("[{:?}]", e);
+                        Err(())
+                    }
                 }
-                Err(e) => {
-                    error!("[{:?}]", e);
-                    Err(())
-                }
+            } else {
+                Err(())
             }
         }
         ///Drop the BufWriter<file> to close it and return the file path.
@@ -183,7 +228,7 @@ mod writable_type {
         }
     }
 
-    impl FileWriterHandle<std::fs::File> {
+    impl FileWriterHandle {
         /// [`on_file_written`] trigs a callback when required content is written .
         pub fn on_file_written(
             &self,
@@ -199,7 +244,9 @@ mod writable_type {
                     let guard = file_h.0.lock().unwrap();
                     if guard.written < content_length_required {
                         match cdv.wait(guard) {
-                            Ok(_) => {}
+                            Ok(_) => {
+                                info!("Condvar wake")
+                            }
                             Err(e) => {}
                         }
                     }
@@ -207,18 +254,22 @@ mod writable_type {
 
                 let guard = &mut *file_h.0.lock().unwrap();
                 let mut retry = 0;
+                // FLushing
                 loop {
-                    match guard.writer.flush() {
-                        Ok(_) => break,
-                        Err(e) if e.kind() == ErrorKind::Interrupted => {
-                            retry += 1;
+                    info!("Before fflush");
+                    if let Some(writer) = &mut guard.writer {
+                        match writer.flush() {
+                            Ok(_) => break,
+                            Err(e) if e.kind() == ErrorKind::Interrupted => {
+                                retry += 1;
 
-                            if retry >= 5 {
+                                if retry >= 5 {
+                                    break;
+                                }
+                            }
+                            _ => {
                                 break;
                             }
-                        }
-                        _ => {
-                            break;
                         }
                     }
                 }
@@ -233,14 +284,14 @@ mod writable_type {
     }
 
     #[derive(Clone)]
-    pub struct WritableItem<W: std::io::Write + Send + Sync + 'static> {
+    pub struct WritableItem {
         packet_id: usize,
         data: Vec<u8>,
-        writer: FileWriterHandle<W>, // (_, bytes_written)
+        writer: FileWriterHandle, // (_, bytes_written)
     }
 
-    impl<W: std::io::Write + Send + Sync + 'static> WritableItem<W> {
-        pub fn new(data: Vec<u8>, packet_id: usize, writer: FileWriterHandle<W>) -> Self {
+    impl WritableItem {
+        pub fn new(data: Vec<u8>, packet_id: usize, writer: FileWriterHandle) -> Self {
             Self {
                 packet_id,
                 data,
@@ -249,7 +300,7 @@ mod writable_type {
         }
     }
 
-    impl<W: Write + Send + 'static + Sync> FileWritable for WritableItem<W> {
+    impl FileWritable for WritableItem {
         fn write_on_disk(&self) -> Result<usize, ()> {
             self.writer.write_on_disk(&self.data)
         }

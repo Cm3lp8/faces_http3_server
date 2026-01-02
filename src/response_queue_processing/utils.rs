@@ -13,8 +13,8 @@ pub fn build_temp_stage_file_storage_path(
     server_config: &ServerConfig,
     headers: &[h3::Header],
     data_management_type: &Option<DataManagement>,
-    file_writer_manager: &Arc<FileWriter<WritableItem<File>>>,
-) -> Option<(PathBuf, FileWriterHandle<File>)> {
+    file_writer_manager: &Arc<FileWriter<WritableItem>>,
+) -> Option<(PathBuf, FileWriterHandle)> {
     let Some(data_management_type) = data_management_type else {
         return None;
     };

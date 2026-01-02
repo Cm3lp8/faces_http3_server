@@ -86,7 +86,7 @@ mod response_pool_processing {
         server_config: Arc<ServerConfig>,
         chunking_station: ChunkingStation,
         waker: Arc<Waker>,
-        file_writer_manager: Arc<FileWriter<WritableItem<std::fs::File>>>,
+        file_writer_manager: Arc<FileWriter<WritableItem>>,
         app_state: S,
         response_injection_table: ResponseInjectionBuffer<S, T>,
     }
@@ -96,7 +96,7 @@ mod response_pool_processing {
             server_config: Arc<ServerConfig>,
             chunking_station: ChunkingStation,
             waker: Arc<Waker>,
-            file_writer_manager: Arc<FileWriter<WritableItem<std::fs::File>>>,
+            file_writer_manager: Arc<FileWriter<WritableItem>>,
             app_state: S,
             response_injection_buffer: &ResponseInjectionBuffer<S, T>,
         ) -> Self {
