@@ -583,7 +583,9 @@ mod req_temp_table {
         pub fn write_file(&mut self, packet: &[u8], packet_id: usize, is_end: bool) {
             self.is_end = is_end;
 
+            warn!("Will write new pacet [{:?}]", packet);
             if let Some(file_writer) = &self.file_opened {
+                warn!("Will write B");
                 if let Err(_) =
                     self.file_writer_manager
                         .get_file_writer_sender()

@@ -162,6 +162,7 @@ mod writable_type {
 
             let mut prefix = bytes.to_vec();
             prefix.extend(temp_buf);
+            let prefix_len = prefix.len();
 
             let new_file = OpenOptions::new()
                 .write(true)
@@ -175,6 +176,7 @@ mod writable_type {
             b_writer.write_all(&prefix)?;
             b_writer.flush()?;
             guard.writer = Some(b_writer);
+            guard.written = prefix_len;
 
             warn!("D new file should be writen");
             Ok(())
@@ -204,6 +206,7 @@ mod writable_type {
                     Ok(()) => {
                         writer.written += data.len();
                         cdv.notify_all();
+                        println!("written [{:?}]", writer.written);
                         Ok(data.len())
                     }
                     Err(e) => {
