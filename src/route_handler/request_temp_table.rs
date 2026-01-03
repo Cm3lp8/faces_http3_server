@@ -326,6 +326,8 @@ mod req_temp_table {
                         }
 
                         path.push(uuid);
+                        file_writer_manager
+                            .associate_stream_with_next_listener(stream_id, conn_id.clone());
 
                         if let Ok(file) = File::create(path.clone()) {
                             file_opened = Some(
@@ -428,6 +430,8 @@ mod req_temp_table {
 
                             path.push(uuid);
 
+                            file_writer_manager
+                                .associate_stream_with_next_listener(stream_id, conn_id.clone());
                             if let Ok(file) = File::create(path.clone()) {
                                 file_opened = Some(
                                     match file_writer_manager.create_file_writer_handle(
