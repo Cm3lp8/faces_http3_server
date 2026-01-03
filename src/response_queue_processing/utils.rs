@@ -46,6 +46,7 @@ pub fn build_temp_stage_file_storage_path(
                 }
 
                 path.push(uuid);
+                file_writer_manager.associate_stream_with_next_listener(stream_id, conn_id.clone());
 
                 let file_open = if let Ok(file) = File::create(path.clone()) {
                     file_writer_manager.create_file_writer_handle(file, stream_id, conn_id)
