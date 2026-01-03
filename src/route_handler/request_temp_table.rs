@@ -282,7 +282,9 @@ mod req_temp_table {
                                         is_end,
                                     )));
                                 }
-                                entry.file_writer_manager();
+                                entry
+                                    .file_writer_manager()
+                                    .associate_stream_with_next_listener(stream_id, conn_id);
 
                                 entry.flush_and_prefix_with_temp_buffer_if_any_bytes();
 
