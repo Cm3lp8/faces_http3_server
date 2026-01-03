@@ -1,17 +1,29 @@
 pub use file_wrtr::{FileWriter, FileWriterChannel};
 pub use trait_writable::FileWritable;
 pub use writable_type::{FileWriterHandle, WritableItem};
+mod event_loop;
+mod event_loop_cb;
+mod event_loop_types;
 mod pending_files_map;
 
 mod file_wrtr {
-    use std::fs::File;
+    use std::{fs::File, sync::Arc};
 
     use crossbeam_channel::SendError;
+    use faces_event_loop_utils::EventLoop;
     use uuid::Uuid;
 
-    use crate::{file_writer::pending_files_map::PendingFilesMap, FileWriterHandle};
+    use crate::{
+        file_writer::{
+            event_loop::FileWriterPool,
+            event_loop_cb::manage_event,
+            event_loop_types::{FileWriterListener, FileWrkrEvEvent, FileWrkrEvLoopId},
+            pending_files_map::PendingFilesMap,
+        },
+        FileWriterHandle,
+    };
 
-    use super::{file_writer_worker, trait_writable::FileWritable, WritableItem};
+    use super::{trait_writable::FileWritable, WritableItem};
 
     pub struct FileWriterChannel {
         sender: crossbeam_channel::Sender<WritableItem>,
@@ -29,36 +41,57 @@ mod file_wrtr {
         }
     }
     #[derive(Clone)]
-    pub struct FileWriter<T: FileWritable> {
-        channel: (crossbeam_channel::Sender<T>, crossbeam_channel::Receiver<T>),
+    pub struct FileWriter {
+        file_worker_pool: Arc<FileWriterPool>,
         pending_files_map: PendingFilesMap,
     }
 
-    impl FileWriter<WritableItem> {
+    impl FileWriter {
         pub fn new() -> Self {
-            let channel = crossbeam_channel::unbounded::<WritableItem>();
-
-            file_writer_worker::run(channel.1.clone());
             let pending_files_map = PendingFilesMap::new();
 
+            let file_writer_worker_pool = FileWriterPool::new(8, manage_event);
+
             Self {
-                channel,
+                file_worker_pool: Arc::new(file_writer_worker_pool),
                 pending_files_map,
             }
         }
-        pub fn create_file_writer_handle(&self, file: std::fs::File) -> FileWriterHandle {
+        pub fn associate_stream_with_next_listener(&self, stream_id: u64, conn_id: String) {
+            self.file_worker_pool
+                .associate_stream_with_next_listener(stream_id, conn_id);
+        }
+        pub fn create_file_writer_handle(
+            &self,
+            file: std::fs::File,
+            stream_id: u64,
+            conn_id: String,
+        ) -> Result<FileWriterHandle, String> {
             let file_write_uuid = Uuid::now_v7();
 
-            let file_writer_handle =
-                FileWriterHandle::new(file, file_write_uuid, &self.pending_files_map);
+            let associated_worker_index = self
+                .file_worker_pool
+                .get_worker_index_for_this_stream(stream_id, conn_id);
 
-            self.pending_files_map
-                .insert_pending_writer(file_write_uuid, &file_writer_handle);
-            file_writer_handle
+            if let Some(associated_worker_index) = associated_worker_index {
+                let file_writer_handle = FileWriterHandle::new(
+                    file,
+                    file_write_uuid,
+                    &self.pending_files_map,
+                    associated_worker_index,
+                );
+
+                self.pending_files_map
+                    .insert_pending_writer(file_write_uuid, &file_writer_handle);
+                Ok(file_writer_handle)
+            } else {
+                Err("faces_quic_server error ! no filewriter created ".to_string())
+            }
         }
-        pub fn get_file_writer_sender(&self) -> FileWriterChannel {
-            let sender = self.channel.0.clone();
-            FileWriterChannel { sender }
+
+        pub fn get_file_writer_sender_by_index(&self, index: usize) -> Option<FileWriterListener> {
+            let file_writer_listener = self.file_worker_pool.get_worker_listener_by_index(index);
+            file_writer_listener
         }
     }
 }
@@ -73,7 +106,7 @@ mod writable_type {
     use std::{
         fs::{File, OpenOptions},
         io::{self, BufWriter, ErrorKind, Read, Write},
-        sync::{Arc, Condvar, Mutex},
+        sync::{atomic::AtomicUsize, Arc, Condvar, Mutex},
         time::Duration,
     };
 
@@ -90,39 +123,51 @@ mod writable_type {
     impl Clone for FileWriterHandle {
         fn clone(&self) -> Self {
             Self {
+                associated_worker_index: self.associated_worker_index.clone(),
                 pending_file_map_ref: self.pending_file_map_ref.clone(),
                 handle_id: self.handle_id.clone(),
                 inner: self.inner.clone(),
+                written: self.written.clone(),
             }
         }
     }
     #[derive(Debug)]
     struct State {
         writer: Option<BufWriter<File>>,
-        written: usize,
         closed: bool,
     }
 
     #[derive(Debug)]
     pub struct FileWriterHandle {
+        associated_worker_index: usize,
         handle_id: Uuid,
         pending_file_map_ref: PendingFilesMap,
         inner: Arc<(Mutex<State>, Condvar)>,
+        written: Arc<AtomicUsize>,
     }
     impl FileWriterHandle {
-        pub fn new(writer: File, handle_id: Uuid, pending_file_map_ref: &PendingFilesMap) -> Self {
+        pub fn new(
+            writer: File,
+            handle_id: Uuid,
+            pending_file_map_ref: &PendingFilesMap,
+            associated_worker_index: usize,
+        ) -> Self {
             Self {
+                associated_worker_index,
                 handle_id,
                 pending_file_map_ref: pending_file_map_ref.clone(),
                 inner: Arc::new((
                     Mutex::new(State {
                         writer: Some(BufWriter::new(writer)),
-                        written: 0,
                         closed: false,
                     }),
                     Condvar::new(),
                 )),
+                written: Arc::new(AtomicUsize::new(0)),
             }
+        }
+        pub fn get_associated_worker_index(&self) -> usize {
+            self.associated_worker_index
         }
         pub fn transfert_bytes_from_temp_file(
             &self,
@@ -173,7 +218,8 @@ mod writable_type {
             b_writer.write_all(&prefix)?;
             b_writer.flush()?;
             guard.writer = Some(b_writer);
-            guard.written = prefix_len;
+            self.written
+                .store(prefix_len, std::sync::atomic::Ordering::Relaxed);
 
             warn!("D new file should be writen");
             Ok(())
@@ -182,9 +228,7 @@ mod writable_type {
             self.handle_id
         }
         pub fn written(&self) -> usize {
-            let guard = &*self.inner.0.lock().unwrap();
-
-            guard.written
+            self.written.load(std::sync::atomic::Ordering::Relaxed)
         }
         pub fn flush(&self) -> Result<(), std::io::Error> {
             let guard = &mut *self.inner.0.lock().unwrap();
@@ -201,9 +245,13 @@ mod writable_type {
             if let Some(wrtr) = &mut writer.writer {
                 match wrtr.write_all(data) {
                     Ok(()) => {
-                        writer.written += data.len();
+                        self.written
+                            .fetch_add(data.len(), std::sync::atomic::Ordering::Relaxed);
                         cdv.notify_all();
-                        println!("written [{:?}]", writer.written);
+                        println!(
+                            "written [{:?}]",
+                            self.written.load(std::sync::atomic::Ordering::Relaxed)
+                        );
                         Ok(data.len())
                     }
                     Err(e) => {
@@ -218,12 +266,13 @@ mod writable_type {
         ///Drop the BufWriter<file> to close it and return the file path.
         pub fn close_file(&mut self, content_length_required: usize) -> Result<(), std::io::Error> {
             let file_h = self.inner.clone();
+            let written = self.written.clone();
             std::thread::spawn(move || {
                 let mut retry_attemps = 0;
 
                 let cdv = &file_h.1;
                 let guard = file_h.0.lock().unwrap();
-                if guard.written < content_length_required {
+                if written.load(std::sync::atomic::Ordering::Relaxed) < content_length_required {
                     cdv.wait(guard);
                 }
             });
@@ -241,11 +290,15 @@ mod writable_type {
             let file_h = self.inner.clone();
             let pending_files_map_c = self.pending_file_map_ref.clone();
             let handle_id = self.handle_id;
+            let written = self.written.clone();
+            // TODO send to threadWorker with a fixed amount of threads
             std::thread::spawn(move || {
                 let cdv = &file_h.1;
                 {
-                    let guard = file_h.0.lock().unwrap();
-                    if guard.written < content_length_required {
+                    while &written.load(std::sync::atomic::Ordering::Relaxed)
+                        < &content_length_required
+                    {
+                        let mut guard = file_h.0.lock().unwrap();
                         match cdv.wait(guard) {
                             Ok(_) => {
                                 info!("Condvar wake")
@@ -307,26 +360,5 @@ mod writable_type {
         fn write_on_disk(&self) -> Result<usize, ()> {
             self.writer.write_on_disk(&self.data)
         }
-    }
-}
-
-mod file_writer_worker {
-    use std::time::Duration;
-
-    use super::trait_writable::FileWritable;
-
-    pub fn run<T: FileWritable>(receiver: crossbeam_channel::Receiver<T>) {
-        if let Err(_) = std::thread::Builder::new()
-            .stack_size(1024 * 1024 * 2)
-            .spawn(move || {
-                while let Ok(writable_item) = receiver.recv() {
-                    if let Err(_) = writable_item.write_on_disk() {
-                        error!("Failed to write data on disk");
-                    }
-                }
-            })
-        {
-            error!("failed to run file writer worker")
-        };
     }
 }

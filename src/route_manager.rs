@@ -175,7 +175,7 @@ mod route_mngr {
             conn_id: &str,
             scid: &[u8],
             server_config: &Arc<ServerConfig>,
-            file_writer_manager: &Arc<crate::file_writer::FileWriter<WritableItem>>,
+            file_writer_manager: &Arc<crate::file_writer::FileWriter>,
         ) {
             let route_handler = self.routes_handler();
             let data_management: Option<DataManagement> = Some(DataManagement::default());

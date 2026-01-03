@@ -75,7 +75,7 @@ mod header_reception {
             crossbeam_channel::Sender<HeaderMessage>,
             crossbeam_channel::Receiver<HeaderMessage>,
         ),
-        file_writer_manager: Arc<FileWriter<WritableItem>>,
+        file_writer_manager: Arc<FileWriter>,
         workers: Arc<ThreadPool<T>>,
         response_processing_pool_injector: ResponsePoolProcessingSender,
     }
@@ -86,7 +86,7 @@ mod header_reception {
             server_config: Arc<ServerConfig>,
             chunking_station: ChunkingStation,
             waker: Arc<Waker>,
-            file_writer_manager: Arc<FileWriter<WritableItem>>,
+            file_writer_manager: Arc<FileWriter>,
             app_state: S,
             response_processing_pool_injector: ResponsePoolProcessingSender,
             response_signal_sender: SignalNewRequest,

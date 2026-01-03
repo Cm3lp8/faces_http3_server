@@ -228,7 +228,7 @@ mod quiche_implementation {
         let waker_clone = waker.clone();
         // init the request Response queue with mio waker
         let response_queue = ResponseQueue::<QueuedRequest>::new(waker_clone.clone());
-        let file_writer_manager = Arc::new(FileWriter::<WritableItem>::new());
+        let file_writer_manager = Arc::new(FileWriter::new());
 
         let mut last_time_spend = Arc::new(Mutex::new(Duration::from_micros(100)));
         let mut socket_time = Duration::from_micros(33);

@@ -282,6 +282,7 @@ mod req_temp_table {
                                         is_end,
                                     )));
                                 }
+                                entry.file_writer_manager();
 
                                 entry.flush_and_prefix_with_temp_buffer_if_any_bytes();
 
@@ -302,7 +303,7 @@ mod req_temp_table {
             data_management_type: Option<DataManagement>,
             event_subscriber: Option<Arc<dyn RouteEventListener + 'static + Send + Sync>>,
             is_end: bool,
-            file_writer_manager: Arc<FileWriter<WritableItem>>,
+            file_writer_manager: Arc<FileWriter>,
         ) {
             if let Some(_entry) = self.table.get(&(conn_id.to_string(), stream_id)) {
                 return;
@@ -325,7 +326,19 @@ mod req_temp_table {
                         path.push(uuid);
 
                         if let Ok(file) = File::create(path.clone()) {
-                            file_opened = Some(file_writer_manager.create_file_writer_handle(file));
+                            file_opened = Some(
+                                match file_writer_manager.create_file_writer_handle(
+                                    file,
+                                    stream_id,
+                                    conn_id.clone(),
+                                ) {
+                                    Ok(fw) => fw,
+                                    Err(e) => {
+                                        error!("[{:?}]", e);
+                                        return;
+                                    }
+                                },
+                            );
                         } else {
                             error!("Failed creating [{:?}] file", path);
                         }
@@ -374,7 +387,7 @@ mod req_temp_table {
             path: &str,
             content_length: Option<usize>,
             is_end: bool,
-            file_writer_manager: Arc<FileWriter<WritableItem>>,
+            file_writer_manager: Arc<FileWriter>,
         ) {
             if let Some(entry) = &mut self.table.get_mut(&(conn_id.to_string(), stream_id)) {
                 entry.headers = Some(headers.to_vec());
@@ -414,8 +427,19 @@ mod req_temp_table {
                             path.push(uuid);
 
                             if let Ok(file) = File::create(path.clone()) {
-                                file_opened =
-                                    Some(file_writer_manager.create_file_writer_handle(file));
+                                file_opened = Some(
+                                    match file_writer_manager.create_file_writer_handle(
+                                        file,
+                                        stream_id,
+                                        conn_id.clone(),
+                                    ) {
+                                        Ok(fw) => fw,
+                                        Err(e) => {
+                                            error!("[{:?}]", e);
+                                            return;
+                                        }
+                                    },
+                                );
                             } else {
                                 error!("Failed creating [{:?}] file", path);
                             }
@@ -484,7 +508,7 @@ mod req_temp_table {
         body_written_size: usize,
         content_length: Option<usize>,
         precedent_percentage_written: Option<f32>,
-        file_writer_manager: Arc<FileWriter<WritableItem>>,
+        file_writer_manager: Arc<FileWriter>,
         progress_header_sent: bool,
         body: Vec<u8>,
         is_end: bool,
@@ -507,7 +531,7 @@ mod req_temp_table {
             event_subscriber: Option<Arc<dyn RouteEventListener + Send + 'static + Sync>>,
             storage_path: Option<PathBuf>,
             file_opened: Option<FileWriterHandle>,
-            file_writer_manager: Arc<FileWriter<WritableItem>>,
+            file_writer_manager: Arc<FileWriter>,
             headers: Option<&[h3::Header]>,
             path: Option<&str>,
             content_length: Option<usize>,
@@ -559,6 +583,9 @@ mod req_temp_table {
         pub fn content_length(&self) -> Option<usize> {
             self.content_length.clone()
         }
+        pub fn file_writer_manager(&self) -> &Arc<FileWriter> {
+            &self.file_writer_manager
+        }
         pub fn flush_and_prefix_with_temp_buffer_if_any_bytes(&mut self) {
             if self.body.len() == 0 {
                 return;
@@ -584,17 +611,19 @@ mod req_temp_table {
             self.is_end = is_end;
 
             if let Some(file_writer) = &self.file_opened {
-                if let Err(_) =
-                    self.file_writer_manager
-                        .get_file_writer_sender()
-                        .send(WritableItem::new(
+                match self
+                    .file_writer_manager
+                    .get_file_writer_sender_by_index(file_writer.get_associated_worker_index())
+                {
+                    Some(listener) => {
+                        listener.send_writable_item(WritableItem::new(
                             packet.to_vec(),
                             packet_id,
                             file_writer.clone(),
-                        ))
-                {
-                    error!("failed to send writable item to file worker thread");
-                };
+                        ));
+                    }
+                    None => {}
+                }
                 self.body_written_size += packet.len();
             }
         }

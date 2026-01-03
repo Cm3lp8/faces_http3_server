@@ -28,7 +28,7 @@ mod response_buff {
             crossbeam_channel::Receiver<ReqId>,
         ),
         route_handler: RouteHandler<S, T>,
-        file_writer_manager: Arc<FileWriter<WritableItem>>,
+        file_writer_manager: Arc<FileWriter>,
         chunking_station: ChunkingStation,
         signal: Arc<DashSet<ReqId>>,
         waker: Arc<Waker>,
@@ -52,7 +52,7 @@ mod response_buff {
         pub fn new(
             route_handler: RouteHandler<S, T>,
             server_config: &Arc<ServerConfig>,
-            file_writer_manager: Arc<FileWriter<WritableItem>>,
+            file_writer_manager: Arc<FileWriter>,
             chunking_station: ChunkingStation,
             waker: &Arc<Waker>,
         ) -> Self {
