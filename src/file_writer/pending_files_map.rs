@@ -5,7 +5,7 @@ use uuid::Uuid;
 
 use crate::FileWriterHandle;
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct PendingFilesMap {
     file_writer_map: Arc<DashMap<Uuid, FileWriterHandle>>,
 }

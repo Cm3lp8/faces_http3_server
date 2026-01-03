@@ -4,20 +4,24 @@ pub use writable_type::{FileWriterHandle, WritableItem};
 mod event_loop;
 mod event_loop_cb;
 mod event_loop_types;
+mod file_finishing_ev_loop;
 mod pending_files_map;
 
 mod file_wrtr {
     use std::{fs::File, sync::Arc};
 
     use crossbeam_channel::SendError;
-    use faces_event_loop_utils::EventLoop;
+    use faces_event_loop_utils::{EventLoop, PublicEventListener};
     use uuid::Uuid;
 
     use crate::{
         file_writer::{
             event_loop::FileWriterPool,
             event_loop_cb::manage_event,
-            event_loop_types::{FileWriterListener, FileWrkrEvEvent, FileWrkrEvLoopId},
+            event_loop_types::{
+                FileFinishingEvEvent, FileWriterListener, FileWrkrEvEvent, FileWrkrEvLoopId,
+            },
+            file_finishing_ev_loop::manage_file_finishing_ev,
             pending_files_map::PendingFilesMap,
         },
         FileWriterHandle,
@@ -43,6 +47,8 @@ mod file_wrtr {
     #[derive(Clone)]
     pub struct FileWriter {
         file_worker_pool: Arc<FileWriterPool>,
+        file_finishing_worker_pool: Arc<EventLoop<(), FileFinishingEvEvent, FileWrkrEvLoopId>>,
+        file_finishing_listener: Arc<PublicEventListener<FileFinishingEvEvent, FileWrkrEvLoopId>>,
         pending_files_map: PendingFilesMap,
     }
 
@@ -51,9 +57,15 @@ mod file_wrtr {
             let pending_files_map = PendingFilesMap::new();
 
             let file_writer_worker_pool = FileWriterPool::new(8, manage_event);
+            let file_finishing_worker_pool =
+                EventLoop::new(FileWrkrEvLoopId::MainLoop).set_thread_count(8);
+            file_finishing_worker_pool.run(&(), manage_file_finishing_ev);
+            let file_finishing_listener = file_finishing_worker_pool.get_event_listener();
 
             Self {
                 file_worker_pool: Arc::new(file_writer_worker_pool),
+                file_finishing_worker_pool: Arc::new(file_finishing_worker_pool),
+                file_finishing_listener,
                 pending_files_map,
             }
         }
@@ -79,6 +91,7 @@ mod file_wrtr {
                     file_write_uuid,
                     &self.pending_files_map,
                     associated_worker_index,
+                    &self.file_finishing_listener,
                 );
 
                 self.pending_files_map
@@ -104,16 +117,19 @@ mod trait_writable {
 
 mod writable_type {
     use std::{
+        fmt::Debug,
         fs::{File, OpenOptions},
         io::{self, BufWriter, ErrorKind, Read, Write},
         sync::{atomic::AtomicUsize, Arc, Condvar, Mutex},
         time::Duration,
     };
 
+    use faces_event_loop_utils::{EventObserver, PublicEventListener};
     use quiche::Error;
     use uuid::Uuid;
 
     use crate::file_writer::{
+        event_loop_types::{FileFinishingEvEvent, FileWrkrEvLoopId},
         pending_files_map::{self, PendingFilesMap},
         FileWriter,
     };
@@ -128,6 +144,7 @@ mod writable_type {
                 handle_id: self.handle_id.clone(),
                 inner: self.inner.clone(),
                 written: self.written.clone(),
+                file_finishing_listener: self.file_finishing_listener.clone(),
             }
         }
     }
@@ -137,13 +154,18 @@ mod writable_type {
         closed: bool,
     }
 
-    #[derive(Debug)]
+    impl Debug for FileWriterHandle {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, " File Writer handle id [{:?}]", self.handle_id)
+        }
+    }
     pub struct FileWriterHandle {
         associated_worker_index: usize,
         handle_id: Uuid,
         pending_file_map_ref: PendingFilesMap,
         inner: Arc<(Mutex<State>, Condvar)>,
         written: Arc<AtomicUsize>,
+        file_finishing_listener: Arc<PublicEventListener<FileFinishingEvEvent, FileWrkrEvLoopId>>,
     }
     impl FileWriterHandle {
         pub fn new(
@@ -151,6 +173,9 @@ mod writable_type {
             handle_id: Uuid,
             pending_file_map_ref: &PendingFilesMap,
             associated_worker_index: usize,
+            file_finishing_listener: &Arc<
+                PublicEventListener<FileFinishingEvEvent, FileWrkrEvLoopId>,
+            >,
         ) -> Self {
             Self {
                 associated_worker_index,
@@ -164,6 +189,7 @@ mod writable_type {
                     Condvar::new(),
                 )),
                 written: Arc::new(AtomicUsize::new(0)),
+                file_finishing_listener: file_finishing_listener.clone(),
             }
         }
         pub fn get_associated_worker_index(&self) -> usize {
@@ -285,14 +311,14 @@ mod writable_type {
         pub fn on_file_written(
             &self,
             content_length_required: usize,
-            cb: impl FnOnce(usize) + Send + Sync + 'static,
+            cb: impl Fn(usize) + Send + Sync + 'static,
         ) {
             let file_h = self.inner.clone();
             let pending_files_map_c = self.pending_file_map_ref.clone();
             let handle_id = self.handle_id;
             let written = self.written.clone();
             // TODO send to threadWorker with a fixed amount of threads
-            std::thread::spawn(move || {
+            let cb = move || {
                 let cdv = &file_h.1;
                 {
                     while &written.load(std::sync::atomic::Ordering::Relaxed)
@@ -335,7 +361,16 @@ mod writable_type {
                 if pending_files_map_c.yeild_writer_by_id(handle_id) {
                     info!("File writer has been drop after complete file write ");
                 }
-            });
+            };
+
+            let sendable_cb = Arc::new(cb);
+
+            if let Err(e) = self
+                .file_finishing_listener
+                .send_event(FileFinishingEvEvent::FinishingFileWrite { cb: sendable_cb })
+            {
+                error!("e[{:?}", e)
+            }
         }
     }
 
