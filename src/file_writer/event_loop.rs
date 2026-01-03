@@ -38,6 +38,8 @@ impl FileWriterPool {
             })
             .collect();
 
+        info!("file_writer len [{:?}]", workers.len());
+
         Self {
             stream_map: DashMap::new(),
             atomic_switch: AtomicBool::new(false),
@@ -47,6 +49,7 @@ impl FileWriterPool {
         }
     }
     pub fn get_worker_listener_by_index(&self, index: usize) -> Option<FileWriterListener> {
+        info!("Getting worker by index [{:?}]", index);
         if let Some(w) = self.workers.get(index) {
             Some(FileWriterListener::new(&w.0 .0))
         } else {
