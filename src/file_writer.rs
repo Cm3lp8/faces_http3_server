@@ -161,6 +161,34 @@ mod writable_type {
         writer: Option<BufWriter<File>>,
         can_close: bool,
     }
+    impl State {
+        pub fn close_file(&mut self) {
+            let mut retry = 0;
+            // FLushing
+            loop {
+                info!("Before fflush");
+                if let Some(writer) = &mut self.writer {
+                    match writer.flush() {
+                        Ok(_) => break,
+                        Err(e) if e.kind() == ErrorKind::Interrupted => {
+                            retry += 1;
+
+                            if retry >= 5 {
+                                break;
+                            }
+                        }
+                        _ => {
+                            break;
+                        }
+                    }
+                }
+            }
+
+            self.can_close = true;
+
+            info!("File written !!");
+        }
+    }
 
     impl Debug for FileWriterHandle {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -368,7 +396,7 @@ mod writable_type {
                         match self.is_file_written() {
                             Ok(true) => {
                                 warn!("File  Written !!");
-                                self.close_file();
+                                writer.close_file();
                                 // try end of file cb signaling
                                 if let Some(cb) = self.take_callback() {
                                     (cb)();
