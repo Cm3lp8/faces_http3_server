@@ -223,6 +223,7 @@ mod req_temp_table {
             let res = if let Some(mut partial_req) =
                 self.table.get_mut(&(conn_id.to_string(), stream_id))
             {
+                partial_req.flush_and_prefix_with_temp_buffer_if_any_bytes();
                 let request_event =
                     partial_req.to_route_event(stream_id, scid, conn_id, event_type);
 
@@ -335,6 +336,7 @@ mod req_temp_table {
                                     file,
                                     stream_id,
                                     conn_id.clone(),
+                                    None,
                                 ) {
                                     Ok(fw) => fw,
                                     Err(e) => {
@@ -438,6 +440,7 @@ mod req_temp_table {
                                         file,
                                         stream_id,
                                         conn_id.clone(),
+                                        content_length,
                                     ) {
                                         Ok(fw) => fw,
                                         Err(e) => {

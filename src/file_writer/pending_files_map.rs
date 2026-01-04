@@ -21,7 +21,7 @@ impl PendingFilesMap {
         self.file_writer_map
             .insert(handle_id, file_writer_handle.clone());
     }
-    pub fn yeild_writer_by_id(&self, handle_id: Uuid) -> bool {
+    pub fn yield_writer_by_id(&self, handle_id: Uuid) -> bool {
         self.file_writer_map.remove(&handle_id).is_some()
     }
 }

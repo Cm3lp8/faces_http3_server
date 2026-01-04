@@ -7,6 +7,7 @@ mod event_loop_types;
 mod file_finishing_ev_loop;
 mod pending_files_map;
 
+/// [`FileWriter`] count on 'content-length' header send by client for finishing writing process
 mod file_wrtr {
     use std::{fs::File, sync::Arc};
 
@@ -78,6 +79,7 @@ mod file_wrtr {
             file: std::fs::File,
             stream_id: u64,
             conn_id: String,
+            file_length: Option<usize>,
         ) -> Result<FileWriterHandle, String> {
             let file_write_uuid = Uuid::now_v7();
 
@@ -92,6 +94,7 @@ mod file_wrtr {
                     &self.pending_files_map,
                     associated_worker_index,
                     &self.file_finishing_listener,
+                    file_length,
                 );
 
                 self.pending_files_map
@@ -120,7 +123,10 @@ mod writable_type {
         fmt::Debug,
         fs::{File, OpenOptions},
         io::{self, BufWriter, ErrorKind, Read, Write},
-        sync::{atomic::AtomicUsize, Arc, Condvar, Mutex},
+        sync::{
+            atomic::{AtomicBool, AtomicUsize},
+            Arc, Condvar, Mutex,
+        },
         time::Duration,
     };
 
@@ -143,7 +149,9 @@ mod writable_type {
                 pending_file_map_ref: self.pending_file_map_ref.clone(),
                 handle_id: self.handle_id.clone(),
                 inner: self.inner.clone(),
+                file_length: self.file_length.clone(),
                 written: self.written.clone(),
+                finishing_callback: self.finishing_callback.clone(),
                 file_finishing_listener: self.file_finishing_listener.clone(),
             }
         }
@@ -151,7 +159,7 @@ mod writable_type {
     #[derive(Debug)]
     struct State {
         writer: Option<BufWriter<File>>,
-        closed: bool,
+        can_close: bool,
     }
 
     impl Debug for FileWriterHandle {
@@ -163,8 +171,10 @@ mod writable_type {
         associated_worker_index: usize,
         handle_id: Uuid,
         pending_file_map_ref: PendingFilesMap,
-        inner: Arc<(Mutex<State>, Condvar)>,
+        inner: Arc<Mutex<State>>,
+        file_length: Arc<(AtomicUsize, AtomicBool)>,
         written: Arc<AtomicUsize>,
+        finishing_callback: Arc<Mutex<Option<Arc<dyn Fn() + Send + Sync + 'static>>>>,
         file_finishing_listener: Arc<PublicEventListener<FileFinishingEvEvent, FileWrkrEvLoopId>>,
     }
     impl FileWriterHandle {
@@ -176,21 +186,98 @@ mod writable_type {
             file_finishing_listener: &Arc<
                 PublicEventListener<FileFinishingEvEvent, FileWrkrEvLoopId>,
             >,
+            file_length: Option<usize>,
         ) -> Self {
+            let file_length = if let Some(file_length) = file_length {
+                Arc::new((AtomicUsize::new(file_length), AtomicBool::new(true)))
+            } else {
+                Arc::new((AtomicUsize::new(0), AtomicBool::new(false)))
+            };
             Self {
                 associated_worker_index,
                 handle_id,
                 pending_file_map_ref: pending_file_map_ref.clone(),
-                inner: Arc::new((
-                    Mutex::new(State {
-                        writer: Some(BufWriter::new(writer)),
-                        closed: false,
-                    }),
-                    Condvar::new(),
-                )),
+                inner: Arc::new(Mutex::new(State {
+                    writer: Some(BufWriter::new(writer)),
+                    can_close: false,
+                })),
+                file_length,
                 written: Arc::new(AtomicUsize::new(0)),
+                finishing_callback: Arc::new(Mutex::new(None)),
                 file_finishing_listener: file_finishing_listener.clone(),
             }
+        }
+        pub fn set_file_length(&self, file_length: usize) {
+            if self
+                .file_length
+                .1
+                .load(std::sync::atomic::Ordering::Acquire)
+            {
+                return;
+            };
+
+            self.file_length
+                .0
+                .store(file_length, std::sync::atomic::Ordering::Release);
+            self.file_length
+                .1
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
+        pub fn register_finishing_callback(
+            &self,
+            finishing_cb: Arc<impl Fn() + Send + Sync + 'static>,
+        ) {
+            *self.finishing_callback.lock().unwrap() = Some(finishing_cb);
+        }
+        pub fn take_callback(&self) -> Option<Arc<dyn Fn() + Send + Sync + 'static>> {
+            self.finishing_callback.lock().unwrap().take()
+        }
+        pub fn is_file_written(&self) -> Result<bool, String> {
+            if self
+                .file_length
+                .1
+                .load(std::sync::atomic::Ordering::Acquire)
+            {
+                return Err(String::from("No file_length set yet"));
+            }
+
+            if self
+                .file_length
+                .0
+                .load(std::sync::atomic::Ordering::Acquire)
+                == self.written.load(std::sync::atomic::Ordering::Acquire)
+            {
+                Ok(true)
+            } else {
+                Ok(false)
+            }
+        }
+        pub fn close_file(&self) {
+            let guard = &mut *self.inner.lock().unwrap();
+            let mut retry = 0;
+            // FLushing
+            loop {
+                info!("Before fflush");
+                if let Some(writer) = &mut guard.writer {
+                    match writer.flush() {
+                        Ok(_) => break,
+                        Err(e) if e.kind() == ErrorKind::Interrupted => {
+                            retry += 1;
+
+                            if retry >= 5 {
+                                break;
+                            }
+                        }
+                        _ => {
+                            break;
+                        }
+                    }
+                }
+            }
+
+            guard.can_close = true;
+
+            info!("File written !!");
         }
         pub fn get_associated_worker_index(&self) -> usize {
             self.associated_worker_index
@@ -202,7 +289,7 @@ mod writable_type {
         ) -> Result<(), io::Error> {
             {
                 // TODO see how to manage this with a temp file , if necesarry
-                let state = &mut *self.inner.0.lock().unwrap();
+                let state = &mut *self.inner.lock().unwrap();
 
                 /*
                      *
@@ -237,7 +324,7 @@ mod writable_type {
                 .truncate(true)
                 .open(storage_path)?;
 
-            let guard = &mut *self.inner.0.lock().unwrap();
+            let guard = &mut *self.inner.lock().unwrap();
 
             let mut b_writer: BufWriter<std::fs::File> = BufWriter::new(new_file);
 
@@ -245,7 +332,7 @@ mod writable_type {
             b_writer.flush()?;
             guard.writer = Some(b_writer);
             self.written
-                .store(prefix_len, std::sync::atomic::Ordering::Relaxed);
+                .store(prefix_len, std::sync::atomic::Ordering::Release);
 
             warn!("D new file should be writen");
             Ok(())
@@ -254,10 +341,10 @@ mod writable_type {
             self.handle_id
         }
         pub fn written(&self) -> usize {
-            self.written.load(std::sync::atomic::Ordering::Relaxed)
+            self.written.load(std::sync::atomic::Ordering::Acquire)
         }
         pub fn flush(&self) -> Result<(), std::io::Error> {
-            let guard = &mut *self.inner.0.lock().unwrap();
+            let guard = &mut *self.inner.lock().unwrap();
             if let Some(writer) = &mut guard.writer {
                 writer.flush()
             } else {
@@ -265,19 +352,29 @@ mod writable_type {
             }
         }
         pub fn write_on_disk(&self, data: &[u8]) -> Result<usize, ()> {
-            let writer = &mut *self.inner.0.lock().unwrap();
-            let cdv = &self.inner.1;
+            let writer = &mut *self.inner.lock().unwrap();
 
             if let Some(wrtr) = &mut writer.writer {
                 match wrtr.write_all(data) {
                     Ok(()) => {
                         self.written
-                            .fetch_add(data.len(), std::sync::atomic::Ordering::Relaxed);
-                        cdv.notify_all();
+                            .fetch_add(data.len(), std::sync::atomic::Ordering::Release);
                         println!(
                             "written [{:?}]",
-                            self.written.load(std::sync::atomic::Ordering::Relaxed)
+                            self.written.load(std::sync::atomic::Ordering::Acquire)
                         );
+
+                        match self.is_file_written() {
+                            Ok(true) => {
+                                self.close_file();
+                                // try end of file cb signaling
+                                if let Some(cb) = self.take_callback() {
+                                    (cb)();
+                                }
+                            }
+                            Ok(false) => {}
+                            Err(e) => {}
+                        }
                         Ok(data.len())
                     }
                     Err(e) => {
@@ -289,87 +386,115 @@ mod writable_type {
                 Err(())
             }
         }
-        ///Drop the BufWriter<file> to close it and return the file path.
-        pub fn close_file(&mut self, content_length_required: usize) -> Result<(), std::io::Error> {
-            let file_h = self.inner.clone();
-            let written = self.written.clone();
-            std::thread::spawn(move || {
-                let mut retry_attemps = 0;
-
-                let cdv = &file_h.1;
-                let guard = file_h.0.lock().unwrap();
-                if written.load(std::sync::atomic::Ordering::Relaxed) < content_length_required {
-                    cdv.wait(guard);
-                }
-            });
-            Ok(())
-        }
     }
 
     impl FileWriterHandle {
         /// [`on_file_written`] trigs a callback when required content is written .
-        pub fn on_file_written(
-            &self,
-            content_length_required: usize,
-            cb: impl Fn(usize) + Send + Sync + 'static,
-        ) {
+        pub fn on_file_written(&self, cb: impl Fn(usize) + Send + Sync + 'static) {
             let file_h = self.inner.clone();
             let pending_files_map_c = self.pending_file_map_ref.clone();
             let handle_id = self.handle_id;
             let written = self.written.clone();
+            let file_len = self.file_length.clone();
             // TODO send to threadWorker with a fixed amount of threads
-            let cb = move || {
-                let cdv = &file_h.1;
-                {
-                    while &written.load(std::sync::atomic::Ordering::Relaxed)
-                        < &content_length_required
+            //
+
+            let cb_sendable = Arc::new(cb);
+            match self.is_file_written() {
+                Ok(true) => {
+                    let cb = move || {
+                        // FLushing
+
+                        let content_length_required =
+                            file_len.0.load(std::sync::atomic::Ordering::Acquire);
+                        info!("File written cb executed !!");
+                        cb_sendable(content_length_required);
+                        if pending_files_map_c.yield_writer_by_id(handle_id) {
+                            info!("File writer has been drop after complete file write ");
+                        }
+                    };
+
+                    let sendable_cb = Arc::new(cb);
+
+                    if let Err(e) = self
+                        .file_finishing_listener
+                        .send_event(FileFinishingEvEvent::FinishingFileWrite { cb: sendable_cb })
                     {
-                        let mut guard = file_h.0.lock().unwrap();
-                        match cdv.wait(guard) {
-                            Ok(_) => {
-                                info!("Condvar wake")
-                            }
-                            Err(e) => {}
-                        }
+                        error!("e[{:?}", e)
                     }
                 }
+                Ok(false) => {
+                    //register callback to call it when required
 
-                let guard = &mut *file_h.0.lock().unwrap();
-                let mut retry = 0;
-                // FLushing
-                loop {
-                    info!("Before fflush");
-                    if let Some(writer) = &mut guard.writer {
-                        match writer.flush() {
-                            Ok(_) => break,
-                            Err(e) if e.kind() == ErrorKind::Interrupted => {
-                                retry += 1;
+                    let file_finishing_listener = self.file_finishing_listener.clone();
 
-                                if retry >= 5 {
-                                    break;
-                                }
+                    let cb_2 = move || {
+                        let cb_sendable_clone = cb_sendable.clone();
+                        let file_len = file_len.clone();
+                        let pending_files_map_c_2 = pending_files_map_c.clone();
+                        let cb = move || {
+                            // FLushing
+
+                            let content_length_required = file_len
+                                .clone()
+                                .0
+                                .load(std::sync::atomic::Ordering::Acquire);
+                            info!("yield 2 File written cb executed !!");
+                            cb_sendable_clone(content_length_required);
+                            if pending_files_map_c_2.yield_writer_by_id(handle_id) {
+                                info!(
+                                    "Yield 2 File writer has been drop after complete file write "
+                                );
                             }
-                            _ => {
-                                break;
-                            }
+                        };
+
+                        let sendable_cb = Arc::new(cb);
+
+                        if let Err(e) = file_finishing_listener.send_event(
+                            FileFinishingEvEvent::FinishingFileWrite { cb: sendable_cb },
+                        ) {
+                            error!("e[{:?}", e)
                         }
-                    }
+                    };
+
+                    let cb_2_sendable = Arc::new(cb_2);
+                    self.register_finishing_callback(cb_2_sendable);
                 }
+                Err(e) => {
+                    let file_finishing_listener = self.file_finishing_listener.clone();
 
-                info!("File written !!");
-                cb(content_length_required);
-                if pending_files_map_c.yeild_writer_by_id(handle_id) {
-                    info!("File writer has been drop after complete file write ");
+                    let cb_2 = move || {
+                        let cb_sendable_clone = cb_sendable.clone();
+                        let file_len = file_len.clone();
+                        let pending_files_map_c_2 = pending_files_map_c.clone();
+                        let cb = move || {
+                            // FLushing
+
+                            let content_length_required = file_len
+                                .clone()
+                                .0
+                                .load(std::sync::atomic::Ordering::Acquire);
+                            info!("yield 3 File written cb executed !!");
+                            cb_sendable_clone(content_length_required);
+                            if pending_files_map_c_2.yield_writer_by_id(handle_id) {
+                                info!(
+                                    "Yield 3 File writer has been drop after complete file write "
+                                );
+                            }
+                        };
+
+                        let sendable_cb = Arc::new(cb);
+
+                        if let Err(e) = file_finishing_listener.send_event(
+                            FileFinishingEvEvent::FinishingFileWrite { cb: sendable_cb },
+                        ) {
+                            error!("e[{:?}", e)
+                        }
+                    };
+
+                    let cb_2_sendable = Arc::new(cb_2);
+                    self.register_finishing_callback(cb_2_sendable);
                 }
-            };
-
-            let sendable_cb = Arc::new(cb);
-
-            if let Err(e) = self
-                .file_finishing_listener
-                .send_event(FileFinishingEvEvent::FinishingFileWrite { cb: sendable_cb })
-            {
-                error!("e[{:?}", e)
             }
         }
     }

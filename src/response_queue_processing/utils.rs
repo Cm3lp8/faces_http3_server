@@ -14,6 +14,7 @@ pub fn build_temp_stage_file_storage_path(
     headers: &[h3::Header],
     stream_id: u64,
     conn_id: String,
+    content_length: Option<usize>,
     data_management_type: &Option<DataManagement>,
     file_writer_manager: &Arc<FileWriter>,
 ) -> Option<(PathBuf, FileWriterHandle)> {
@@ -49,7 +50,12 @@ pub fn build_temp_stage_file_storage_path(
                 file_writer_manager.associate_stream_with_next_listener(stream_id, conn_id.clone());
 
                 let file_open = if let Ok(file) = File::create(path.clone()) {
-                    file_writer_manager.create_file_writer_handle(file, stream_id, conn_id)
+                    file_writer_manager.create_file_writer_handle(
+                        file,
+                        stream_id,
+                        conn_id,
+                        content_length,
+                    )
                 } else {
                     error!("Failed creating [{:?}] file", path);
                     return None;

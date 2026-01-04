@@ -421,6 +421,7 @@ mod request_hndlr {
                 headers,
                 stream_id,
                 conn_id.to_owned(),
+                content_length,
                 &data_management_type,
                 file_writer_manager,
             ) {
