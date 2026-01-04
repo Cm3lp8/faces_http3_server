@@ -189,6 +189,7 @@ mod writable_type {
             file_length: Option<usize>,
         ) -> Self {
             let file_length = if let Some(file_length) = file_length {
+                warn!("filewriter => new set file_length [{:?}]", file_length);
                 Arc::new((AtomicUsize::new(file_length), AtomicBool::new(true)))
             } else {
                 Arc::new((AtomicUsize::new(0), AtomicBool::new(false)))
@@ -233,7 +234,7 @@ mod writable_type {
             self.finishing_callback.lock().unwrap().take()
         }
         pub fn is_file_written(&self) -> Result<bool, String> {
-            if self
+            if !self
                 .file_length
                 .1
                 .load(std::sync::atomic::Ordering::Acquire)
