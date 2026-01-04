@@ -411,6 +411,8 @@ mod writable_type {
             match self.is_file_written() {
                 Ok(true) => {
                     warn!("on_file_written => file written");
+                    //flush bufwriter !!!
+                    self.close_file();
                     let cb = move || {
                         // FLushing
 
