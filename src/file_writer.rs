@@ -366,14 +366,21 @@ mod writable_type {
 
                         match self.is_file_written() {
                             Ok(true) => {
+                                warn!("File  Written !!");
                                 self.close_file();
                                 // try end of file cb signaling
                                 if let Some(cb) = self.take_callback() {
                                     (cb)();
+                                } else {
+                                    warn!("No written cb");
                                 }
                             }
-                            Ok(false) => {}
-                            Err(e) => {}
+                            Ok(false) => {
+                                warn!("File Not Written Yet")
+                            }
+                            Err(e) => {
+                                warn!("Content_length not set yet e [{:?}]", e)
+                            }
                         }
                         Ok(data.len())
                     }
@@ -402,6 +409,7 @@ mod writable_type {
             let cb_sendable = Arc::new(cb);
             match self.is_file_written() {
                 Ok(true) => {
+                    warn!("on_file_written => file written");
                     let cb = move || {
                         // FLushing
 
@@ -425,6 +433,7 @@ mod writable_type {
                 }
                 Ok(false) => {
                     //register callback to call it when required
+                    warn!("on_file_written => not written");
 
                     let file_finishing_listener = self.file_finishing_listener.clone();
 
@@ -461,6 +470,7 @@ mod writable_type {
                     self.register_finishing_callback(cb_2_sendable);
                 }
                 Err(e) => {
+                    warn!("on_file_written => content length not set  [{:?}]", e);
                     let file_finishing_listener = self.file_finishing_listener.clone();
 
                     let cb_2 = move || {
