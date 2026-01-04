@@ -60,8 +60,8 @@ mod file_wrtr {
             let file_writer_worker_pool = FileWriterPool::new(8, manage_event);
             let file_finishing_worker_pool =
                 EventLoop::new(FileWrkrEvLoopId::MainLoop).set_thread_count(8);
-            file_finishing_worker_pool.run(&(), manage_file_finishing_ev);
             let file_finishing_listener = file_finishing_worker_pool.get_event_listener();
+            file_finishing_worker_pool.run(&(), manage_file_finishing_ev);
 
             Self {
                 file_worker_pool: Arc::new(file_writer_worker_pool),
@@ -427,11 +427,15 @@ mod writable_type {
 
                     let sendable_cb = Arc::new(cb);
 
+                    warn!("Will send event");
                     if let Err(e) = self
                         .file_finishing_listener
-                        .send_event(FileFinishingEvEvent::FinishingFileWrite { cb: sendable_cb })
+                        .0
+                        .send(FileFinishingEvEvent::FinishingFileWrite { cb: sendable_cb })
                     {
                         error!("e[{:?}", e)
+                    } else {
+                        warn!("Sucesfully send to faces_event_loop_utils");
                     }
                 }
                 Ok(false) => {
