@@ -217,7 +217,6 @@ mod writable_type {
             file_length: Option<usize>,
         ) -> Self {
             let file_length = if let Some(file_length) = file_length {
-                warn!("filewriter => new set file_length [{:?}]", file_length);
                 Arc::new((AtomicUsize::new(file_length), AtomicBool::new(true)))
             } else {
                 Arc::new((AtomicUsize::new(0), AtomicBool::new(false)))
@@ -363,7 +362,6 @@ mod writable_type {
             self.written
                 .store(prefix_len, std::sync::atomic::Ordering::Release);
 
-            warn!("D new file should be writen");
             Ok(())
         }
         pub fn get_file_writer_id(&self) -> Uuid {
@@ -399,17 +397,17 @@ mod writable_type {
                                 writer.close_file();
                                 // try end of file cb signaling
                                 if let Some(cb) = self.take_callback() {
-                                    (cb)();
+                                    if let Err(_e) = self
+                                        .file_finishing_listener
+                                        .send_event(FileFinishingEvEvent::FinishingFileWrite { cb })
+                                    {
+                                        error!("Failed to send FileFinishingEvEvent");
+                                    }
                                 } else {
-                                    warn!("No written cb");
                                 }
                             }
-                            Ok(false) => {
-                                warn!("File Not Written Yet")
-                            }
-                            Err(e) => {
-                                warn!("Content_length not set yet e [{:?}]", e)
-                            }
+                            Ok(false) => {}
+                            Err(_) => {}
                         }
                         Ok(data.len())
                     }
@@ -446,7 +444,6 @@ mod writable_type {
 
                         let content_length_required =
                             file_len.0.load(std::sync::atomic::Ordering::Acquire);
-                        info!("File written cb executed !!");
                         cb_sendable(content_length_required);
                         if pending_files_map_c.yield_writer_by_id(handle_id) {
                             info!("File writer has been drop after complete file write ");
@@ -455,7 +452,6 @@ mod writable_type {
 
                     let sendable_cb = Arc::new(cb);
 
-                    warn!("Will send event");
                     if let Err(e) = self
                         .file_finishing_listener
                         .0

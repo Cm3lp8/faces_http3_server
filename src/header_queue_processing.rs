@@ -112,6 +112,7 @@ mod header_reception {
                 response_processing_pool_injector,
             }
         }
+        #[inline]
         pub fn process_header(
             &self,
             stream_id: u64,

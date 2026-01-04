@@ -252,6 +252,7 @@ mod req_temp_table {
             res
         }
 
+        #[inline]
         pub fn write_body_packet(
             &self,
             conn_id: String,
@@ -623,6 +624,7 @@ mod req_temp_table {
                 }
             }
         }
+        #[inline]
         pub fn write_file(&mut self, packet: &[u8], packet_id: usize, is_end: bool) {
             self.is_end = is_end;
 

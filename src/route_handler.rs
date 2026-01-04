@@ -271,6 +271,7 @@ mod request_hndlr {
             }
             Ok(0)
         }
+        #[inline]
         pub fn write_body_packet(
             &self,
             stream_id: u64,

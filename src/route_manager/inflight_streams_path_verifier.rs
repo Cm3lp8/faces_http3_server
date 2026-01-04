@@ -44,6 +44,8 @@ impl InFlightStreamsPathVerifier {
             path_map: DashMap::new(),
         }
     }
+
+    #[inline]
     pub fn insert_stream_path_for_conn(
         &self,
         conn_id: Vec<u8>,
