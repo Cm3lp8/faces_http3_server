@@ -843,7 +843,6 @@ mod quiche_implementation {
                         }
                         //if let Some(last_instant) = &mut last_instant {
                         debug!("\n{} written {} bytes", client.conn.trace_id(), write);
-                        //  println!("{} written {} bytes", client.conn.trace_id(), write);
                     }
                 }
             }

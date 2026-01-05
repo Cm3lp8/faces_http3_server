@@ -293,7 +293,7 @@ mod request_hndlr {
         pub fn print_entries(&self) {
             let inner = &*self.inner;
             for i in inner.routes_formats().iter() {
-                println!("entrie [{}]", i.0);
+                info!("entrie [{}]", i.0);
             }
         }
         pub fn fetch_data_stream(

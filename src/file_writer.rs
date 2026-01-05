@@ -387,10 +387,6 @@ mod writable_type {
                     Ok(()) => {
                         self.written
                             .fetch_add(data.len(), std::sync::atomic::Ordering::Release);
-                        println!(
-                            "written [{:?}]",
-                            self.written.load(std::sync::atomic::Ordering::Acquire)
-                        );
 
                         match self.is_file_written() {
                             Ok(true) => {
