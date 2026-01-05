@@ -260,6 +260,7 @@ mod writable_type {
         pub fn take_callback(&self) -> Option<Arc<dyn Fn() + Send + Sync + 'static>> {
             self.finishing_callback.lock().unwrap().take()
         }
+        #[inline]
         pub fn is_file_written(&self) -> Result<bool, String> {
             if !self
                 .file_length
@@ -273,7 +274,7 @@ mod writable_type {
                 .file_length
                 .0
                 .load(std::sync::atomic::Ordering::Acquire)
-                == self.written.load(std::sync::atomic::Ordering::Acquire)
+                <= self.written.load(std::sync::atomic::Ordering::Acquire)
             {
                 Ok(true)
             } else {

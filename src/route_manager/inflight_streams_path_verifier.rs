@@ -69,6 +69,7 @@ impl InFlightStreamsPathVerifier {
         true
     }
 
+    #[inline]
     pub fn is_finished_request_a_valid_path(&self, conn_id: Vec<u8>, stream_id: u64) -> bool {
         if let Some(entry) = self.stream_map.get(&ConnStreamK::new(stream_id, conn_id)) {
             if let Some(stream_id_reg) = self.path_map.get(&entry) {

@@ -645,16 +645,17 @@ mod req_temp_table {
                 self.body_written_size += packet.len();
             }
         }
+        #[inline]
         pub fn extend_data(&mut self, packet: &[u8], is_end: bool) {
             self.is_end = is_end;
             self.body_written_size += packet.len();
             self.body.extend_from_slice(packet);
         }
+        #[inline]
         pub fn written(&self) -> usize {
             self.body_written_size
         }
         ///
-        ///Drop the BufWriter<file> to close it and return the file path.
         pub fn path_storage(&mut self) -> Option<PathBuf> {
             self.storage_path.clone()
         }
