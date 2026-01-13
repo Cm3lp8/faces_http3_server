@@ -162,12 +162,17 @@ mod chunking_implementation {
                         chunkable.packet_id += 1;
                         chunkable.bytes_written += n;
                         let stream_id = chunkable.stream_id;
+                        let written = chunkable.bytes_written;
+                        let body_len = chunkable.body_len;
                         //repush the unfinished read in the channel
                         if !is_end {
                             if let Err(_) = resender.send(chunkable) {
                                 error!("Failed to resend chunkable body")
                             }
-                            warn!("repushing [{:?}]", stream_id);
+                            warn!(
+                                "repushing [{:?}]  written [{written}]  bodylen [{body_len}]",
+                                stream_id
+                            );
                         } else {
                             if let Err(e) = waker.wake() {
                                 panic!("error f waking [{:?}]", e)
