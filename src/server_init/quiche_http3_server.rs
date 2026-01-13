@@ -544,9 +544,9 @@ mod quiche_implementation {
                                     }
                                     total += read;
                                 }
-                                let trace_id = client.conn.trace_id().to_string();
 
                                 /*
+                                let trace_id = client.conn.trace_id().to_string();
                                 if let Err(_) =
                                     route_manager.routes_handler().send_reception_status(
                                         client,
@@ -564,6 +564,7 @@ mod quiche_implementation {
                             Ok((stream_id, quiche::h3::Event::Finished)) => {
                                 let trace_id = client.conn.trace_id().to_owned();
                                 let scid = client.conn.source_id().as_ref().to_vec();
+                                info!("Finished stream_id [{:?}]", stream_id);
 
                                 if route_manager
                                     .in_flight_streams_path_verification()
