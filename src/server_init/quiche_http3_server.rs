@@ -487,7 +487,7 @@ mod quiche_implementation {
                         match http3_conn.poll(&mut client.conn) {
                             Ok((stream_id, quiche::h3::Event::Headers { list, more_frames })) => {
                                 if more_frames {
-                                    log::info!("new _hdr [{:#?}]", list)
+                                    log::info!("stream_id [{:?}] new _hdr [{:#?}]", stream_id, list)
                                 }
                                 let scid = client.conn.source_id().as_ref().to_vec();
                                 let conn_id = client.conn.trace_id().to_string();
