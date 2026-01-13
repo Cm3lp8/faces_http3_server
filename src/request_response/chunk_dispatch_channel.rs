@@ -9,11 +9,12 @@ mod dispatcher {
     };
 
     use crossbeam_channel::SendError;
+    use dashmap::DashMap;
 
     use crate::request_response::QueuedRequest;
 
     pub struct ChunksDispatchChannel {
-        inner: Arc<Mutex<ChunksDispatchChannelInner>>,
+        inner: Arc<ChunksDispatchChannelInner>,
     }
     impl Clone for ChunksDispatchChannel {
         fn clone(&self) -> Self {
@@ -26,7 +27,7 @@ mod dispatcher {
     impl ChunksDispatchChannel {
         pub fn new() -> Self {
             Self {
-                inner: Arc::new(Mutex::new(ChunksDispatchChannelInner::new())),
+                inner: Arc::new(ChunksDispatchChannelInner::new()),
             }
         }
         ///__________________________________
@@ -37,9 +38,9 @@ mod dispatcher {
             scid: &[u8],
             msg: QueuedRequest,
         ) -> Result<(), QueuedRequest> {
-            let guard = &*self.inner.lock().unwrap();
+            let inner = &*self.inner;
 
-            if let Some(entry) = guard.map.get(&(stream_id, scid.to_vec())) {
+            if let Some(entry) = inner.map.get(&(stream_id, scid.to_vec())) {
                 if let Err(e) = entry.0.sender.send(msg) {
                     Err(e.0)
                 } else {
@@ -55,9 +56,9 @@ mod dispatcher {
             scid: &[u8],
             msg: QueuedRequest,
         ) -> Result<(), QueuedRequest> {
-            let guard = &*self.inner.lock().unwrap();
+            let inner = &*self.inner;
 
-            if let Some(entry) = guard.map.get(&(stream_id, scid.to_vec())) {
+            if let Some(entry) = inner.map.get(&(stream_id, scid.to_vec())) {
                 if let Err(e) = entry.1.sender.send(msg) {
                     warn!("errorStatus 100 seding");
                     Err(e.0)
@@ -70,35 +71,31 @@ mod dispatcher {
         }
 
         pub fn streams(&self, client_scid: &[u8]) -> Vec<u64> {
-            let guard = &*self.inner.lock().unwrap();
+            let inner = &*self.inner;
 
-            let coll = guard
+            let coll = inner
                 .map
-                .keys()
-                .filter(|k| &k.1 == client_scid)
-                .map(|k| k.0)
+                .iter()
+                .filter(|k| &k.key().1 == client_scid)
+                .map(|k| k.key().0)
                 .collect();
             coll
         }
         pub fn in_queue(&self, stream_id: u64, scid: &[u8]) -> Result<usize, ()> {
-            let guard = &*self.inner.lock().unwrap();
-            if let Some((_, _, lower_priority, higher_priority)) =
-                guard.map.get(&(stream_id, scid.to_vec()))
-            {
-                Ok(lower_priority.in_queue())
+            let inner = &*self.inner;
+            if let Some(entry) = inner.map.get(&(stream_id, scid.to_vec())) {
+                Ok(entry.2.in_queue())
             } else {
                 Err(())
             }
         }
         pub fn try_pop(&self, stream_id: u64, scid: &[u8]) -> Result<QueuedRequest, ()> {
-            let guard = &*self.inner.lock().unwrap();
-            if let Some((_, _, lower_priority, higher_priority)) =
-                guard.map.get(&(stream_id, scid.to_vec()))
-            {
-                if let Ok(i) = higher_priority.try_recv() {
+            let inner = &*self.inner;
+            if let Some(entry) = inner.map.get(&(stream_id, scid.to_vec())) {
+                if let Ok(i) = entry.3.try_recv() {
                     return Ok(i);
                 }
-                match lower_priority.try_recv() {
+                match entry.2.try_recv() {
                     Ok(i) => Ok(i),
                     Err(e) => Err(()),
                 }
@@ -111,8 +108,8 @@ mod dispatcher {
         ///Inserting a new channel for a given stream + scid.
         ///
         pub fn insert_new_channel(&self, stream_id: u64, scid: &[u8]) {
-            let guard = &mut *self.inner.lock().unwrap();
-            if !guard.already_in_map(stream_id, scid) {
+            let inner = &*self.inner;
+            if !inner.already_in_map(stream_id, scid) {
                 let chunk_counter_0 = ChunkCounter::new(10);
                 let chunk_counter_1 = ChunkCounter::new(1010);
                 let chann_0 = crossbeam_channel::unbounded::<QueuedRequest>();
@@ -123,23 +120,23 @@ mod dispatcher {
                 let sender_1: ChunkSender = ChunkSender::new(chann_1.0, chunk_counter_1.clone());
                 let receiver_1: ChunkReceiver = ChunkReceiver::new(chann_1.1, chunk_counter_1);
 
-                guard.insert(
+                inner.insert(
                     (stream_id, scid.to_vec()),
                     (sender_0, sender_1, receiver_0, receiver_1),
                 );
             }
         }
         pub fn get_high_priority_sender(&self, stream_id: u64, scid: &[u8]) -> Option<ChunkSender> {
-            let guard = &mut *self.inner.lock().unwrap();
-            if let Some(entry) = guard.map.get(&(stream_id, scid.to_vec())) {
+            let inner = &*self.inner;
+            if let Some(entry) = inner.map.get(&(stream_id, scid.to_vec())) {
                 Some(entry.1.clone())
             } else {
                 None
             }
         }
         pub fn get_low_priority_sender(&self, stream_id: u64, scid: &[u8]) -> Option<ChunkSender> {
-            let guard = &mut *self.inner.lock().unwrap();
-            if let Some(entry) = guard.map.get(&(stream_id, scid.to_vec())) {
+            let inner = &*self.inner;
+            if let Some(entry) = inner.map.get(&(stream_id, scid.to_vec())) {
                 Some(entry.0.clone())
             } else {
                 None
@@ -150,16 +147,16 @@ mod dispatcher {
     struct ChunksDispatchChannelInner {
         //2 sender and 2 receiver : one for header, the other for bodies (differents level of
         //  prioriyt)
-        map: HashMap<Ids, (ChunkSender, ChunkSender, ChunkReceiver, ChunkReceiver)>,
+        map: DashMap<Ids, (ChunkSender, ChunkSender, ChunkReceiver, ChunkReceiver)>,
     }
     impl ChunksDispatchChannelInner {
         fn new() -> Self {
             Self {
-                map: HashMap::new(),
+                map: DashMap::new(),
             }
         }
         fn insert(
-            &mut self,
+            &self,
             key: Ids,
             value: (ChunkSender, ChunkSender, ChunkReceiver, ChunkReceiver),
         ) {
