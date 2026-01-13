@@ -109,7 +109,6 @@ mod chunking_implementation {
         chunk_station: ChunksDispatchChannel,
     ) {
         let waker = waker.clone();
-        let last_time_spend = last_time_spend.clone();
         let mut sended = 0usize;
         std::thread::spawn(move || {
             let mut buf_read_high = vec![0; CHUNK_SIZE];
@@ -119,6 +118,10 @@ mod chunking_implementation {
             'read: loop {
                 while let Ok(mut chunkable) = receiver.recv() {
                     if chunkable.sender.is_occupied() {
+                        warn!(
+                            "chunkable stream_id [{:?} is is_occupied",
+                            chunkable.stream_id
+                        );
                         if let Err(_) = resender.send(chunkable) {
                             error!("Failed to resend chunkable body")
                         }

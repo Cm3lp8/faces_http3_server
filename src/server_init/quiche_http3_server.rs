@@ -669,6 +669,7 @@ mod quiche_implementation {
                                             error!("Failed send end ! [{:?}]", e);
                                         }
                                         client.pending_body_queue.remove_stream_queue(stream_id);
+                                        chunk_dispatch_channel.remove_stream(stream_id, &scid);
                                     }
                                     if let Err(_e) = waker_clone.wake() {}
                                 }

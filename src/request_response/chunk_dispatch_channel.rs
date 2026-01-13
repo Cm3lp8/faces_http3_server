@@ -89,6 +89,9 @@ mod dispatcher {
                 Err(())
             }
         }
+        pub fn remove_stream(&self, stream_id: u64, scid: &[u8]) {
+            self.inner.map.remove(&(stream_id, scid.to_vec()));
+        }
         pub fn try_pop(&self, stream_id: u64, scid: &[u8]) -> Result<QueuedRequest, ()> {
             let inner = &*self.inner;
             if let Some(entry) = inner.map.get(&(stream_id, scid.to_vec())) {
