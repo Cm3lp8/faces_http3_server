@@ -167,35 +167,26 @@ impl PriorityUpdate for ClientMap {
 
 pub use quiche_implementation::run;
 mod quiche_implementation {
-    use core::{error, panic};
+    use core::panic;
     use std::{
-        alloc::GlobalAlloc,
-        borrow::Borrow,
-        fs::File,
         sync::{Arc, Mutex},
         time::{Duration, Instant},
     };
 
-    use mio::{net::UdpSocket, Waker};
-    use quiche::{h3::Priority, ConnectionId};
-    use uuid::timestamp::context;
+    use mio::Waker;
+    use quiche::h3::Priority;
 
     use crate::{
-        file_writer::{self, FileWriter, FileWriterChannel, WritableItem},
-        header_queue_processing::{self, extract_path_from_hdr, HeaderProcessing},
-        request_response::{
-            BodyRequest, ChunkingStation, ChunksDispatchChannel, HeaderPriority, ResponseQueue,
-        },
+        file_writer::FileWriter,
+        header_queue_processing::{extract_path_from_hdr, HeaderProcessing},
+        request_response::{ChunkingStation, HeaderPriority, ResponseQueue},
         response_queue_processing::{
-            self, ResponseInjection, ResponseInjectionBuffer, ResponsePoolProcessing,
+            ResponseInjection, ResponseInjectionBuffer, ResponsePoolProcessing,
         },
-        route_events::{self, EventType},
-        route_handler::{self, response_preparation_with_route_handler},
-        server_config::{self, RouteHandler},
+        server_config::RouteHandler,
         server_init::quiche_http3_server,
         stream_sessions::UserSessions,
-        DataManagement, HeadersColl, ResponseBuilderSender, RouteEventListener, RouteManager,
-        ServerConfig,
+        RouteManager, ServerConfig,
     };
 
     use super::*;
@@ -208,7 +199,6 @@ mod quiche_implementation {
         let mut out = [0; MAX_DATAGRAM_SIZE];
 
         let mut last_send_instant: Option<Instant> = None;
-        let a_socket_time = Arc::new(Mutex::new(Duration::from_micros(100)));
         // Setup the event loop.
         let mut poll = mio::Poll::new().unwrap();
         let mut events = mio::Events::with_capacity(8192 * 16);
@@ -641,6 +631,7 @@ mod quiche_implementation {
                         // in the pending queue for this stream.
 
                         if !client.pending_body_queue.is_stream_queue_empty(stream_id) {
+                            // try resend here ?
                             continue;
                         }
                         if client.partial_responses.get(&stream_id).is_some() {
@@ -658,6 +649,10 @@ mod quiche_implementation {
                                         content.take_data(),
                                         content.is_end(),
                                     ) {
+                                        warn!(
+                                            "stream_id [{:?}] Body chunk Pushed in pending_body_queue ",
+                                            stream_id
+                                        );
                                         client.pending_body_queue.push_item_on_front(request_chunk);
 
                                         if let Err(_e) = waker_clone.wake() {
@@ -685,6 +680,10 @@ mod quiche_implementation {
                                         b,
                                         false,
                                     ) {
+                                        warn!(
+                                            "stream_id [{:?}] stream chunk Pushed in pending_body_queue ",
+                                            stream_id
+                                        );
                                         client.pending_body_queue.push_item_on_front(request_chunk);
                                     }
                                 }
@@ -696,6 +695,10 @@ mod quiche_implementation {
                                         b,
                                         false,
                                     ) {
+                                        warn!(
+                                            "stream_id [{:?}] body progression chunk Pushed in pending_body_queue ",
+                                            stream_id
+                                        );
                                         client.pending_body_queue.push_item_on_front(request_chunk);
                                     }
                                 }
@@ -728,6 +731,10 @@ mod quiche_implementation {
                                                     error!("Failed to wake poll [{:?}]", e);
                                                 };
                                             } else {
+                                                warn!(
+                                            "stream_id [{:?}] header chunk Pushed in pending_body_queue ",
+                                            stream_id
+                                        );
                                                 client
                                                     .pending_body_queue
                                                     .push_item_on_front(request_chunk);
@@ -745,12 +752,11 @@ mod quiche_implementation {
                                                     .set_intermediate_headers_send(
                                                         stream_id, client,
                                                     );
-
-                                                /*
-                                                if let Err(e) = waker.wake() {
-                                                    error!("Failed to wake poll [{:?}]", e);
-                                                };*/
                                             } else {
+                                                warn!(
+                                            "stream_id [{:?}] header 100 chunk Pushed in pending_body_queue ",
+                                            stream_id
+                                        );
                                                 client
                                                     .pending_body_queue
                                                     .push_item_on_front(request_chunk);
@@ -783,6 +789,10 @@ mod quiche_implementation {
                                                        };*/
                                                 }
                                             } else {
+                                                warn!(
+                                            "stream_id [{:?}] additionnal header chunk Pushed in pending_body_queue ",
+                                            stream_id
+                                        );
                                                 client
                                                     .pending_body_queue
                                                     .push_item_on_front(request_chunk);
