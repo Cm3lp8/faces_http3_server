@@ -177,7 +177,7 @@ mod chunking_implementation {
                             if let Err(e) = waker.wake() {
                                 panic!("error f waking [{:?}]", e)
                             }
-                            debug!(
+                            info!(
                                 "stream [{}]  in queue[{}]SUCCESS all data has been chunked  [{}/{}] !! ",
                                 chunkable.stream_id, chunkable.sender.in_queue(),chunkable.bytes_written, chunkable.body_len
                             )
