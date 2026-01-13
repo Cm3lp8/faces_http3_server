@@ -109,21 +109,15 @@ mod chunking_implementation {
         chunk_station: ChunksDispatchChannel,
     ) {
         let waker = waker.clone();
-        let waker_clone = waker.clone();
         let last_time_spend = last_time_spend.clone();
         let mut sended = 0usize;
-        type Ids = (u64, Vec<u8>);
         std::thread::spawn(move || {
             let mut buf_read_high = vec![0; CHUNK_SIZE];
             let mut buf_read_low = vec![0; CHUNK_SIZE];
-            let mut low = false;
             let mut buf_read = &mut buf_read_high;
 
             'read: loop {
                 while let Ok(mut chunkable) = receiver.recv() {
-                    let start = Instant::now();
-                    let last_duration = *last_time_spend.lock().unwrap();
-
                     if chunkable.sender.is_occupied() {
                         if let Err(_) = resender.send(chunkable) {
                             error!("Failed to resend chunkable body")
@@ -134,11 +128,12 @@ mod chunking_implementation {
                         }
                         continue;
                     }
+                    /*
                     if let Some(conn_stats) = &chunkable.conn_stats {
                         if conn_stats.stats().0 > Duration::from_millis(3) {
                             buf_read = &mut buf_read_low;
                         }
-                    }
+                    }*/
                     if let Ok(n) = chunkable.reader.read(buf_read) {
                         let is_end = if n + chunkable.bytes_written == chunkable.body_len {
                             true
@@ -168,11 +163,13 @@ mod chunking_implementation {
                         if sended % 1000 == 0 {
                             sended = 0;
                         }
+                        let stream_id = chunkable.stream_id;
                         //repush the unfinished read in the channel
                         if !is_end {
                             if let Err(_) = resender.send(chunkable) {
                                 error!("Failed to resend chunkable body")
                             }
+                            warn!("repushing [{:?}]", stream_id);
                         } else {
                             if let Err(e) = waker.wake() {
                                 panic!("error f waking [{:?}]", e)
@@ -508,6 +505,7 @@ mod response_queue {
 
             if let Some(mut body) = body_option {
                 body.attach_conn_stats(conn_stats);
+
                 chunking_station.send_response(body);
             }
         }

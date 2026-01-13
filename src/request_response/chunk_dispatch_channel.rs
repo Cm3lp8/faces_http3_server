@@ -110,7 +110,7 @@ mod dispatcher {
         pub fn insert_new_channel(&self, stream_id: u64, scid: &[u8]) {
             let inner = &*self.inner;
             if !inner.already_in_map(stream_id, scid) {
-                let chunk_counter_0 = ChunkCounter::new(10);
+                let chunk_counter_0 = ChunkCounter::new(150);
                 let chunk_counter_1 = ChunkCounter::new(1010);
                 let chann_0 = crossbeam_channel::unbounded::<QueuedRequest>();
                 let chann_1 = crossbeam_channel::unbounded::<QueuedRequest>();
@@ -235,26 +235,26 @@ mod dispatcher {
             }
         }
         pub fn in_queue(&self) -> usize {
-            self.counter.load(std::sync::atomic::Ordering::Relaxed)
+            self.counter.load(std::sync::atomic::Ordering::Acquire)
         }
         pub fn is_occupied(&self) -> bool {
-            self.counter_limit <= self.counter.load(std::sync::atomic::Ordering::Relaxed)
+            self.counter_limit <= self.counter.load(std::sync::atomic::Ordering::Acquire)
         }
         pub fn try_increment(&self) -> bool {
-            if self.counter_limit == self.counter.load(std::sync::atomic::Ordering::Relaxed) {
+            if self.counter_limit == self.counter.load(std::sync::atomic::Ordering::Acquire) {
                 false
             } else {
                 self.counter
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    .fetch_add(1, std::sync::atomic::Ordering::Release);
 
                 true
             }
         }
         pub fn decrement(&self) {
-            if self.counter.load(std::sync::atomic::Ordering::Relaxed) > 0 {
+            if self.counter.load(std::sync::atomic::Ordering::Acquire) > 0 {
                 let old = self
                     .counter
-                    .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                    .fetch_sub(1, std::sync::atomic::Ordering::Release);
             }
         }
     }

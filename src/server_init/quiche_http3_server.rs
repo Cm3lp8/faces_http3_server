@@ -1327,6 +1327,7 @@ mod quiche_implementation {
             match http3_conn.send_response(conn, stream_id, headers, false) {
                 Ok(_) => (),
                 Err(quiche::h3::Error::StreamBlocked) => {
+                    error!("Stream [{:?}] blocked", stream_id);
                     return None;
                 }
                 Err(e) => {
