@@ -5,6 +5,7 @@ use crate::stream_sessions::StreamManagement;
 pub use self::quiche_implementation::{
     send_body, send_header, send_more_header, send_response, send_response_when_finished,
 };
+use dashmap::DashMap;
 pub use fifo_body::{BodyReqQueue, QueueTrackableItem};
 use mio::Token;
 use quiche::h3::{self, NameValue};
@@ -33,7 +34,7 @@ pub struct Client {
     http3_conn: Option<quiche::h3::Connection>,
     partial_responses: HashMap<u64, PartialResponse>,
     progress_status_requests: HashMap<u64, u64>,
-    headers_sending_tracker: HashMap<u64, bool>,
+    headers_sending_tracker: DashMap<u64, bool>,
     body_sending_tracker: HashMap<u64, (usize, usize)>,
     pending_body_queue: BodyReqQueue<QueuedRequest>,
     conn_stats: ConnStats,
@@ -426,7 +427,7 @@ mod quiche_implementation {
                         http3_conn: None,
                         partial_responses: HashMap::new(),
                         progress_status_requests: HashMap::new(),
-                        headers_sending_tracker: HashMap::new(),
+                        headers_sending_tracker: DashMap::new(),
                         body_sending_tracker: HashMap::new(),
                         pending_body_queue: BodyReqQueue::<QueuedRequest>::new(scid.as_ref()),
                         conn_stats: ConnStats::new(),
@@ -611,6 +612,9 @@ mod quiche_implementation {
                         // Don't try to pop new chunk from the chunk queue if there are still something
                         // in the pending queue for this stream.
 
+                        if !client.headers_send(stream_id) {
+                            continue;
+                        }
                         while client.conn.stream_writable(stream_id, 512).unwrap() {
                             if client.partial_responses.get(&stream_id).is_some() {
                                 if let Some(_val) = handle_writable(client, stream_id) {}
@@ -643,6 +647,14 @@ mod quiche_implementation {
                             let p_id = request_chunk.packet_id();
                             match request_chunk {
                                 QueuedRequest::Body(ref mut content) => {
+                                    if !client.headers_send(stream_id) {
+                                        let response = PartialResponse {
+                                            headers: None,
+                                            body: content.take_data(),
+                                            written: 0,
+                                        };
+                                        client.partial_responses.insert(stream_id, response);
+                                    }
                                     if let Err(_e) = send_body_response(
                                         client,
                                         content.stream_id(),
@@ -781,13 +793,10 @@ mod quiche_implementation {
                                                         &chunking_station,
                                                         &last_time_spend,
                                                         conn_stats,
-                                                    ); /*
-                                                       if let Err(e) = waker.wake() {
-                                                           error!(
-                                                               "Failed to wake poll [{:?}]",
-                                                               e
-                                                           );
-                                                       };*/
+                                                    );
+                                                    if let Err(e) = waker.wake() {
+                                                        error!("Failed to wake poll [{:?}]", e);
+                                                    };
                                                 }
                                             } else {
                                                 warn!(

@@ -109,10 +109,9 @@ mod chunking_implementation {
         chunk_station: ChunksDispatchChannel,
     ) {
         let waker = waker.clone();
-        let mut sended = 0usize;
         std::thread::spawn(move || {
             let mut buf_read_high = vec![0; CHUNK_SIZE];
-            let mut buf_read_low = vec![0; CHUNK_SIZE];
+            //let mut buf_read_low = vec![0; CHUNK_SIZE];
             let mut buf_read = &mut buf_read_high;
 
             'read: loop {
@@ -155,17 +154,13 @@ mod chunking_implementation {
                         if let Err(e) = chunkable.sender.send(queueable_item) {
                             error!("faield to send queued request")
                         }
-                        std::thread::sleep(Duration::from_micros(2));
+                        //  std::thread::sleep(Duration::from_micros(2));
                         if let Err(e) = waker.wake() {
                             panic!("error f waking [{:?}]", e)
                         }
 
-                        sended += 1;
                         chunkable.packet_id += 1;
                         chunkable.bytes_written += n;
-                        if sended % 1000 == 0 {
-                            sended = 0;
-                        }
                         let stream_id = chunkable.stream_id;
                         //repush the unfinished read in the channel
                         if !is_end {
