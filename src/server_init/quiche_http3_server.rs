@@ -501,12 +501,7 @@ mod quiche_implementation {
                                         .in_flight_streams_path_verification()
                                         .insert_stream_path_for_conn(scid.clone(), stream_id, &path)
                                     {
-                                        warn!(
-                                            "stream_id [{:?}] scid [{:?}] has inserted path [{:?}]",
-                                            stream_id, scid, path
-                                        );
                                     } else {
-                                        error!("stream_id [{:?}] failed to register in in in_flight_streams_path_verification", stream_id);
                                     }
                                     header_queue_processing.process_header(
                                         stream_id,
@@ -571,7 +566,6 @@ mod quiche_implementation {
                             Ok((stream_id, quiche::h3::Event::Finished)) => {
                                 let trace_id = client.conn.trace_id().to_owned();
                                 let scid = client.conn.source_id().as_ref().to_vec();
-                                info!("Finished stream_id [{:?}]", stream_id);
 
                                 if route_manager
                                     .in_flight_streams_path_verification()
@@ -585,10 +579,6 @@ mod quiche_implementation {
                                         &response_injection,
                                     );
                                 } else {
-                                    warn!(
-                                        "finishing stream_id is not in table stream_id [{:?}] scid [{:?}]",
-                                        stream_id, scid
-                                    );
                                 }
                                 ()
                             }

@@ -166,7 +166,6 @@ mod writable_type {
             let mut retry = 0;
             // FLushing
             loop {
-                info!("Before fflush");
                 if let Some(writer) = &mut self.writer {
                     match writer.flush() {
                         Ok(_) => break,
@@ -186,7 +185,7 @@ mod writable_type {
 
             self.can_close = true;
 
-            info!("File written !!");
+            debug!("File written !!");
         }
     }
 
@@ -286,7 +285,6 @@ mod writable_type {
             let mut retry = 0;
             // FLushing
             loop {
-                info!("Before fflush");
                 if let Some(writer) = &mut guard.writer {
                     match writer.flush() {
                         Ok(_) => break,
@@ -306,7 +304,7 @@ mod writable_type {
 
             guard.can_close = true;
 
-            info!("File written !!");
+            debug!("File written !!");
         }
         pub fn get_associated_worker_index(&self) -> usize {
             self.associated_worker_index
@@ -443,7 +441,7 @@ mod writable_type {
                             file_len.0.load(std::sync::atomic::Ordering::Acquire);
                         cb_sendable(content_length_required);
                         if pending_files_map_c.yield_writer_by_id(handle_id) {
-                            info!("File writer has been drop after complete file write ");
+                            debug!("File writer has been drop after complete file write ");
                         }
                     };
 
@@ -476,10 +474,9 @@ mod writable_type {
                                 .clone()
                                 .0
                                 .load(std::sync::atomic::Ordering::Acquire);
-                            info!("yield 2 File written cb executed !!");
                             cb_sendable_clone(content_length_required);
                             if pending_files_map_c_2.yield_writer_by_id(handle_id) {
-                                info!(
+                                debug!(
                                     "Yield 2 File writer has been drop after complete file write "
                                 );
                             }
@@ -512,10 +509,9 @@ mod writable_type {
                                 .clone()
                                 .0
                                 .load(std::sync::atomic::Ordering::Acquire);
-                            info!("yield 3 File written cb executed !!");
                             cb_sendable_clone(content_length_required);
                             if pending_files_map_c_2.yield_writer_by_id(handle_id) {
-                                info!(
+                                debug!(
                                     "Yield 3 File writer has been drop after complete file write "
                                 );
                             }

@@ -10,21 +10,18 @@ mod chunk_dispatch_channel;
 mod chunking_implementation {
     use core::panic;
     use std::{
-        backtrace,
-        collections::{HashMap, VecDeque},
-        fs::{self, metadata, Metadata},
+        collections::HashMap,
         io::{BufRead, BufReader, Cursor},
         path::Path,
         sync::{Arc, Mutex},
-        time::{Duration, Instant},
+        time::Duration,
         usize,
     };
 
     use dashmap::DashMap;
     use mio::Waker;
-    use ring::test::File;
 
-    use crate::conn_statistics::{self, ConnStats};
+    use crate::conn_statistics::ConnStats;
 
     use self::chunk_dispatch_channel::ChunkSender;
 
@@ -170,7 +167,7 @@ mod chunking_implementation {
                             if let Err(e) = waker.wake() {
                                 panic!("error f waking [{:?}]", e)
                             }
-                            info!(
+                            debug!(
                                 "stream [{}]  in queue[{}]SUCCESS all data has been chunked  [{}/{}] !! ",
                                 chunkable.stream_id, chunkable.sender.in_queue(),chunkable.bytes_written, chunkable.body_len
                             )
