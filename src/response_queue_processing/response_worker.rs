@@ -1,6 +1,6 @@
 pub use reponse_process_thread_pool::ResponseThreadPool;
 mod reponse_process_thread_pool {
-    use std::{sync::Arc, thread::JoinHandle};
+    use std::{sync::Arc, thread::JoinHandle, time::Duration};
 
     use crate::{
         response_queue_processing::{
@@ -88,6 +88,7 @@ mod reponse_process_thread_pool {
                     match worker_cb(response_injection, &response_injection_buffer_clone) {
                         Ok(_) => {}
                         Err(response_injection) => {
+                            std::thread::sleep(Duration::from_micros(100));
                             warn!("Resending stream [{:?}]", response_injection.stream_id());
                             if let Err(e) = injection_channel.0.send(response_injection) {
                                 error!("Faces_quic_server: failed to send response_injection")
