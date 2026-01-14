@@ -577,6 +577,11 @@ mod quiche_implementation {
                                         &waker_clone,
                                         &response_injection,
                                     );
+                                } else {
+                                    warn!(
+                                        "finishing stream_id is not in table stream_id [{:?}]",
+                                        stream_id
+                                    );
                                 }
                                 ()
                             }
