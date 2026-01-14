@@ -87,15 +87,15 @@ impl InFlightStreamsPathVerifier {
                     true
                 } else {
                     error!(
-                        "guard_stream_map_entry [{:?}/[{:?}]",
-                        entry.path, entry.conn_id
+                        "stream_id [{:?}] Aguard_stream_map_entry [{:?}/[{:?}]",
+                        stream_id, entry.path, entry.conn_id
                     );
                     false
                 }
             } else {
                 error!(
-                    "guard_stream_map_entry [{:?}/[{:?}]",
-                    entry.path, entry.conn_id
+                    "stream_id [{:?}], Bguard_stream_map_entry [{:?}/[{:?}]",
+                    stream_id, entry.path, entry.conn_id
                 );
                 false
             }
