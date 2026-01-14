@@ -5,7 +5,7 @@ use std::{
 
 use dashmap::{DashMap, DashSet};
 
-#[derive(Eq, PartialEq, Hash, Clone)]
+#[derive(Eq, PartialEq, Hash, Clone, Debug)]
 struct ConnStreamK {
     stream_id: u64,
     conn_id: Vec<u8>,
@@ -16,7 +16,7 @@ impl ConnStreamK {
         Self { stream_id, conn_id }
     }
 }
-#[derive(Eq, PartialEq, Hash, Clone)]
+#[derive(Eq, PartialEq, Hash, Clone, Debug)]
 struct ConnPathK {
     path: String,
     conn_id: Vec<u8>,
@@ -78,18 +78,29 @@ impl InFlightStreamsPathVerifier {
     pub fn is_finished_request_a_valid_path(&self, conn_id: Vec<u8>, stream_id: u64) -> bool {
         let guard_stream_map = &mut *self.stream_map.lock().unwrap();
         let guard_path_map = &mut *self.path_map.lock().unwrap();
-        if let Some(entry) = guard_stream_map.remove(&ConnStreamK::new(stream_id, conn_id)) {
+        let k = ConnStreamK::new(stream_id, conn_id);
+        if let Some(entry) = guard_stream_map.get(&k) {
             if let Some(stream_id_reg) = guard_path_map.get(&entry) {
                 if *stream_id_reg == stream_id {
                     guard_path_map.remove(&entry);
+                    guard_stream_map.remove(&k);
                     true
                 } else {
+                    error!(
+                        "guard_stream_map_entry [{:?}/[{:?}]",
+                        entry.path, entry.conn_id
+                    );
                     false
                 }
             } else {
+                error!(
+                    "guard_stream_map_entry [{:?}/[{:?}]",
+                    entry.path, entry.conn_id
+                );
                 false
             }
         } else {
+            error!("nothin entry [{:#?}]", guard_stream_map);
             false
         }
     }
