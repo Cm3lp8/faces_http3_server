@@ -1,6 +1,7 @@
 pub use crate::route_handler::RouteHandler;
 
 pub use crate::route_manager::route_mngr::RouteManagerInner;
+pub use inflight_streams_path_verifier::InFlightStreamsPathVerifier;
 pub use route_config::{BodyStorage, DataManagement, RouteConfig};
 pub use route_mngr::{
     ErrorType, H3Method, RequestType, RouteForm, RouteFormBuilder, RouteManager,

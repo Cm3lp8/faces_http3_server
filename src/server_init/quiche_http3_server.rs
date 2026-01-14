@@ -170,6 +170,7 @@ pub use quiche_implementation::run;
 mod quiche_implementation {
     use core::panic;
     use std::{
+        collections::HashSet,
         sync::{Arc, Mutex},
         time::{Duration, Instant},
     };
@@ -184,6 +185,7 @@ mod quiche_implementation {
         response_queue_processing::{
             ResponseInjection, ResponseInjectionBuffer, ResponsePoolProcessing,
         },
+        route_manager::InFlightStreamsPathVerifier,
         server_config::RouteHandler,
         server_init::quiche_http3_server,
         stream_sessions::UserSessions,
@@ -299,6 +301,7 @@ mod quiche_implementation {
         let mut send_packet_time = Instant::now();
         let mut round = 0;
         //let mut last_instant: Option<Instant> = None;
+
         loop {
             round += 1;
             // Find the shorter timeout from all the active connections.
