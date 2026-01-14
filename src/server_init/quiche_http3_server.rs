@@ -497,13 +497,17 @@ mod quiche_implementation {
                                 let request_path = extract_path_from_hdr(&list);
 
                                 if let Some(path) = request_path {
-                                    route_manager
+                                    if route_manager
                                         .in_flight_streams_path_verification()
-                                        .insert_stream_path_for_conn(
-                                            scid.clone(),
-                                            stream_id,
-                                            &path,
+                                        .insert_stream_path_for_conn(scid.clone(), stream_id, &path)
+                                    {
+                                        warn!(
+                                            "stream_id [{:?}] has inserted path [{:?}]",
+                                            stream_id, path
                                         );
+                                    } else {
+                                        error!("stream_id [{:?}] failed to register in in in_flight_streams_path_verification", stream_id);
+                                    }
                                     header_queue_processing.process_header(
                                         stream_id,
                                         scid,
