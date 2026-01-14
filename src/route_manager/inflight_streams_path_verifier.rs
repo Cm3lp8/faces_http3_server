@@ -31,8 +31,7 @@ impl ConnPathK {
 pub struct InFlightStreamsPathVerifier {
     accepted_route_pathes: HashSet<&'static str>,
     accepted_route_stream_pathes: Option<HashSet<String>>,
-    stream_map: Arc<Mutex<HashMap<ConnStreamK, ConnPathK>>>,
-    path_map: Arc<Mutex<HashMap<ConnPathK, u64>>>,
+    stream_map: Arc<Mutex<HashSet<ConnStreamK>>>,
 }
 
 impl InFlightStreamsPathVerifier {
@@ -43,8 +42,7 @@ impl InFlightStreamsPathVerifier {
         Self {
             accepted_route_pathes: route_format,
             accepted_route_stream_pathes: stream_pathes_set,
-            stream_map: Arc::new(Mutex::new(HashMap::new())),
-            path_map: Arc::new(Mutex::new(HashMap::new())),
+            stream_map: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
@@ -66,42 +64,16 @@ impl InFlightStreamsPathVerifier {
         }
 
         let k_0 = ConnStreamK::new(stream_id, conn_id.clone());
-        let k = ConnPathK::new(path.to_string(), conn_id);
         let guard_stream_map = &mut *self.stream_map.lock().unwrap();
-        let guard_path_map = &mut *self.path_map.lock().unwrap();
-        guard_stream_map.insert(k_0.clone(), k.clone());
-        guard_path_map.insert(k, stream_id);
+        guard_stream_map.insert(k_0.clone());
         true
     }
 
     #[inline]
     pub fn is_finished_request_a_valid_path(&self, conn_id: Vec<u8>, stream_id: u64) -> bool {
         let guard_stream_map = &mut *self.stream_map.lock().unwrap();
-        let guard_path_map = &mut *self.path_map.lock().unwrap();
         let k = ConnStreamK::new(stream_id, conn_id);
-        if let Some(entry) = guard_stream_map.get(&k) {
-            if let Some(stream_id_reg) = guard_path_map.get(&entry) {
-                if *stream_id_reg == stream_id {
-                    guard_path_map.remove(&entry);
-                    guard_stream_map.remove(&k);
-                    true
-                } else {
-                    error!(
-                        "stream_id [{:?}] Aguard_stream_map_entry [{:?}/[{:?}]",
-                        stream_id, entry.path, entry.conn_id
-                    );
-                    false
-                }
-            } else {
-                error!(
-                    "stream_id [{:?}], Bguard_stream_map_entry [{:?}/[{:?}]",
-                    stream_id, entry.path, entry.conn_id
-                );
-                false
-            }
-        } else {
-            error!("nothin entry [{:#?}]", guard_stream_map);
-            false
-        }
+
+        guard_stream_map.remove(&k)
     }
 }
