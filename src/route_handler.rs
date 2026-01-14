@@ -319,6 +319,7 @@ mod request_hndlr {
             waker: &Arc<Waker>,
             response_injection_sender: &ResponsePoolProcessingSender,
         ) {
+            info!("Handle Finished stream_id [{:?}]", stream_id);
             if let Err(e) = response_injection_sender.send(
                 stream_id, scid, conn_id, false, // content_length,
                 waker,

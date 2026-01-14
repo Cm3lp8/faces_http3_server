@@ -79,6 +79,7 @@ mod response_buff {
             &self,
             response_injection: ResponseInjection,
         ) -> Result<(), ResponseInjection> {
+            info!("register stream_id [{:?}]", response_injection.stream_id());
             if self.is_request_signal_in_queue(response_injection.req_id()) {
                 //Send immediatly if all the necessary middleware validation and data process is
                 //done
@@ -88,6 +89,10 @@ mod response_buff {
                 let scid = response_injection.scid();
                 let conn_id = response_injection.conn_id();
 
+                info!(
+                    "response_preparation_with_route_handler stream_id [{:?}]",
+                    response_injection.stream_id()
+                );
                 response_preparation_with_route_handler(
                     &self.route_handler,
                     &self.waker,

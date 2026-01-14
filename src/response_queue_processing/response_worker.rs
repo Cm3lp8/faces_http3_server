@@ -88,6 +88,7 @@ mod reponse_process_thread_pool {
                     match worker_cb(response_injection, &response_injection_buffer_clone) {
                         Ok(_) => {}
                         Err(response_injection) => {
+                            warn!("Resending stream [{:?}]", response_injection.stream_id());
                             if let Err(e) = injection_channel.0.send(response_injection) {
                                 error!("Faces_quic_server: failed to send response_injection")
                             }
