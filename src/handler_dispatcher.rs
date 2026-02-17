@@ -58,6 +58,7 @@ mod route_response {
         OK200_FILE(PathBuf),
         ERROR409(Vec<u8>),
         ERROR503(Vec<u8>),
+        ERROR403(Vec<u8>),
         ERROR401(Vec<u8>),
         ERROR422(Vec<u8>),
         ERROR428(Vec<u8>),
@@ -128,6 +129,13 @@ mod dispatcher {
             Response {
                 finished_event: Some(from_event),
                 response: RouteResponse::ERROR409(error_body),
+            }
+        }
+        /// Forbidden resource
+        pub fn error_403(from_event: FinishedEvent, error_body: Vec<u8>) -> Response {
+            Response {
+                finished_event: Some(from_event),
+                response: RouteResponse::ERROR403(error_body),
             }
         }
         /// unprocessable entity code 422

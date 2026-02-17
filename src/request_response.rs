@@ -830,6 +830,23 @@ mod request_reponse_builder {
                 .build()
                 .unwrap()
         }
+        /// forbidden resource
+        pub fn new_403_with_data(
+            stream_id: u64,
+            scid: &[u8],
+            conn_id: &str,
+            data: Vec<u8>,
+        ) -> RequestResponse {
+            ResponseBuilder::new()
+                .set_stream_id(stream_id)
+                .set_scid(scid)
+                .set_conn_id(conn_id)
+                .set_status(Status::Err(403))
+                .extends_headers(vec![h3::Header::new(b"content-type", b"application/json")])
+                .set_body(data)
+                .build()
+                .unwrap()
+        }
         /// Service unavailable
         pub fn new_503_with_data(
             stream_id: u64,
