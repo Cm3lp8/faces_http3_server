@@ -162,7 +162,7 @@ mod request_hndlr {
                 RouteResponse::ERROR428(buf) => Some(RequestResponse::new_428_with_data(
                     stream_id, scid, conn_id, buf,
                 )),
-                RouteResponse::ERROR403(buf) => Some(RequestResponse::new_428_with_data(
+                RouteResponse::ERROR403(buf) => Some(RequestResponse::new_403_with_data(
                     stream_id, scid, conn_id, buf,
                 )),
             }
