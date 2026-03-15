@@ -108,9 +108,7 @@ let middle_ware_0 = router.middleware(&|headers, app_state| {
     MiddleWareFlow::Continue(headers)
 });
 
-let middle_ware_0 = router.middleware(&|headers, app_state| {
-    MiddleWareFlow::Continue(headers)
-});
+
 ```
 ## Route Handlers
 
