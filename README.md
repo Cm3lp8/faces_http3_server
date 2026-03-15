@@ -79,7 +79,7 @@ flowchart TD
 
     J --> K["HTTP/3 Stream Send"]
     L["AppState"] --> I
-    L --> G
+    L --> H
 ``` 
 Each request is first received through the QUIC transport layer and dispatched by the network event loop.
 It then goes through the middleware pipeline where headers can be inspected or modified.
@@ -181,9 +181,9 @@ router.route_post(
 ```
 RouteConfig allows configuration of how request bodies are handled:
 
-`BodyStorage::InMemory`
+- `BodyStorage::InMemory`
 
-`BodyStorage::File`
+- `BodyStorage::File`
 
 # Learning Goals
 
