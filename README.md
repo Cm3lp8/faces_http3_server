@@ -52,6 +52,20 @@ flowchart TD
 ```
 This layered structure allows the networking layer to remain independent from domain-specific application logic.
 
+# Request Lifecycle
+
+A request handled by the server follows the processing pipeline below.
+
+```mermaid
+flowchart TD
+    A["Incoming HTTP/3 Request"] --> B["Network Event Loop"]
+    B --> C["Stream Session Management"]
+    C --> D["Middleware Execution"]
+    D --> E["Route Handlers"]
+    E --> F["Response Generation"]
+    F --> G["HTTP/3 Stream Send"]
+``` 
+
 ---
 
 # Application State Model
