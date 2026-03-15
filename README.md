@@ -78,7 +78,7 @@ flowchart TD
     I --> J["Stream Dispatch Queue"]
 
     J --> K["HTTP/3 Stream Send"]
-    L["AppState"] --> I
+    L["AppState"] --> G
     L --> H
 ``` 
 Each request is first received through the QUIC transport layer and dispatched by the network event loop.
