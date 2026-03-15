@@ -12,7 +12,7 @@ The goal of this crate is to provide a lightweight abstraction layer over QUIC a
 ⚠️ This project was developed as part of an exploratory learning process and is **not intended for production use**.
 
 ---
-
+  
 # Project Context
 
 FacesHttp3Server was developed in the context of a broader experimental application project exploring distributed multimedia systems and modern networking architectures.
@@ -162,4 +162,8 @@ This project explores several aspects of modern systems programming:
 - modular software design
 - Rust systems programming
 
+
 The implementation served as a practical environment for experimenting with these topics while progressively refining the architecture.
+
+# Licence
+MIT
