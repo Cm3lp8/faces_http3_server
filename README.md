@@ -58,12 +58,27 @@ A request handled by the server follows the processing pipeline below.
 
 ```mermaid
 flowchart TD
-    A["Incoming HTTP/3 Request"] --> B["Network Event Loop"]
-    B --> C["Stream Session Management"]
-    C --> D["Middleware Execution"]
-    D --> E["Route Handlers"]
-    E --> F["Response Generation"]
-    F --> G["HTTP/3 Stream Send"]
+    A["QUIC / HTTP3 Transport (quiche)"] --> B["Network Event Loop"]
+
+    B --> C["HTTP/3 Stream Creation"]
+
+    C --> D["Header Parsing"]
+
+    D --> E["Request Job Dispatch"]
+
+    E --> F["Worker Thread Pool"]
+
+    F --> G["Middleware Pipeline"]
+
+    G --> H["Route Handlers"]
+
+    H --> I["Response Generation"]
+
+    I --> J["Stream Dispatch Queue"]
+
+    J --> K["HTTP/3 Stream Send"]
+    L["AppState"] --> I
+    L --> G
 ``` 
 Each request is first received through the QUIC transport layer and dispatched by the network event loop.
 It then goes through the middleware pipeline where headers can be inspected or modified.
