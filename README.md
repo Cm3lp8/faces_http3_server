@@ -39,20 +39,17 @@ The framework focuses on **separating networking infrastructure from application
 
 # Architecture Overview
 
-The server architecture is organized into several layers:
-QUIC / HTTP3 (quiche)
-│
-Network Event Loop
-│
-Stream Session Management
-│
-Middleware Pipeline
-│
-Route Handlers
-│
-Application Logic (AppState)
+```mermaid
+flowchart TD
+    A["QUIC / HTTP3 (quiche)"] --> B["Network Event Loop"]
+    B --> C["HTTP/3 Stream Management"]
+    C --> D["Middleware Pipeline"]
+    D --> E["Route Handlers"]
 
+    G["AppState"] --> D
+    G --> E
 
+```
 This layered structure allows the networking layer to remain independent from domain-specific application logic.
 
 ---
