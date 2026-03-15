@@ -65,11 +65,12 @@ flowchart TD
     C --> D["Header Parsing"]
 
     D --> E["Request Job Dispatch"]
+    
 
-    E --> F["Worker Thread Pool"]
+    F["Worker Thread Pool"] 
 
-    F --> G["Middleware Pipeline"]
-
+    F -. executes.-> G["Middleware Pipeline"]
+    E -. injects.-> F
     G --> H["Route Handlers"]
 
     H --> I["Response Generation"]
