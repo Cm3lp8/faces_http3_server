@@ -15,7 +15,7 @@ The goal of this crate is to provide a lightweight abstraction layer over QUIC a
   
 # Project Context
 
-FacesHttp3Server was developed in the context of a broader experimental application project exploring distributed multimedia systems and modern networking architectures.
+`FacesHttp3Server` was developed in the context of a broader experimental application project exploring distributed multimedia systems and modern networking architectures.
 
 The server framework was progressively designed while building the backend of this application. This allowed the framework to evolve through real usage scenarios and to be continuously tested by the application itself.
 
