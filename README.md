@@ -3,87 +3,166 @@
 ![dev_status](https://img.shields.io/badge/dev--status-WIP-pink
 )
 
-## Purpose 
-QuicsyncH3 is a lightweight framework that positions itself as an abstraction layer on top of the Quiche implementation of the QUIC protocol. Written in Rust, it aims to simplify the development of modern networking applications using QUIC and HTTP/3.
+# FacesHttp3Server
 
-### ⚠️ This crate is currently in very early development stage. 
-- It is nowhere ready for real production implementation. Use with care.
+Experimental HTTP/3 server framework written in Rust on top of the **QUIC implementation provided by quiche**.
 
-## 🏹 Goals
-- Providing a simple abstraction on top of Quiche with a quick setup
+The goal of this crate is to provide a lightweight abstraction layer over QUIC and HTTP/3 in order to simplify the implementation of networking applications while keeping control over the underlying transport behavior.
 
-## Installation
-```bash
-git clone https://github.com/Cm3lp8/faces_http3_server/
-cd faces_http3_server && cargo run --release
+⚠️ This project was developed as part of an exploratory learning process and is **not intended for production use**.
 
-```
+---
 
-## How to start
+# Project Context
 
-### Create the router with an application State
+FacesHttp3Server was developed in the context of a broader experimental application project exploring distributed multimedia systems and modern networking architectures.
+
+The server framework was progressively designed while building the backend of this application. This allowed the framework to evolve through real usage scenarios and to be continuously tested by the application itself.
+
+This approach allowed architectural decisions to emerge from concrete needs encountered during development.
+
+---
+
+# Main Features
+
+- HTTP/3 server built on top of **QUIC (quiche)**
+- event-driven network architecture
+- modular routing system
+- middleware processing pipeline
+- configurable request body management
+- channel-based communication between subsystems
+- application state injection via a generic `AppState`
+
+The framework focuses on **separating networking infrastructure from application logic**.
+
+---
+
+# Architecture Overview
+
+The server architecture is organized into several layers:
+QUIC / HTTP3 (quiche)
+│
+Network Event Loop
+│
+Stream Session Management
+│
+Middleware Pipeline
+│
+Route Handlers
+│
+Application Logic (AppState)
+
+
+This layered structure allows the networking layer to remain independent from domain-specific application logic.
+
+---
+
+# Application State Model
+
+The framework does not impose any persistence model or domain structure.
+
+Instead, application-specific logic is injected through a user-defined `AppState` type when creating the router. This allows developers to integrate their own storage systems or application logic without modifying the server infrastructure.
+
+Example:
+
 ```rust
+#[derive(Clone)]
+pub struct AppState {
+    pub database: DatabasePool,
+}
 
- #[derive(Clone)]
-    pub struct AppStateTest;
-    let mut router = RouteManager::new_with_app_state(AppStateTest);
-
+let router = RouteManager::new_with_app_state(AppState { database });
 ```
-### Instantiate the server
-Attach the created router, alongside the configuration paths.
+
+The state instance is then accessible inside middleware and route handlers:
+
+```rust
+router.handler(&|event, app_state, previous_response| {
+    // access application state or storage
+});
+```
+This design allows the framework to remain independent from the application domain while enabling flexible integration with different persistence strategies.
+
+# Quick Start
+## Create the router with application state
+
+```rust
+#[derive(Clone)]
+pub struct AppStateTest;
+
+let mut router = RouteManager::new_with_app_state(AppStateTest);
+```
+
+## Instantiate the server
+Attach the router and the configuration paths.
 ```rust
 let _server = Http3Server::new(addr)
-        .add_key_path("./key.pem")
-        .add_cert_path("./cert.pem")
-        .set_file_storage_path("~/.temp_server/")
-        .run_blocking(router);
-
-
+    .add_key_path("./key.pem")
+    .add_cert_path("./cert.pem")
+    .set_file_storage_path("~/.temp_server/")
+    .run_blocking(router);
 ```
-### Create a route handler
+## Middleware
+
+Middlewares allow inspection or modification of request headers before the request is processed by handlers.
+
 ``` rust
-  let handler_0 = router.handler(&|event, app_state, current_status_response| {
-        info!(
-            "Received Data on file path [{}] on [{:?}] ",
-            event.bytes_written(),
-            event.path()
-        );
-        Response::ok_200_with_data(event, vec![9; 23])
-    });
+let middle_ware_0 = router.middleware(&|headers, app_state| {
+    MiddleWareFlow::Continue(headers)
+});
 
+let middle_ware_0 = router.middleware(&|headers, app_state| {
+    MiddleWareFlow::Continue(headers)
+});
 ```
-The `handler()` 's closurel takes an `Event` and a `RouteResponse`. It is called when a request is finished. 
-You can have a collection of handlers registered to a same route so the Event and RouteResponse parameters are 
-successivly passed in and owned by all the handlers processed in the iteration.
+## Route Handlers
 
-- `Event` : owned by the closure, all the data about the finished request, including the payload data (as bytes or file path) if any. You have to yield it back for the rest of the iteration. It is the last processed Handler's response that is send to peer.
-- `RouteResponse` : the response returned by the previous handler processed.
-### Create a middleware
-``` rust
+Handlers process completed requests.
 
+Example:
 
-   let middle_ware_0 = router.middleware(&|headers, app_state| MiddleWareFlow::Continue(headers));
-
-
-
-```
-The `middleware()` 's closure takes the type registered on the router for the application state. The state can be accessed by the the second parameter of the closure.
-`header` parameter is a `&mut[h3::Header]` that can be mutably borrowed by the middleware.
-
-Same as the handlers, multiple middlewares can be registered on the same route. They are processed with the same order as their registration order on the route.
-
-### Define a route with handler(s) and middleware(s)
-Example of for a `POST` request
 ```rust
-router.route_post(
-        "/large_data",
-        RouteConfig::new(DataManagement::Storage(BodyStorage::File)),
-        |route_builder| {
-            route_builder.middleware(&middle_ware_0);// can be chained:w
-
-            route_builder.handler(&handler_0);// can be chained too.
-        },
-    );
-
+let handler_0 = router.handler(&|event, app_state, current_status_response| {
+    Response::ok_200_with_data(event, vec![9; 23])
+});
 ```
-`RouteConfig` is used to configure the route and especially here you can choose the `DataManagement` type between `BodyStorage::InMemory` and `BodyStorage::File`.
+
+Handlers receive:
+
+- an Event describing the completed request
+- the shared application state
+- the response returned by the previous handler
+
+Multiple handlers can be chained on a route. The response returned by the last handler is sent to the client.
+
+## Route Definition
+
+Example of a POST route:
+
+``` rust
+router.route_post(
+    "/large_data",
+    RouteConfig::new(DataManagement::Storage(BodyStorage::File)),
+    |route_builder| {
+        route_builder.middleware(&middle_ware_0);
+        route_builder.handler(&handler_0);
+    },
+);
+```
+RouteConfig allows configuration of how request bodies are handled:
+
+`BodyStorage::InMemory`
+
+`BodyStorage::File`
+
+# Learning Goals
+
+This project explores several aspects of modern systems programming:
+
+- QUIC and HTTP/3 protocols
+- event-driven server architectures
+- concurrent request processing
+- modular software design
+- Rust systems programming
+
+The implementation served as a practical environment for experimenting with these topics while progressively refining the architecture.
