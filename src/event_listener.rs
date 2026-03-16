@@ -57,6 +57,7 @@ mod event_loop {
             let recv = self.channel.1.clone();
             let route_event_dispatcher = self.route_event_dispatcher.clone();
             let app_state = self.app_state.clone();
+            // TODO implement a thread pool here
             std::thread::spawn(move || {
                 while let Ok((event, response_builder)) = recv.recv() {
                     cb(event, &app_state, &route_event_dispatcher, response_builder)

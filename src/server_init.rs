@@ -72,11 +72,13 @@ mod server_initiation {
                 quiche_http3_server::run(config_clone, route_manager);
             });
 
+            /*
             event_loop.run(
                 |event, app_state, handler_dispatcher, response_builder| match event {
                     RouteEvent::OnFinished(event) => {
                         let handler_dispatcher = handler_dispatcher.clone();
                         let app_state = app_state.clone();
+                        // TODO refactor this because you don't spawn a new thread for every req
                         std::thread::spawn(move || {
                             let response: crate::RouteResponse =
                                 handler_dispatcher.dispatch_finished(event, &app_state);
@@ -88,6 +90,7 @@ mod server_initiation {
                     _ => {}
                 },
             );
+            */
             thread::park();
             server
         }
