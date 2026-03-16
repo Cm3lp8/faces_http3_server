@@ -133,8 +133,9 @@ let mut router = RouteManager::new_with_app_state(AppStateTest);
 
 ## Instantiate the server
 Attach the router and the configuration paths.
+As the server relies on QUIC protocol, valid TLS certificates are required.
 ```rust
-let _server = Http3Server::new(addr)
+let _server = Http3Server::new(ip_addr)
     .add_key_path("./key.pem")
     .add_cert_path("./cert.pem")
     .set_file_storage_path("~/.temp_server/")
