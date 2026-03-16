@@ -147,7 +147,10 @@ Middlewares allow inspection or modification of request headers before the reque
 
 ``` rust
 let middle_ware_0 = router.middleware(&|headers, app_state| {
+
+    // auth logic, etc.
     MiddleWareFlow::Continue(headers)
+    //or: MiddleWareFlow::Abort
 });
 
 
