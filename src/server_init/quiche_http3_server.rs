@@ -194,6 +194,14 @@ mod quiche_implementation {
 
     use super::*;
 
+    fn response_ends_on_headers(is_end: bool, attached_body_len: Option<usize>) -> bool {
+        is_end || attached_body_len == Some(0)
+    }
+
+    fn non_empty_attached_body(attached_body_len: Option<usize>) -> Option<usize> {
+        attached_body_len.filter(|body_len| *body_len > 0)
+    }
+
     pub fn run<S: Send + Sync + 'static + Clone, T: UserSessions<Output = T>>(
         server_config: Arc<ServerConfig>,
         route_manager: RouteManager<S, T>,
@@ -673,6 +681,7 @@ mod quiche_implementation {
                                         if let Err(_e) = waker_clone.wake() {
                                             error!("failed to wake poll");
                                         }
+                                        continue;
                                     } else {
                                     };
                                     let is_end = client.is_body_totally_written(stream_id);
@@ -722,6 +731,8 @@ mod quiche_implementation {
                                     let headers = content.get_headers().to_vec();
                                     let is_end = content.is_end();
                                     let attached_body_len = content.attached_body_len();
+                                    let end_on_headers =
+                                        response_ends_on_headers(is_end, attached_body_len);
 
                                     match content.priority_mode() {
                                         HeaderPriority::SendHeader => {
@@ -729,10 +740,12 @@ mod quiche_implementation {
                                                 client,
                                                 stream_id,
                                                 headers.to_vec(),
-                                                is_end,
+                                                end_on_headers,
                                             ) {
                                                 client.set_headers_send(stream_id, true);
-                                                if let Some(body_len) = attached_body_len {
+                                                if let Some(body_len) =
+                                                    non_empty_attached_body(attached_body_len)
+                                                {
                                                     client.set_body_size_to_body_sending_tracker(
                                                         stream_id, body_len,
                                                     );
@@ -783,13 +796,17 @@ mod quiche_implementation {
                                                 client,
                                                 stream_id,
                                                 headers.clone(),
-                                                content.is_end(),
+                                                end_on_headers,
                                             ) {
-                                                if let Some(body_len) = attached_body_len {
+                                                if attached_body_len.is_some() {
+                                                    client.set_headers_send(stream_id, true);
+                                                }
+                                                if let Some(body_len) =
+                                                    non_empty_attached_body(attached_body_len)
+                                                {
                                                     client.set_body_size_to_body_sending_tracker(
                                                         stream_id, body_len,
                                                     );
-                                                    client.set_headers_send(stream_id, true);
 
                                                     let conn_stats = client.conn_stats.clone();
                                                     content.send_body_to_chunking_station(
@@ -1428,5 +1445,28 @@ mod quiche_implementation {
         response_injection_buffer: &ResponseInjectionBuffer<S, T>,
     ) {
         response_injection_buffer.register(response_injection);
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::{non_empty_attached_body, response_ends_on_headers};
+
+        #[test]
+        fn empty_attached_body_finishes_on_headers() {
+            assert!(response_ends_on_headers(false, Some(0)));
+            assert_eq!(non_empty_attached_body(Some(0)), None);
+        }
+
+        #[test]
+        fn non_empty_attached_body_is_sent_after_headers() {
+            assert!(!response_ends_on_headers(false, Some(1)));
+            assert_eq!(non_empty_attached_body(Some(1)), Some(1));
+        }
+
+        #[test]
+        fn explicit_end_without_body_finishes_on_headers() {
+            assert!(response_ends_on_headers(true, None));
+            assert_eq!(non_empty_attached_body(None), None);
+        }
     }
 }
