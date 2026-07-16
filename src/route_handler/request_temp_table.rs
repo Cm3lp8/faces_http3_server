@@ -797,7 +797,7 @@ mod test_request_argument_parser {
             role = Some(rl.to_string());
         }
         if let Some(ag) = args.as_ref().unwrap().get("age") {
-            role = Some(ag.to_string());
+            age = Some(ag.to_string());
         }
 
         assert!(name.is_some());
