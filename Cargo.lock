@@ -231,9 +231,10 @@ dependencies = [
 [[package]]
 name = "faces_event_loop_utils"
 version = "0.1.0"
-source = "git+https://github.com/Cm3lp8/faces_event_loop_utils.git#cc4b5af9b1388ce6cdd150edcc1c051f0afe7bf1"
+source = "git+https://github.com/Cm3lp8/faces_event_loop_utils.git?rev=9f441dede5103996b3ea036e7fff6f2b1281c027#9f441dede5103996b3ea036e7fff6f2b1281c027"
 dependencies = [
  "crossbeam",
+ "log",
 ]
 
 [[package]]
@@ -395,9 +396,9 @@ dependencies = [
 
 [[package]]
 name = "log"
-version = "0.4.25"
+version = "0.4.33"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "04cbf5b083de1c7e0222a7a51dbfdba1cbe1c6ab0b15e29fff3f6c077fd9cd9f"
+checksum = "0ceec5bc11778974d1bcb055b18002eba7f4b3518b6a0081b3af5f21666da9ad"
 
 [[package]]
 name = "memchr"
