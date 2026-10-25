@@ -683,6 +683,13 @@ mod req_temp_table {
             if self.method.is_none() || self.headers.is_none() || self.path.is_none() {
                 return None;
             }
+            // A body without Content-Length still has a final received size at FIN.
+            // Queued writes complete asynchronously against this same writer.
+            if matches!(event_type, EventType::OnFinished) {
+                if let Some(writer) = &self.file_opened {
+                    writer.finish_received(self.body_written_size);
+                }
+            }
             let file_path = self.path_storage();
             if let Some(headers) = self.headers.as_ref() {
                 match event_type {

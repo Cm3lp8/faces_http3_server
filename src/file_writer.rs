@@ -124,76 +124,55 @@ mod writable_type {
         fs::{File, OpenOptions},
         io::{self, BufWriter, ErrorKind, Read, Write},
         sync::{
-            atomic::{AtomicBool, AtomicUsize},
-            Arc, Condvar, Mutex,
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+            Arc, Mutex,
         },
-        time::Duration,
-    };
-
-    use faces_event_loop_utils::{EventObserver, PublicEventListener};
-    use quiche::Error;
-    use uuid::Uuid;
-
-    use crate::file_writer::{
-        event_loop_types::{FileFinishingEvEvent, FileWrkrEvLoopId},
-        pending_files_map::{self, PendingFilesMap},
-        FileWriter,
     };
 
     use super::trait_writable::FileWritable;
+    use crate::file_writer::{
+        event_loop_types::{FileFinishingEvEvent, FileWrkrEvLoopId},
+        pending_files_map::PendingFilesMap,
+    };
+    use faces_event_loop_utils::PublicEventListener;
+    use uuid::Uuid;
 
-    impl Clone for FileWriterHandle {
-        fn clone(&self) -> Self {
-            Self {
-                associated_worker_index: self.associated_worker_index.clone(),
-                pending_file_map_ref: self.pending_file_map_ref.clone(),
-                handle_id: self.handle_id.clone(),
-                inner: self.inner.clone(),
-                file_length: self.file_length.clone(),
-                written: self.written.clone(),
-                finishing_callback: self.finishing_callback.clone(),
-                file_finishing_listener: self.file_finishing_listener.clone(),
-            }
-        }
-    }
+    type FinishingCallback = Arc<dyn Fn() + Send + Sync + 'static>;
+
     #[derive(Debug)]
     struct State {
         writer: Option<BufWriter<File>>,
         can_close: bool,
+        // Keep the first failure: a later successful flush cannot repair a
+        // partially failed write or justify publishing this file.
+        failure: Option<(ErrorKind, String)>,
     }
     impl State {
-        pub fn close_file(&mut self) {
-            let mut retry = 0;
-            // FLushing
-            loop {
-                if let Some(writer) = &mut self.writer {
-                    match writer.flush() {
-                        Ok(_) => break,
-                        Err(e) if e.kind() == ErrorKind::Interrupted => {
-                            retry += 1;
-
-                            if retry >= 5 {
-                                break;
-                            }
-                        }
-                        _ => {
-                            break;
-                        }
-                    }
-                }
+        fn error(&self) -> Option<io::Error> {
+            self.failure
+                .as_ref()
+                .map(|(kind, message)| io::Error::new(*kind, message.clone()))
+        }
+        fn fail(&mut self, error: io::Error) -> io::Error {
+            let failure = self
+                .failure
+                .get_or_insert_with(|| (error.kind(), error.to_string()));
+            io::Error::new(failure.0, failure.1.clone())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            if let Some(error) = self.error() {
+                return Err(error);
             }
-
-            self.can_close = true;
-
-            debug!("File written !!");
+            let result = self
+                .writer
+                .as_mut()
+                .ok_or_else(|| io::Error::new(ErrorKind::NotFound, "no bufwriter"))
+                .and_then(Write::flush);
+            result.map_err(|error| self.fail(error))
         }
     }
 
-    impl Debug for FileWriterHandle {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            write!(f, " File Writer handle id [{:?}]", self.handle_id)
-        }
-    }
+    #[derive(Clone)]
     pub struct FileWriterHandle {
         associated_worker_index: usize,
         handle_id: Uuid,
@@ -201,8 +180,13 @@ mod writable_type {
         inner: Arc<Mutex<State>>,
         file_length: Arc<(AtomicUsize, AtomicBool)>,
         written: Arc<AtomicUsize>,
-        finishing_callback: Arc<Mutex<Option<Arc<dyn Fn() + Send + Sync + 'static>>>>,
+        finishing_callback: Arc<Mutex<Option<FinishingCallback>>>,
         file_finishing_listener: Arc<PublicEventListener<FileFinishingEvEvent, FileWrkrEvLoopId>>,
+    }
+    impl Debug for FileWriterHandle {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "FileWriterHandle({})", self.handle_id)
+        }
     }
     impl FileWriterHandle {
         pub fn new(
@@ -215,11 +199,6 @@ mod writable_type {
             >,
             file_length: Option<usize>,
         ) -> Self {
-            let file_length = if let Some(file_length) = file_length {
-                Arc::new((AtomicUsize::new(file_length), AtomicBool::new(true)))
-            } else {
-                Arc::new((AtomicUsize::new(0), AtomicBool::new(false)))
-            };
             Self {
                 associated_worker_index,
                 handle_id,
@@ -227,309 +206,281 @@ mod writable_type {
                 inner: Arc::new(Mutex::new(State {
                     writer: Some(BufWriter::new(writer)),
                     can_close: false,
+                    failure: None,
                 })),
-                file_length,
+                file_length: Arc::new((
+                    AtomicUsize::new(file_length.unwrap_or(0)),
+                    AtomicBool::new(file_length.is_some()),
+                )),
                 written: Arc::new(AtomicUsize::new(0)),
                 finishing_callback: Arc::new(Mutex::new(None)),
                 file_finishing_listener: file_finishing_listener.clone(),
             }
         }
-        pub fn set_file_length(&self, file_length: usize) {
-            if self
-                .file_length
-                .1
-                .load(std::sync::atomic::Ordering::Acquire)
-            {
-                return;
-            };
 
-            self.file_length
-                .0
-                .store(file_length, std::sync::atomic::Ordering::Release);
-            self.file_length
-                .1
-                .store(true, std::sync::atomic::Ordering::Release);
+        // Called only under inner, which also serializes callback registration.
+        // Completion is based on an exact byte count and a successful flush.
+        fn complete_if_ready(&self, state: &mut State) -> io::Result<bool> {
+            if let Some(error) = state.error() {
+                return Err(error);
+            }
+            if state.can_close {
+                return Ok(true);
+            }
+            if !self.file_length.1.load(Ordering::Acquire) {
+                return Ok(false);
+            }
+            let expected = self.file_length.0.load(Ordering::Acquire);
+            match self.written().cmp(&expected) {
+                std::cmp::Ordering::Less => Ok(false),
+                std::cmp::Ordering::Greater => Err(state.fail(io::Error::new(
+                    ErrorKind::InvalidData,
+                    "file exceeds expected length",
+                ))),
+                std::cmp::Ordering::Equal => {
+                    state.flush()?;
+                    state.can_close = true;
+                    Ok(true)
+                }
+            }
+        }
+
+        // Run after releasing inner. A terminal failure discards a success-only
+        // callback. Removing this map entry does not remove the file or worker binding.
+        fn settle(&self, result: &io::Result<bool>, callback: Option<FinishingCallback>) {
+            if !matches!(result, Ok(false)) {
+                self.pending_file_map_ref.yield_writer_by_id(self.handle_id);
+            }
+            if let Some(cb) = callback {
+                if self
+                    .file_finishing_listener
+                    .0
+                    .send(FileFinishingEvEvent::FinishingFileWrite { cb: cb.clone() })
+                    .is_err()
+                {
+                    error!("Finishing queue unavailable; running callback on the caller outside writer locks");
+                    cb();
+                }
+            }
+        }
+        fn completion_callback(&self, result: &io::Result<bool>) -> Option<FinishingCallback> {
+            match result {
+                Ok(true) => self.take_callback(),
+                Err(_) => {
+                    self.take_callback();
+                    None
+                }
+                Ok(false) => None,
+            }
+        }
+
+        /// FIN supplies the actual received size, independent of Content-Length.
+        pub(crate) fn finish_received(&self, received: usize) {
+            let failure = {
+                let mut state = self.inner.lock().unwrap();
+                if self.file_length.1.load(Ordering::Acquire)
+                    && self.file_length.0.load(Ordering::Acquire) != received
+                {
+                    Some(state.fail(io::Error::new(
+                        ErrorKind::InvalidData,
+                        "received length differs from declared length",
+                    )))
+                } else {
+                    None
+                }
+            };
+            if let Some(error) = failure {
+                let callback = self.take_callback();
+                self.settle(&Err(error), None);
+                drop(callback);
+            } else {
+                self.set_file_length(received);
+            }
+        }
+
+        pub fn set_file_length(&self, file_length: usize) {
+            let (result, callback) = {
+                let mut state = self.inner.lock().unwrap();
+                if !self.file_length.1.load(Ordering::Acquire) {
+                    self.file_length.0.store(file_length, Ordering::Release);
+                    self.file_length.1.store(true, Ordering::Release);
+                }
+                let result = self.complete_if_ready(&mut state);
+                let callback = self.completion_callback(&result);
+                (result, callback)
+            };
+            self.settle(&result, callback);
+            if let Err(error) = result {
+                error!("Failed to finish file: {error}");
+            }
         }
         pub fn register_finishing_callback(
             &self,
             finishing_cb: Arc<impl Fn() + Send + Sync + 'static>,
         ) {
-            *self.finishing_callback.lock().unwrap() = Some(finishing_cb);
+            let (result, callback) = {
+                let mut state = self.inner.lock().unwrap();
+                *self.finishing_callback.lock().unwrap() = Some(finishing_cb);
+                let result = self.complete_if_ready(&mut state);
+                let callback = self.completion_callback(&result);
+                (result, callback)
+            };
+            self.settle(&result, callback);
+            if let Err(error) = result {
+                error!("File completion failed: {error}");
+            }
         }
-        pub fn take_callback(&self) -> Option<Arc<dyn Fn() + Send + Sync + 'static>> {
+        pub fn take_callback(&self) -> Option<FinishingCallback> {
             self.finishing_callback.lock().unwrap().take()
         }
-        #[inline]
         pub fn is_file_written(&self) -> Result<bool, String> {
-            if !self
-                .file_length
-                .1
-                .load(std::sync::atomic::Ordering::Acquire)
-            {
-                return Err(String::from("No file_length set yet"));
+            let state = self.inner.lock().unwrap();
+            if let Some(error) = state.error() {
+                return Err(error.to_string());
             }
-
-            if self
-                .file_length
-                .0
-                .load(std::sync::atomic::Ordering::Acquire)
-                <= self.written.load(std::sync::atomic::Ordering::Acquire)
-            {
-                Ok(true)
-            } else {
-                Ok(false)
+            if !self.file_length.1.load(Ordering::Acquire) {
+                return Err("No file_length set yet".to_owned());
             }
+            Ok(state.can_close)
         }
         pub fn close_file(&self) {
-            let guard = &mut *self.inner.lock().unwrap();
-            let mut retry = 0;
-            // FLushing
-            loop {
-                if let Some(writer) = &mut guard.writer {
-                    match writer.flush() {
-                        Ok(_) => break,
-                        Err(e) if e.kind() == ErrorKind::Interrupted => {
-                            retry += 1;
-
-                            if retry >= 5 {
-                                break;
-                            }
-                        }
-                        _ => {
-                            break;
-                        }
-                    }
-                }
+            if let Err(error) = self.flush() {
+                error!("Failed to close file: {error}");
             }
-
-            guard.can_close = true;
-
-            debug!("File written !!");
         }
         pub fn get_associated_worker_index(&self) -> usize {
             self.associated_worker_index
-        }
-        pub fn transfert_bytes_from_temp_file(
-            &self,
-            storage_path: &str,
-            bytes: &[u8],
-        ) -> Result<(), io::Error> {
-            {
-                // TODO see how to manage this with a temp file , if necesarry
-                let state = &mut *self.inner.lock().unwrap();
-
-                /*
-                     *
-                let temp_path = format!("{}.tmp", path);
-
-                let mut tmp_file = File::create(path)?;
-
-                tmp_file.write_all(bytes)?;
-                     *
-                     * */
-
-                if let Some(writer) = &mut state.writer {
-                    writer.flush()?;
-                }
-
-                {
-                    state.writer.take();
-                }
-            }
-            let mut temp_buf: Vec<u8> = vec![];
-
-            let mut original_file = File::open(storage_path)?;
-
-            original_file.read_to_end(&mut temp_buf)?;
-
-            let mut prefix = bytes.to_vec();
-            prefix.extend(temp_buf);
-            let prefix_len = prefix.len();
-
-            let new_file = OpenOptions::new()
-                .write(true)
-                .truncate(true)
-                .open(storage_path)?;
-
-            let guard = &mut *self.inner.lock().unwrap();
-
-            let mut b_writer: BufWriter<std::fs::File> = BufWriter::new(new_file);
-
-            b_writer.write_all(&prefix)?;
-            b_writer.flush()?;
-            guard.writer = Some(b_writer);
-            self.written
-                .store(prefix_len, std::sync::atomic::Ordering::Release);
-
-            Ok(())
         }
         pub fn get_file_writer_id(&self) -> Uuid {
             self.handle_id
         }
         pub fn written(&self) -> usize {
-            self.written.load(std::sync::atomic::Ordering::Acquire)
+            self.written.load(Ordering::Acquire)
         }
-        pub fn flush(&self) -> Result<(), std::io::Error> {
-            let guard = &mut *self.inner.lock().unwrap();
-            if let Some(writer) = &mut guard.writer {
-                writer.flush()
-            } else {
-                Err(io::Error::new(ErrorKind::NotFound, "no bufwriter"))
-            }
+
+        pub fn transfert_bytes_from_temp_file(
+            &self,
+            storage_path: &str,
+            bytes: &[u8],
+        ) -> io::Result<()> {
+            let (result, callback) = {
+                let mut state = self.inner.lock().unwrap();
+                // Keep the same lock across flush/read/rewrite so queued appends
+                // cannot enter the old file between its snapshot and replacement.
+                let result = (|| {
+                    if let Some(error) = state.error() {
+                        return Err(error);
+                    }
+                    if bytes.is_empty() {
+                        return self.complete_if_ready(&mut state);
+                    }
+                    if state.can_close {
+                        return Err(io::Error::new(
+                            ErrorKind::InvalidInput,
+                            "file already completed",
+                        ));
+                    }
+                    state.flush()?;
+                    let mut prefix = bytes.to_vec();
+                    File::open(storage_path)?.read_to_end(&mut prefix)?;
+                    if self.file_length.1.load(Ordering::Acquire)
+                        && prefix.len() > self.file_length.0.load(Ordering::Acquire)
+                    {
+                        return Err(io::Error::new(
+                            ErrorKind::InvalidData,
+                            "file exceeds expected length",
+                        ));
+                    }
+                    let file = OpenOptions::new()
+                        .write(true)
+                        .truncate(true)
+                        .open(storage_path)?;
+                    let mut writer = BufWriter::new(file);
+                    writer.write_all(&prefix)?;
+                    writer.flush()?;
+                    state.writer = Some(writer);
+                    self.written.store(prefix.len(), Ordering::Release);
+                    self.complete_if_ready(&mut state)
+                })();
+                let result = result.map_err(|error| {
+                    if state.can_close {
+                        error
+                    } else {
+                        state.fail(error)
+                    }
+                });
+                let callback = self.completion_callback(&result);
+                (result, callback)
+            };
+            self.settle(&result, callback);
+            result.map(|_| ())
+        }
+        pub fn flush(&self) -> io::Result<()> {
+            let (result, callback) = {
+                let mut state = self.inner.lock().unwrap();
+                let result = state
+                    .flush()
+                    .and_then(|()| self.complete_if_ready(&mut state));
+                let callback = self.completion_callback(&result);
+                (result, callback)
+            };
+            self.settle(&result, callback);
+            result.map(|_| ())
         }
         pub fn write_on_disk(&self, data: &[u8]) -> Result<usize, ()> {
-            let writer = &mut *self.inner.lock().unwrap();
-
-            if let Some(wrtr) = &mut writer.writer {
-                match wrtr.write_all(data) {
-                    Ok(()) => {
-                        self.written
-                            .fetch_add(data.len(), std::sync::atomic::Ordering::Release);
-
-                        match self.is_file_written() {
-                            Ok(true) => {
-                                warn!("File  Written !!");
-                                writer.close_file();
-                                // try end of file cb signaling
-                                if let Some(cb) = self.take_callback() {
-                                    if let Err(_e) = self
-                                        .file_finishing_listener
-                                        .send_event(FileFinishingEvEvent::FinishingFileWrite { cb })
-                                    {
-                                        error!("Failed to send FileFinishingEvEvent");
-                                    }
-                                } else {
-                                }
-                            }
-                            Ok(false) => {}
-                            Err(_) => {}
-                        }
-                        Ok(data.len())
+            let (result, callback) = {
+                let mut state = self.inner.lock().unwrap();
+                let result = (|| {
+                    if let Some(error) = state.error() {
+                        return Err(error);
                     }
-                    Err(e) => {
-                        error!("[{:?}]", e);
-                        Err(())
+                    if state.can_close && !data.is_empty() {
+                        return Err(io::Error::new(
+                            ErrorKind::InvalidInput,
+                            "file already completed",
+                        ));
                     }
-                }
-            } else {
-                Err(())
-            }
-        }
-    }
-
-    impl FileWriterHandle {
-        /// [`on_file_written`] trigs a callback when required content is written .
-        pub fn on_file_written(&self, cb: impl Fn(usize) + Send + Sync + 'static) {
-            let file_h = self.inner.clone();
-            let pending_files_map_c = self.pending_file_map_ref.clone();
-            let handle_id = self.handle_id;
-            let written = self.written.clone();
-            let file_len = self.file_length.clone();
-            // TODO send to threadWorker with a fixed amount of threads
-            //
-
-            let cb_sendable = Arc::new(cb);
-            match self.is_file_written() {
-                Ok(true) => {
-                    warn!("on_file_written => file written");
-                    //flush bufwriter !!!
-                    self.close_file();
-                    let cb = move || {
-                        // FLushing
-
-                        let content_length_required =
-                            file_len.0.load(std::sync::atomic::Ordering::Acquire);
-                        cb_sendable(content_length_required);
-                        if pending_files_map_c.yield_writer_by_id(handle_id) {
-                            debug!("File writer has been drop after complete file write ");
-                        }
-                    };
-
-                    let sendable_cb = Arc::new(cb);
-
-                    if let Err(e) = self
-                        .file_finishing_listener
-                        .0
-                        .send(FileFinishingEvEvent::FinishingFileWrite { cb: sendable_cb })
+                    let next = self.written().checked_add(data.len()).ok_or_else(|| {
+                        io::Error::new(ErrorKind::InvalidData, "file length overflow")
+                    })?;
+                    if self.file_length.1.load(Ordering::Acquire)
+                        && next > self.file_length.0.load(Ordering::Acquire)
                     {
-                        error!("e[{:?}", e)
-                    } else {
-                        warn!("Sucesfully send to faces_event_loop_utils");
+                        return Err(io::Error::new(
+                            ErrorKind::InvalidData,
+                            "file exceeds expected length",
+                        ));
                     }
-                }
-                Ok(false) => {
-                    //register callback to call it when required
-                    warn!("on_file_written => not written");
-
-                    let file_finishing_listener = self.file_finishing_listener.clone();
-
-                    let cb_2 = move || {
-                        let cb_sendable_clone = cb_sendable.clone();
-                        let file_len = file_len.clone();
-                        let pending_files_map_c_2 = pending_files_map_c.clone();
-                        let cb = move || {
-                            // FLushing
-
-                            let content_length_required = file_len
-                                .clone()
-                                .0
-                                .load(std::sync::atomic::Ordering::Acquire);
-                            cb_sendable_clone(content_length_required);
-                            if pending_files_map_c_2.yield_writer_by_id(handle_id) {
-                                debug!(
-                                    "Yield 2 File writer has been drop after complete file write "
-                                );
-                            }
-                        };
-
-                        let sendable_cb = Arc::new(cb);
-
-                        if let Err(e) = file_finishing_listener.send_event(
-                            FileFinishingEvEvent::FinishingFileWrite { cb: sendable_cb },
-                        ) {
-                            error!("e[{:?}", e)
-                        }
-                    };
-
-                    let cb_2_sendable = Arc::new(cb_2);
-                    self.register_finishing_callback(cb_2_sendable);
-                }
-                Err(e) => {
-                    warn!("on_file_written => content length not set  [{:?}]", e);
-                    let file_finishing_listener = self.file_finishing_listener.clone();
-
-                    let cb_2 = move || {
-                        let cb_sendable_clone = cb_sendable.clone();
-                        let file_len = file_len.clone();
-                        let pending_files_map_c_2 = pending_files_map_c.clone();
-                        let cb = move || {
-                            // FLushing
-
-                            let content_length_required = file_len
-                                .clone()
-                                .0
-                                .load(std::sync::atomic::Ordering::Acquire);
-                            cb_sendable_clone(content_length_required);
-                            if pending_files_map_c_2.yield_writer_by_id(handle_id) {
-                                debug!(
-                                    "Yield 3 File writer has been drop after complete file write "
-                                );
-                            }
-                        };
-
-                        let sendable_cb = Arc::new(cb);
-
-                        if let Err(e) = file_finishing_listener.send_event(
-                            FileFinishingEvEvent::FinishingFileWrite { cb: sendable_cb },
-                        ) {
-                            error!("e[{:?}", e)
-                        }
-                    };
-
-                    let cb_2_sendable = Arc::new(cb_2);
-                    self.register_finishing_callback(cb_2_sendable);
-                }
-            }
+                    let writer = state
+                        .writer
+                        .as_mut()
+                        .ok_or_else(|| io::Error::new(ErrorKind::NotFound, "no bufwriter"))?;
+                    writer.write_all(data)?;
+                    self.written.store(next, Ordering::Release);
+                    self.complete_if_ready(&mut state)
+                })();
+                let result = result.map_err(|error| {
+                    if state.can_close {
+                        error
+                    } else {
+                        state.fail(error)
+                    }
+                });
+                let callback = self.completion_callback(&result);
+                (result, callback)
+            };
+            self.settle(&result, callback);
+            result.map(|_| data.len()).map_err(|error| {
+                error!("File write failed: {error}");
+            })
+        }
+        /// Invoke the success callback after an exact byte count and successful
+        /// flush. Registration and completion share the writer lock. As before,
+        /// only the latest pending callback is retained; this is not a broadcast API.
+        /// I/O failure remains observable through flush/is_file_written.
+        pub fn on_file_written(&self, cb: impl Fn(usize) + Send + Sync + 'static) {
+            let written = self.written.clone();
+            self.register_finishing_callback(Arc::new(move || cb(written.load(Ordering::Acquire))));
         }
     }
 
@@ -537,9 +488,8 @@ mod writable_type {
     pub struct WritableItem {
         packet_id: usize,
         data: Vec<u8>,
-        writer: FileWriterHandle, // (_, bytes_written)
+        writer: FileWriterHandle,
     }
-
     impl WritableItem {
         pub fn new(data: Vec<u8>, packet_id: usize, writer: FileWriterHandle) -> Self {
             Self {
@@ -549,10 +499,12 @@ mod writable_type {
             }
         }
     }
-
     impl FileWritable for WritableItem {
         fn write_on_disk(&self) -> Result<usize, ()> {
             self.writer.write_on_disk(&self.data)
         }
     }
 }
+
+#[cfg(test)]
+mod tests;
