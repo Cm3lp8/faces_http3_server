@@ -69,6 +69,13 @@ impl InFlightStreamsPathVerifier {
         true
     }
 
+    pub(crate) fn remove_connection(&self, conn_id: &[u8]) {
+        self.stream_map
+            .lock()
+            .unwrap()
+            .retain(|key| key.conn_id != conn_id);
+    }
+
     #[inline]
     pub fn is_finished_request_a_valid_path(&self, conn_id: Vec<u8>, stream_id: u64) -> bool {
         let guard_stream_map = &mut *self.stream_map.lock().unwrap();

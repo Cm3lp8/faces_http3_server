@@ -113,6 +113,12 @@ mod thread_pool {
                                             temps_headers = headers
                                         }
                                         MiddleWareFlow::Abort(error_response) => {
+                                            if response_signal_sender
+                                                .send_rejected((stream_id, conn_id.clone()))
+                                                .is_err()
+                                            {
+                                                error!("Failed to signal rejected request");
+                                            }
                                             if let Err(r) =
                                                 middleware_job.send_done(MiddleWareResult::Abort {
                                                     error_response,
@@ -128,6 +134,12 @@ mod thread_pool {
                                     }
                                 }
                                 Err(e) => {
+                                    if response_signal_sender
+                                        .send_rejected((stream_id, conn_id.clone()))
+                                        .is_err()
+                                    {
+                                        error!("Failed to signal rejected request");
+                                    }
                                     if let Err(r) =
                                         middleware_job.send_done(MiddleWareResult::Abort {
                                             error_response: ErrorResponse::Error415(Some(

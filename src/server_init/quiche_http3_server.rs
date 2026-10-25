@@ -506,6 +506,7 @@ mod quiche_implementation {
                                 let request_path = extract_path_from_hdr(&list);
 
                                 if let Some(path) = request_path {
+                                    response_injection_buffer.begin_request(&conn_id, stream_id);
                                     if route_manager
                                         .in_flight_streams_path_verification()
                                         .insert_stream_path_for_conn(scid.clone(), stream_id, &path)
@@ -520,6 +521,10 @@ mod quiche_implementation {
                                         more_frames,
                                     );
                                 } else {
+                                    response_injection_buffer.cancel_request(&conn_id, stream_id);
+                                    route_manager
+                                        .in_flight_streams_path_verification()
+                                        .is_finished_request_a_valid_path(scid, stream_id);
                                     // H3_MESSAGE_ERROR: reject before recording a path or queuing work.
                                     let _ = client.conn.stream_shutdown(
                                         stream_id,
@@ -600,10 +605,20 @@ mod quiche_implementation {
                                         &response_injection,
                                     );
                                 } else {
+                                    response_injection_buffer.cancel_request(&trace_id, stream_id);
                                 }
                                 ()
                             }
-                            Ok((_stream_id, quiche::h3::Event::Reset { .. })) => (),
+                            Ok((stream_id, quiche::h3::Event::Reset { .. })) => {
+                                response_injection_buffer
+                                    .cancel_request(client.conn.trace_id(), stream_id);
+                                route_manager
+                                    .in_flight_streams_path_verification()
+                                    .is_finished_request_a_valid_path(
+                                        client.conn.source_id().to_vec(),
+                                        stream_id,
+                                    );
+                            }
                             Ok((_prioritized_element_id, quiche::h3::Event::PriorityUpdate)) => {
                                 debug!("prioritytupdate");
                                 ()
@@ -910,6 +925,10 @@ mod quiche_implementation {
             // Garbage collect closed connections.
             clients.retain(|_, ref mut c| {
                 if c.conn.is_closed() {
+                    response_injection_buffer.cancel_connection(c.conn.trace_id());
+                    route_manager
+                        .in_flight_streams_path_verification()
+                        .remove_connection(c.conn.source_id().as_ref());
                     debug!(
                         "{} connection collected {:?}",
                         c.conn.trace_id(),

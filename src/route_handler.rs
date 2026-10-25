@@ -575,8 +575,8 @@ mod route_handle_implementation {
             stream_id,
             &scid,
             headers,
-            true,
-            None,
+            is_end,
+            body,
             header_sender,
             header_priority,
         );
@@ -590,110 +590,52 @@ mod route_handle_implementation {
 
     pub fn send_error<S: Send + Sync + 'static + Clone, T: UserSessions<Output = T>>(
         error_type: ErrorResponse,
-        guard: &RouteManagerInner<S, T>,
+        _guard: &RouteManagerInner<S, T>,
         waker: &mio::Waker,
         chunk_dispatch_channel: &ChunksDispatchChannel,
         chunking_station: &ChunkingStation,
         scid: &[u8],
         stream_id: u64,
-        event_type: EventType,
+        _event_type: EventType,
         header_priority: HeaderPriority,
     ) {
-        chunk_dispatch_channel.insert_new_channel(stream_id, &scid);
-        let header_sender = chunk_dispatch_channel.get_high_priority_sender(stream_id, &scid);
-        match error_type {
-            ErrorResponse::Error401(content) => {
-                log::info!("in send error");
-                let headers = vec![h3::Header::new(b":status", b"401")];
-                send_headers(
-                    headers,
+        chunk_dispatch_channel.insert_new_channel(stream_id, scid);
+        let header_sender = chunk_dispatch_channel.get_high_priority_sender(stream_id, scid);
+        let (status, content) = match error_type {
+            ErrorResponse::Error401(content) => (b"401", content),
+            ErrorResponse::Error403(content) => (b"403", content),
+            ErrorResponse::Error415(content) => (b"415", content),
+        };
+        let body = match content.filter(|data| !data.is_empty()) {
+            Some(data) => {
+                let Some(sender) = chunk_dispatch_channel.get_low_priority_sender(stream_id, scid)
+                else {
+                    error!("Middleware error response queue unavailable");
+                    return;
+                };
+                Some(BodyType::Data {
                     stream_id,
-                    &scid,
-                    true,
-                    None,
-                    header_sender,
-                    header_priority,
-                    chunking_station,
-                );
+                    scid: scid.to_vec(),
+                    conn_id: String::new(),
+                    data,
+                    sender: Some(sender),
+                    conn_stats: None,
+                })
             }
-            ErrorResponse::Error403(content) => {
-                log::info!("in send error");
-                let headers = vec![h3::Header::new(b":status", b"403")];
-                send_headers(
-                    headers,
-                    stream_id,
-                    &scid,
-                    true,
-                    None,
-                    header_sender,
-                    header_priority,
-                    chunking_station,
-                );
-            }
-            ErrorResponse::Error415(content) => {
-                log::info!("in send error");
-                let headers = vec![h3::Header::new(b":status", b"401")];
-                send_headers(
-                    headers,
-                    stream_id,
-                    &scid,
-                    true,
-                    None,
-                    header_sender,
-                    header_priority,
-                    chunking_station,
-                );
-            }
-        }
-        if let Some((mut headers, body)) = guard.get_error_response(ErrorType::Error404) {
-            chunk_dispatch_channel.insert_new_channel(stream_id, &scid);
-            let header_sender = chunk_dispatch_channel.get_high_priority_sender(stream_id, &scid);
-            let body_sender = chunk_dispatch_channel.get_low_priority_sender(stream_id, &scid);
-            match body {
-                Some(body) => {
-                    let (_recv_send_confirmation, header_req) = HeaderRequest::new(
-                        stream_id,
-                        &scid,
-                        headers.clone(),
-                        false,
-                        Some(body),
-                        header_sender,
-                        header_priority,
-                    );
-
-                    if let Err(_) = chunk_dispatch_channel.send_to_high_priority_queue(
-                        stream_id,
-                        &scid,
-                        QueuedRequest::new_header(header_req),
-                    ) {
-                        error!("Failed to send header_req")
-                    }
-                    if let Err(e) = waker.wake() {
-                        error!("Failed to wake poll [{:?}]", e);
-                    };
-                }
-                None => {
-                    let (_recv_send_confirmation, header_req) = HeaderRequest::new(
-                        stream_id,
-                        &scid,
-                        headers.clone(),
-                        true,
-                        None,
-                        header_sender,
-                        header_priority,
-                    );
-                    if let Err(_) = chunking_station
-                        .get_chunking_dispatch_channel()
-                        .send_to_high_priority_queue(
-                            stream_id,
-                            &scid,
-                            QueuedRequest::new_header(header_req),
-                        )
-                    {
-                        error!("Failed to send header_req")
-                    }
-                }
-            }
+            None => None,
+        };
+        send_headers(
+            vec![h3::Header::new(b":status", status)],
+            stream_id,
+            scid,
+            body.is_none(),
+            body,
+            header_sender,
+            header_priority,
+            chunking_station,
+        );
+        if let Err(error) = waker.wake() {
+            error!("Failed to wake poll for middleware rejection: {error}");
         }
     }
     pub fn send_404<S: Send + Sync + 'static + Clone, T: UserSessions<Output = T>>(
@@ -731,9 +673,6 @@ mod route_handle_implementation {
                     ) {
                         error!("Failed to send header_req")
                     }
-                    if let Err(e) = waker.wake() {
-                        error!("Failed to wake poll [{:?}]", e);
-                    };
                 }
                 None => {
                     let (_recv_send_confirmation, header_req) = HeaderRequest::new(
@@ -758,8 +697,8 @@ mod route_handle_implementation {
                 }
             }
         } else {
-            let header_sender = chunk_dispatch_channel.get_high_priority_sender(stream_id, &scid);
             chunk_dispatch_channel.insert_new_channel(stream_id, &scid);
+            let header_sender = chunk_dispatch_channel.get_high_priority_sender(stream_id, &scid);
             let (_recv_send_confirmation, header_req) = HeaderRequest::new(
                 stream_id,
                 &scid,
@@ -771,14 +710,13 @@ mod route_handle_implementation {
             );
             if let Err(_) = chunking_station
                 .get_chunking_dispatch_channel()
-                .send_to_high_priority_queue(
-                    stream_id,
-                    &scid,
-                    QueuedRequest::new_header(header_req),
-                )
+                .send_to_high_priority_queue(stream_id, &scid, QueuedRequest::new_header(header_req))
             {
                 error!("Failed to send header_req")
             }
+        }
+        if let Err(error) = waker.wake() {
+            error!("Failed to wake poll for unknown route: {error}");
         }
     }
     pub fn response_preparation_with_route_handler<
@@ -1221,4 +1159,69 @@ mod route_handle_implementation {
             }
         }
     }
+    #[cfg(test)]
+    mod rejection_tests {
+        use super::*;
+        use crate::{test_support::TestSessions, RouteManager};
+        use quiche::h3::NameValue;
+        use std::{
+            sync::{Arc, Mutex},
+            time::Duration,
+        };
+
+        #[test]
+        fn middleware_errors_keep_their_status_and_body_without_appending_a_404() {
+            let mut builder = RouteManager::<_, TestSessions>::new_with_app_state(());
+            builder.set_error_handler(ErrorType::Error404, |error| {
+                error.header(&[h3::Header::new(b"x-test", b"404")]);
+            });
+            let router = builder.build();
+            let route = router.routes_handler();
+            let mut poll = mio::Poll::new().unwrap();
+            let waker = Arc::new(mio::Waker::new(poll.registry(), mio::Token(0)).unwrap());
+            let station = ChunkingStation::new(waker.clone(), Arc::new(Mutex::new(Duration::ZERO)));
+            let queues = station.get_chunking_dispatch_channel();
+            for (id, error, status, length) in [
+                (
+                    0,
+                    ErrorResponse::Error401(Some(b"token_expired".to_vec())),
+                    b"401",
+                    Some(13),
+                ),
+                (4, ErrorResponse::Error403(None), b"403", None),
+                (8, ErrorResponse::Error415(Some(vec![])), b"415", None),
+            ] {
+                route.inner(|guard| {
+                    send_error(
+                        error,
+                        guard,
+                        &waker,
+                        &queues,
+                        &station,
+                        &[1],
+                        id,
+                        EventType::OnFinished,
+                        HeaderPriority::SendHeader,
+                    )
+                });
+                match queues.try_pop(id, &[1]).unwrap() {
+                    QueuedRequest::Header(header) => {
+                        assert!(header
+                            .get_headers()
+                            .iter()
+                            .any(|h| h.name() == b":status" && h.value() == status));
+                        assert_eq!(header.attached_body_len(), length);
+                        assert_eq!(header.is_end(), length.is_none());
+                    }
+                    _ => panic!("expected response header"),
+                }
+                assert!(queues.try_pop(id, &[1]).is_err());
+                let mut events = mio::Events::with_capacity(4);
+                poll.poll(&mut events, Some(Duration::from_millis(100)))
+                    .unwrap();
+                assert!(!events.is_empty(), "error response must wake the poll loop");
+            }
+        }
+    }
+
 }

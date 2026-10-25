@@ -109,6 +109,12 @@ mod req_temp_table {
                 table: Arc::new(DashMap::new()),
             }
         }
+        pub(crate) fn discard_request(&self, conn_id: &str, stream_id: u64) {
+            self.table.remove(&(conn_id.to_owned(), stream_id));
+        }
+        pub(crate) fn discard_connection(&self, conn_id: &str) {
+            self.table.retain(|(connection, _), _| connection != conn_id);
+        }
         pub fn set_intermediate_headers_send(&self, stream_id: u64, conn_id: String) {
             if let Some(mut entry) = self.table.get_mut(&(conn_id, stream_id)) {
                 entry.progress_header_sent = true;

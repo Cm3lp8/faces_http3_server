@@ -197,8 +197,12 @@ mod dispatcher {
             &self,
             msg: QueuedRequest,
         ) -> Result<(), crossbeam_channel::SendError<QueuedRequest>> {
-            self.counter.try_increment();
-            self.sender.send(msg)
+            let incremented = self.counter.try_increment();
+            let result = self.sender.send(msg);
+            if result.is_err() && incremented {
+                self.counter.decrement();
+            }
+            result
         }
     }
 
@@ -269,4 +273,19 @@ mod dispatcher {
             }
         }
     }
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        #[test]
+        fn failed_send_does_not_inflate_the_queue_counter() {
+            let (sender, receiver) = crossbeam_channel::unbounded();
+            drop(receiver);
+            let counter = ChunkCounter::new(2);
+            let sender = ChunkSender::new(sender, counter);
+            let body = crate::request_response::BodyRequest::new(0, "", &[], 0, vec![1], true);
+            assert!(sender.send(QueuedRequest::StreamData(body)).is_err());
+            assert_eq!(sender.in_queue(), 0);
+        }
+    }
+
 }

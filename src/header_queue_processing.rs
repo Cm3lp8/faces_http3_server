@@ -78,6 +78,7 @@ mod header_reception {
         file_writer_manager: Arc<FileWriter>,
         workers: Arc<ThreadPool<T>>,
         response_processing_pool_injector: ResponsePoolProcessingSender,
+        response_signal_sender: SignalNewRequest,
     }
 
     impl<S: Send + Sync + 'static + Clone, T: UserSessions<Output = T>> HeaderProcessing<S, T> {
@@ -110,6 +111,7 @@ mod header_reception {
                 waker,
                 workers,
                 response_processing_pool_injector,
+                response_signal_sender,
             }
         }
         #[inline]
@@ -135,6 +137,7 @@ mod header_reception {
                 &self.chunking_station,
                 &self.waker,
                 &self.response_processing_pool_injector,
+                &self.response_signal_sender,
             );
         }
     }
@@ -242,7 +245,7 @@ mod workers {
     use crate::{
         header_queue_processing::middleware_worker::MiddleWareJob,
         request_response::{ChunkingStation, ChunksDispatchChannel, HeaderPriority},
-        response_queue_processing::{self, ResponsePoolProcessingSender},
+        response_queue_processing::{self, ResponsePoolProcessingSender, SignalNewRequest},
         route_events::EventType,
         route_handler::{self, send_404, send_error},
         stream_sessions::UserSessions,
@@ -262,6 +265,7 @@ mod workers {
         chunking_station: &ChunkingStation,
         mio_waker: &Arc<mio::Waker>,
         response_processing_pool_sender: &ResponsePoolProcessingSender,
+        response_signal_sender: &SignalNewRequest,
     ) {
         let route_handler = route_handler.clone();
         let route_handler_clone = route_handler.clone();
@@ -273,6 +277,7 @@ mod workers {
         let mio_waker_cl = mio_waker.clone();
         let response_processing_pool_injector = response_processing_pool_sender.clone();
         let stream_sessions = route_handler.stream_sessions();
+        let response_signal_sender = response_signal_sender.clone();
         std::thread::spawn(move || {
             while let Ok(header_msg) = receiver.recv() {
                 let stream_id = header_msg.stream_id();
@@ -325,6 +330,12 @@ mod workers {
                     }) {
                         continue;
                     }
+                }
+                if response_signal_sender
+                    .send_rejected((stream_id, header_msg.conn_id()))
+                    .is_err()
+                {
+                    error!("Failed to signal unknown route rejection");
                 }
                 route_handler.inner(|guard| {
                     send_404(

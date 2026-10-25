@@ -306,43 +306,62 @@ mod stream_sessions {
                 false
             }
         }
+        /// Success means every capsule was queued and the poll loop was notified.
+        /// A send failure can occur after earlier targets were queued; it is not
+        /// an atomic multicast and never proves delivery to a peer.
         fn send_one_or_more_message_on_stream<U: Decode<()> + Encode + Clone>(
             &self,
             connection_ids: &[(&[u8], u64)],
             data_cb: impl Fn(&(&[u8], u64)) -> Result<(StreamMessageCapsule<U>, Vec<u8>), String>,
         ) -> Result<Vec<StreamMessageCapsule<U>>, String> {
-            let mut capsules: Vec<StreamMessageCapsule<U>> = vec![];
-            for conn_ids in connection_ids {
-                let Ok((capsule, data)) = (data_cb)(conn_ids) else {
-                    return Err(String::from("Failed to encode capsule"));
-                };
-                let framed_data = match data.prepend_frame() {
-                    Ok(frame) => frame,
-                    Err(e) => {
-                        error!("failed to prepend_frame [{:?}]", e);
-                        return Err("failed to prepend_frame".to_owned());
-                    }
-                };
-                if let Some(chunking_station) = &self.chunking_station {
-                    let body_sender = chunking_station.get_body_sender(*conn_ids);
-
-                    let body_request =
-                        BodyRequest::new(conn_ids.1, "", conn_ids.0, 0, framed_data.clone(), false);
-
-                    if let Some(sender) = body_sender {
-                        if let Err(e) = sender.send(
-                            crate::request_response::QueuedRequest::StreamData(body_request),
-                        ) {
-                            error!("failed to send payload");
-                        } else {
-                            if let Err(e) = chunking_station.wake_poll() {
-                                error!("failed to wake poll");
-                            }
-                        }
-                    }
+            if connection_ids.is_empty() {
+                return Err("no stream targets".to_owned());
+            }
+            let station = self
+                .chunking_station
+                .as_ref()
+                .ok_or("chunking station unavailable")?;
+            // Resolve every queue before encoding or sending to avoid a partial
+            // enqueue when a target is already absent.
+            let senders = connection_ids
+                .iter()
+                .map(|ids| {
+                    station
+                        .get_body_sender(*ids)
+                        .ok_or_else(|| "stream queue unavailable".to_owned())
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let prepared = connection_ids
+                .iter()
+                .map(|ids| {
+                    let (capsule, data) = data_cb(ids)?;
+                    let framed = data
+                        .prepend_frame()
+                        .map_err(|_| "failed to frame capsule".to_owned())?;
+                    Ok((
+                        capsule,
+                        BodyRequest::new(ids.1, "", ids.0, 0, framed, false),
+                    ))
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            let mut capsules = Vec::with_capacity(prepared.len());
+            for (sender, (capsule, body)) in senders.into_iter().zip(prepared) {
+                if sender
+                    .send(crate::request_response::QueuedRequest::StreamData(body))
+                    .is_err()
+                {
+                    // Earlier targets may already contain their capsule.
+                    let _ = station.wake_poll();
+                    return Err(format!(
+                        "stream queue disconnected after {} accepted targets",
+                        capsules.len()
+                    ));
                 }
                 capsules.push(capsule);
             }
+            station
+                .wake_poll()
+                .map_err(|error| format!("failed to wake poll: {error}"))?;
             Ok(capsules)
         }
         fn send_one_message_on_stream<U: Decode<()> + Encode + Clone>(
@@ -350,36 +369,9 @@ mod stream_sessions {
             conn_ids: (&[u8], u64),
             data_cb: impl Fn(&(&[u8], u64)) -> Result<(StreamMessageCapsule<U>, Vec<u8>), String>,
         ) -> Result<StreamMessageCapsule<U>, String> {
-            let Ok((capsule, data)) = (data_cb)(&conn_ids) else {
-                return Err(String::from("Failed to encode capsule"));
-            };
-            let framed_data = match data.prepend_frame() {
-                Ok(frame) => frame,
-                Err(e) => {
-                    error!("failed to prepend_frame [{:?}]", e);
-                    return Err("failed to prepend_frame".to_owned());
-                }
-            };
-            if let Some(chunking_station) = &self.chunking_station {
-                let body_sender = chunking_station.get_body_sender(conn_ids);
-
-                let body_request =
-                    BodyRequest::new(conn_ids.1, "", conn_ids.0, 0, framed_data.clone(), false);
-
-                if let Some(sender) = body_sender {
-                    if let Err(e) = sender.send(crate::request_response::QueuedRequest::StreamData(
-                        body_request,
-                    )) {
-                        error!("failed to send payload");
-                    } else {
-                        if let Err(e) = chunking_station.wake_poll() {
-                            error!("failed to wake poll [{:?}]", e);
-                        }
-                    }
-                }
-            }
-
-            Ok(capsule)
+            self.send_one_or_more_message_on_stream(&[conn_ids], data_cb)?
+                .pop()
+                .ok_or_else(|| "no queued capsule".to_owned())
         }
     }
 
@@ -416,6 +408,96 @@ mod stream_sessions {
                     register.sessions.entry(path.to_owned()).or_insert(stream);
                 });
             };
+        }
+    }
+
+    #[cfg(test)]
+    mod delivery_tests {
+        use super::*;
+        use crate::{request_response::QueuedRequest, test_support::TestSessions};
+        use std::time::Duration;
+
+        fn encoded(ids: &(&[u8], u64)) -> Result<(StreamMessageCapsule<u64>, Vec<u8>), String> {
+            Ok((StreamMessageCapsule::new(&42, ids.0, ids.1), vec![1, 2, 3]))
+        }
+        fn station() -> (mio::Poll, ChunkingStation) {
+            let poll = mio::Poll::new().unwrap();
+            let waker = Arc::new(mio::Waker::new(poll.registry(), mio::Token(0)).unwrap());
+            let station = ChunkingStation::new(waker, Arc::new(Mutex::new(Duration::ZERO)));
+            (poll, station)
+        }
+
+        #[test]
+        fn unavailable_targets_never_report_success_or_enqueue_a_partial_known_set() {
+            let mut session = StreamSessionsInner::<TestSessions>::new();
+            assert!(session
+                .send_one_message_on_stream((&[1], 0), encoded)
+                .is_err());
+            let (_poll, station) = station();
+            let queues = station.get_chunking_dispatch_channel();
+            session.chunking_station = Some(station);
+            assert!(session
+                .send_one_message_on_stream((&[1], 0), encoded)
+                .is_err());
+            assert!(session
+                .send_one_or_more_message_on_stream::<u64>(&[], encoded)
+                .is_err());
+            queues.insert_new_channel(0, &[1]);
+            assert!(session
+                .send_one_or_more_message_on_stream(&[(&[1], 0), (&[1], 4)], encoded)
+                .is_err());
+            assert_eq!(queues.in_queue(0, &[1]).unwrap(), 0);
+            queues.insert_new_channel(4, &[1]);
+            assert!(session
+                .send_one_or_more_message_on_stream(&[(&[1], 0), (&[1], 4)], |ids| {
+                    if ids.1 == 4 {
+                        Err("encoding failure".into())
+                    } else {
+                        encoded(ids)
+                    }
+                })
+                .is_err());
+            assert_eq!(queues.in_queue(0, &[1]).unwrap(), 0);
+        }
+
+        #[test]
+        fn successful_capsules_are_present_in_every_target_queue() {
+            let (_poll, station) = station();
+            let queues = station.get_chunking_dispatch_channel();
+            for stream in [0, 4] {
+                queues.insert_new_channel(stream, &[1]);
+            }
+            let mut session = StreamSessionsInner::<TestSessions>::new();
+            session.chunking_station = Some(station);
+            let capsules = session
+                .send_one_or_more_message_on_stream(&[(&[1], 0), (&[1], 4)], encoded)
+                .unwrap();
+            assert_eq!(capsules.len(), 2);
+            for stream in [0, 4] {
+                match queues.try_pop(stream, &[1]).unwrap() {
+                    QueuedRequest::StreamData(mut body) => {
+                        assert_eq!(body.stream_id(), stream);
+                        assert_eq!(body.scid(), &[1]);
+                        assert!(body.take_data().ends_with(&[1, 2, 3]));
+                    }
+                    _ => panic!("expected stream payload"),
+                }
+                assert_eq!(queues.in_queue(stream, &[1]).unwrap(), 0);
+            }
+        }
+
+        #[test]
+        fn queue_disconnect_after_lookup_is_propagated() {
+            let (_poll, station) = station();
+            let queues = station.get_chunking_dispatch_channel();
+            queues.insert_new_channel(0, &[1]);
+            let mut session = StreamSessionsInner::<TestSessions>::new();
+            session.chunking_station = Some(station);
+            let result = session.send_one_message_on_stream((&[1], 0), |ids| {
+                queues.remove_stream(ids.1, ids.0);
+                encoded(ids)
+            });
+            assert!(result.is_err());
         }
     }
 }
