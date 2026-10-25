@@ -400,58 +400,109 @@ mod workers {
         });
     }
 
+    /// Validate once before admitting a request to the middleware/response queues.
     pub fn extract_path_from_hdr(headers: &[h3::Header]) -> Option<String> {
-        let mut path: Option<String> = None;
+        parse_request_headers(headers).map(|(_, path, _)| path)
+    }
 
-        {
-            for hdr in headers {
-                match hdr.name() {
-                    b":path" => path = Some(String::from_utf8(hdr.value().to_vec()).unwrap()),
-                    _ => {}
+    fn parse_request_headers(headers: &[h3::Header]) -> Option<(Vec<u8>, String, Option<usize>)> {
+        let mut method = None;
+        let mut path = None;
+        let mut content_length = None;
+        for header in headers {
+            match header.name() {
+                b":method" => {
+                    if method.is_some() || H3Method::parse(header.value()).is_err() {
+                        return None;
+                    }
+                    method = Some(header.value().to_vec());
                 }
+                b":path" => {
+                    if path.is_some() {
+                        return None;
+                    }
+                    let value = std::str::from_utf8(header.value()).ok()?;
+                    if value.is_empty() || value.bytes().any(|b| b <= b' ' || b == 127) {
+                        return None;
+                    }
+                    path = Some(value.to_owned());
+                }
+                b"content-length" => {
+                    if content_length.is_some()
+                        || header.value().is_empty()
+                        || !header.value().iter().all(u8::is_ascii_digit)
+                    {
+                        return None;
+                    }
+                    content_length = Some(std::str::from_utf8(header.value()).ok()?.parse().ok()?);
+                }
+                _ => {}
             }
         }
-        path
+        Some((method?, path?, content_length))
     }
+
     fn extract_method_path_content_length(
         headers: &[h3::Header],
     ) -> (Option<Vec<u8>>, Option<String>, Option<usize>) {
-        let mut method: Option<Vec<u8>> = None;
-        let mut path: Option<String> = None;
-        let mut content_length: Option<usize> = None;
+        match parse_request_headers(headers) {
+            Some((method, path, length)) => (Some(method), Some(path), length),
+            None => (None, None, None),
+        }
+    }
 
-        {
-            for hdr in headers {
-                match hdr.name() {
-                    b":method" => method = Some(hdr.value().to_vec()),
-                    b":path" => path = Some(String::from_utf8(hdr.value().to_vec()).unwrap()),
-                    b"content-length" => {
-                        if let Some(method) = &method {
-                            if let Ok(method_parsed) = H3Method::parse(&method) {
-                                if H3Method::POST == method_parsed || H3Method::PUT == method_parsed
-                                {
-                                    content_length = Some(
-                                    std::str::from_utf8(hdr.value())
-                                .unwrap_or_else(|item| {
-                                    error!(
-                                        "Failed to parse bytes into str, default is \"0\" length "
-                                    );
-                                    "0"
-                                })
-                                .parse::<usize>()
-                                .unwrap_or_else(|_| {
-                                    error!("Failed to parse digit_string to usize. Default is \"0\" length");
-                                    0
-                                }),
-                        )
-                                }
-                            }
-                        }
-                    }
-                    _ => {}
-                }
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn parses_length_independently_of_header_order() {
+            let headers = [
+                h3::Header::new(b"content-length", b"12"),
+                h3::Header::new(b":path", b"/upload"),
+                h3::Header::new(b":method", b"POST"),
+            ];
+            assert_eq!(
+                parse_request_headers(&headers),
+                Some((b"POST".to_vec(), "/upload".into(), Some(12)))
+            );
+        }
+
+        #[test]
+        fn rejects_malformed_headers_without_panicking() {
+            for value in [b"\xff".as_slice(), b"", b"/bad path", b"/bad\r\npath"] {
+                let headers = [
+                    h3::Header::new(b":path", value),
+                    h3::Header::new(b":method", b"GET"),
+                ];
+                assert!(extract_path_from_hdr(&headers).is_none());
+            }
+            for value in [b"-1".as_slice(), b"+1", b"x", b"184467440737095516160", b""] {
+                let headers = [
+                    h3::Header::new(b":path", b"/"),
+                    h3::Header::new(b":method", b"POST"),
+                    h3::Header::new(b"content-length", value),
+                ];
+                assert!(extract_path_from_hdr(&headers).is_none());
             }
         }
-        (method, path, content_length)
+
+        #[test]
+        fn rejects_missing_or_duplicate_routing_headers() {
+            assert!(extract_path_from_hdr(&[h3::Header::new(b":path", b"/")]).is_none());
+            for duplicate in [
+                h3::Header::new(b":path", b"/other"),
+                h3::Header::new(b":method", b"POST"),
+                h3::Header::new(b"content-length", b"0"),
+            ] {
+                let mut headers = vec![
+                    h3::Header::new(b":path", b"/"),
+                    h3::Header::new(b":method", b"GET"),
+                    h3::Header::new(b"content-length", b"0"),
+                ];
+                headers.push(duplicate);
+                assert!(extract_path_from_hdr(&headers).is_none());
+            }
+        }
     }
 }

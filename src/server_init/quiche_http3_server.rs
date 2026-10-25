@@ -497,9 +497,10 @@ mod quiche_implementation {
                         let http3_conn = client.http3_conn.as_mut().unwrap();
                         match http3_conn.poll(&mut client.conn) {
                             Ok((stream_id, quiche::h3::Event::Headers { list, more_frames })) => {
-                                if more_frames {
-                                    log::info!("stream_id [{:?}] new _hdr [{:#?}]", stream_id, list)
-                                }
+                                debug!(
+                                    "stream_id={stream_id} headers_received count={}",
+                                    list.len()
+                                );
                                 let scid = client.conn.source_id().as_ref().to_vec();
                                 let conn_id = client.conn.trace_id().to_string();
                                 let request_path = extract_path_from_hdr(&list);
@@ -517,6 +518,18 @@ mod quiche_implementation {
                                         conn_id,
                                         list.clone(),
                                         more_frames,
+                                    );
+                                } else {
+                                    // H3_MESSAGE_ERROR: reject before recording a path or queuing work.
+                                    let _ = client.conn.stream_shutdown(
+                                        stream_id,
+                                        quiche::Shutdown::Read,
+                                        0x10e,
+                                    );
+                                    let _ = client.conn.stream_shutdown(
+                                        stream_id,
+                                        quiche::Shutdown::Write,
+                                        0x10e,
                                     );
                                 }
                             }
