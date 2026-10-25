@@ -210,3 +210,55 @@ The implementation served as a practical environment for experimenting with thes
 
 # Licence
 MIT
+
+
+# Retry token policy
+
+The QUIC listener validates Retry tokens before allocating a connection. Tokens
+use HMAC-SHA256 through the existing `ring` dependency, with a random key dedicated
+to each server-loop lifetime. The authenticated input binds the source IP **and
+UDP port**, the server's Retry connection ID, the original destination connection
+ID, a format version, and a monotonic issue time. Tokens are 50–62 bytes; both
+issuance and validation enforce an original DCID length of 8–20 bytes. The server
+continues to emit 20-byte Retry connection IDs.
+
+A token expires at an age of 30 seconds (millisecond resolution). Unknown formats,
+truncations, suffixes, future timestamps, wrong addresses or connection IDs, and
+invalid authentication tags are dropped without a response or connection
+allocation. Token contents are not logged. The 30-second window is this server's
+policy, not a requirement imposed by QUIC.
+
+A NAT port change between the Retry and the next Initial invalidates the token.
+Restarting the server also invalidates outstanding tokens. In either case, or on
+expiration, the client must establish a new connection with a fresh Retry. A valid
+token can be reused for the same address and Retry CID during its validity window;
+this is **not** single-use token enforcement or HTTP 0-RTT replay protection. This
+change does not alter early data, scheduling, quotas, routing, or persistence.
+There is no shared key or cross-instance token validation.
+
+The policy follows the integrity protection and address-binding guidance in
+[RFC 9000 section 8.1.4](https://www.rfc-editor.org/rfc/rfc9000.html#section-8.1.4).
+
+## Local Retry regression tests
+
+Run the transport tests, including the loopback fixture but excluding its child
+entry point:
+
+```sh
+cargo test --locked --offline --lib -- --include-ignored --skip server_init::retry_loopback::retry_server_child --show-output
+```
+
+The fixture requires loopback UDP and `openssl`. It owns a disposable child
+server, key and certificate; it checks invalid Initial/Retry cases and then a
+fresh real QUIC Retry, verified loopback TLS, and HTTP/3 200 response. It kills
+and waits for its child on success or assertion failure, removing temporary files
+on success and retaining diagnostics on failure. Wire silence checks availability
+and absence of a reply; the unit tests plus validation-before-accept control flow
+establish token rejection before connection allocation. IPv6 binding and exact
+expiration boundaries are covered by unit tests without sleeping. These local
+tests do not establish Android or production-network behavior.
+
+When validating a backend, resolve this checkout as the transport in an isolated
+integration manifest and inspect `cargo metadata`; testing the backend's existing
+Git pin does not test this change. Preserve each lockfile: the standalone transport
+currently resolves quiche 0.23.2, while the backend integration resolves 0.23.7.
