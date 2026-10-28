@@ -113,5 +113,6 @@ fn main() {
         .add_key_path("/home/camille/Documents/rust/faces_http3_server/key.pem")
         .add_cert_path("/home/camille/Documents/rust/faces_http3_server/cert.pem")
         .set_file_storage_path("/home/camille/.temp_server/")
-        .run_blocking(router);
+        .try_run_blocking(router)
+        .expect("example server failed");
 }

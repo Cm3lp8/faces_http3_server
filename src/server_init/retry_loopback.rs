@@ -31,7 +31,8 @@ fn retry_server_child() {
         .add_cert_path(root.join("cert.pem"))
         .add_key_path(root.join("key.pem"))
         .set_file_storage_path(root.join("staging"))
-        .run_blocking(router);
+        .try_run_blocking(router)
+        .expect("isolated Retry server failed");
 }
 
 struct Server {

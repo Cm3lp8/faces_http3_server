@@ -35,7 +35,9 @@ mod route_events;
 mod route_handler;
 mod route_manager;
 mod server_config;
+mod server_error;
 mod server_init;
+pub use server_error::ServerRunError;
 mod stream_sessions;
 pub use server_init::Http3Server;
 mod conn_statistics;
@@ -61,6 +63,7 @@ pub mod prelude {
     };
     pub use crate::server_init::Http3Server;
     pub use crate::stream_sessions::StreamMessageCapsule;
+    pub use crate::ServerRunError;
     pub use crate::StreamBridge;
     pub use crate::StreamHandle;
     pub use crate::StreamIdent;

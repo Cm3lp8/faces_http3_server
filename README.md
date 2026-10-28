@@ -35,6 +35,32 @@ This approach allowed architectural decisions to emerge from concrete needs enco
 
 The framework focuses on **separating networking infrastructure from application logic**.
 
+## Blocking startup and worker errors
+
+Use `try_run_blocking(router)` to receive a `Result<(), ServerRunError>`. It builds
+configuration fallibly, starts the actual network worker with `thread::Builder`,
+and joins it. Startup failures, fatal network errors, an unexpected normal return
+and an unwinding panic are reported to the caller. Applications must propagate
+that error to their own exit decision. The library does not terminate the process.
+
+TLS/QUIC/HTTP3, entropy, the socket and its poller/waker are prepared before the
+transport processing workers start. `network_ready` is logged afterwards; an
+actual HTTP3 response remains necessary to verify service availability. PEM loading
+is not a complete certificate/deployment qualification.
+
+The existing `build()` and `run_blocking()` signatures remain available as panic
+facades for compatibility. Their panic occurs on the caller and can be caught by
+an external consumer. `try_build()` and `try_run_blocking()` are the fallible paths.
+The detached `run()` API is not supervised by this change. Secondary workers,
+graceful shutdown, restart policy and detection of a live but stuck worker remain
+outside this guarantee. `panic=abort` terminates the process before join can return
+a typed panic error.
+
+The startup subprocess tests inject errors only under `cfg(test)`, inside the real
+network worker after preparation and a parent-controlled barrier. No fault route,
+production feature or production environment switch is provided. Test processes
+use loopback, disposable certificates, bounded waits and kill/wait cleanup.
+
 ---
 
 # Architecture Overview

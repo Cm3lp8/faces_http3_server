@@ -14,6 +14,7 @@ mod server_config_builder {
     };
 
     use crate::route_handler::RouteHandler;
+    use crate::ServerRunError;
 
     use super::*;
 
@@ -85,44 +86,43 @@ mod server_config_builder {
             self.key = Some(path.as_ref().to_path_buf());
             self
         }
+        /// Fallible configuration construction; never discards a storage error.
+        pub fn try_build(&mut self) -> Result<ServerConfig, ServerRunError> {
+            let address = self
+                .server_socket_address
+                .as_deref()
+                .ok_or(ServerRunError::Configuration("address"))?
+                .parse()
+                .map_err(|_| ServerRunError::Configuration("address"))?;
+            let storage = self
+                .file_storage_path
+                .as_ref()
+                .ok_or(ServerRunError::Configuration("storage_path"))?;
+            let cert = self
+                .cert
+                .as_ref()
+                .and_then(|path| path.to_str())
+                .ok_or(ServerRunError::Configuration("certificate_path"))?;
+            let key = self
+                .key
+                .as_ref()
+                .and_then(|path| path.to_str())
+                .ok_or(ServerRunError::Configuration("key_path"))?;
+            std::fs::create_dir_all(storage)
+                .map_err(|error| ServerRunError::io("storage", error))?;
+            Ok(ServerConfig {
+                server_socket_address: address,
+                file_storage_path: storage.clone(),
+                cert: cert.to_owned(),
+                key: key.to_owned(),
+            })
+        }
+
+        /// Compatibility facade. Panics on the caller on invalid configuration.
+        /// Consumers that need to handle errors should use `try_build`.
         pub fn build(&mut self) -> ServerConfig {
-            if let Err(_) = std::fs::create_dir_all(self.file_storage_path.as_ref().unwrap()) {
-                error!("failed creating path");
-            }
-            ServerConfig {
-                server_socket_address: self
-                    .server_socket_address
-                    .as_ref()
-                    .unwrap()
-                    .parse()
-                    .expect("can't get the socket address"),
-                file_storage_path: self
-                    .file_storage_path
-                    .as_ref()
-                    .unwrap_or_else(|| {
-                        error!("No file storage path set ");
-                        panic!()
-                    })
-                    .clone(),
-                cert: self
-                    .cert
-                    .as_ref()
-                    .unwrap_or_else(|| {
-                        error!("No certification file set ");
-                        panic!()
-                    })
-                    .to_string_lossy()
-                    .to_string(),
-                key: self
-                    .key
-                    .as_ref()
-                    .unwrap_or_else(|| {
-                        error!("No key file set ");
-                        panic!()
-                    })
-                    .to_string_lossy()
-                    .to_string(),
-            }
+            self.try_build()
+                .unwrap_or_else(|error| panic!("server configuration failed: {error}"))
         }
     }
 }

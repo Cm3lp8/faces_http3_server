@@ -189,7 +189,7 @@ mod quiche_implementation {
         server_config::RouteHandler,
         server_init::{quiche_http3_server, retry_token::RetryTokens},
         stream_sessions::UserSessions,
-        RouteManager, ServerConfig,
+        RouteManager, ServerConfig, ServerRunError,
     };
 
     use super::*;
@@ -205,24 +205,47 @@ mod quiche_implementation {
     pub fn run<S: Send + Sync + 'static + Clone, T: UserSessions<Output = T>>(
         server_config: Arc<ServerConfig>,
         route_manager: RouteManager<S, T>,
-    ) {
-        let retry_tokens = match RetryTokens::new() {
-            Ok(tokens) => tokens,
-            Err(_) => {
-                error!("Could not initialize Retry token key");
-                return;
-            }
-        };
+    ) -> Result<(), ServerRunError> {
+        // Prepare every network prerequisite before starting the processing workers.
+        let retry_tokens = RetryTokens::new().map_err(|_| ServerRunError::Entropy("retry_key"))?;
+        let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION)
+            .map_err(|error| ServerRunError::quic("quic_config", error))?;
+        config
+            .load_cert_chain_from_pem_file(server_config.cert_path())
+            .map_err(|error| ServerRunError::quic("certificate", error))?;
+        config
+            .load_priv_key_from_pem_file(server_config.key_path())
+            .map_err(|error| ServerRunError::quic("private_key", error))?;
+        config
+            .set_application_protos(quiche::h3::APPLICATION_PROTOCOL)
+            .map_err(|error| ServerRunError::quic("alpn", error))?;
+        config.set_max_idle_timeout(20_000);
+        config.set_max_recv_udp_payload_size(MAX_DATAGRAM_SIZE);
+        config.set_max_send_udp_payload_size(MAX_DATAGRAM_SIZE);
+        config.set_initial_max_data(100_000_000);
+        config.set_initial_max_stream_data_bidi_local(200_000_000);
+        config.set_initial_max_stream_data_bidi_remote(200_000_000);
+        config.set_initial_max_stream_data_uni(100_000_000);
+        config.set_initial_max_streams_bidi(100);
+        config.set_initial_max_streams_uni(100);
+        config.set_disable_active_migration(true);
+        config.set_cc_algorithm(quiche::CongestionControlAlgorithm::BBR2);
+        config.enable_early_data();
+        let h3_config = quiche::h3::Config::new().map_err(ServerRunError::Http3)?;
+        let rng = SystemRandom::new();
+        let conn_id_seed = ring::hmac::Key::generate(ring::hmac::HMAC_SHA256, &rng)
+            .map_err(|_| ServerRunError::Entropy("connection_id_key"))?;
         let mut buf = [0; 65535];
         let mut out = [0; MAX_DATAGRAM_SIZE];
 
         let mut last_send_instant: Option<Instant> = None;
         // Setup the event loop.
-        let mut poll = mio::Poll::new().unwrap();
+        let mut poll = mio::Poll::new().map_err(|error| ServerRunError::io("poll_setup", error))?;
         let mut events = mio::Events::with_capacity(8192 * 16);
         // Create the UDP listening socket, and register it with the event loop.
         info!("try socket at [{:?}]", server_config.server_address());
-        let mut socket = mio::net::UdpSocket::bind(*server_config.server_address()).unwrap();
+        let mut socket = mio::net::UdpSocket::bind(*server_config.server_address())
+            .map_err(|error| ServerRunError::io("udp_bind", error))?;
         info!("socket [{:?}]", socket);
         poll.registry()
             .register(
@@ -230,9 +253,15 @@ mod quiche_implementation {
                 mio::Token(0),
                 mio::Interest::READABLE | mio::Interest::WRITABLE,
             )
-            .unwrap();
+            .map_err(|error| ServerRunError::io("udp_register", error))?;
 
-        let waker = Arc::new(Waker::new(poll.registry(), WAKER_TOKEN).unwrap());
+        let waker = Arc::new(
+            Waker::new(poll.registry(), WAKER_TOKEN)
+                .map_err(|error| ServerRunError::io("waker", error))?,
+        );
+        let local_addr = socket
+            .local_addr()
+            .map_err(|error| ServerRunError::io("local_address", error))?;
         let waker_clone = waker.clone();
         // init the request Response queue with mio waker
         let response_queue = ResponseQueue::<QueuedRequest>::new(waker_clone.clone());
@@ -282,40 +311,16 @@ mod quiche_implementation {
             response_injection_buffer.register(response_injection)
         });
 
-        // Create the configuration for the QUIC connections.
-        let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
-
-        if let Err(e) = config.load_cert_chain_from_pem_file(server_config.cert_path()) {
-            let e = e.to_string();
-            error!("cert[{:?}]", e)
-        }
-        if let Err(e) = config.load_priv_key_from_pem_file(server_config.key_path()) {
-            error!("key [{:?}]", e)
-        }
-        config
-            .set_application_protos(quiche::h3::APPLICATION_PROTOCOL)
-            .unwrap();
-        config.set_max_idle_timeout(20_000);
-        config.set_max_recv_udp_payload_size(MAX_DATAGRAM_SIZE);
-        config.set_max_send_udp_payload_size(MAX_DATAGRAM_SIZE);
-        config.set_initial_max_data(100_000_000);
-        config.set_initial_max_stream_data_bidi_local(200_000_000);
-        config.set_initial_max_stream_data_bidi_remote(200_000_000);
-        config.set_initial_max_stream_data_uni(100_000_000);
-        config.set_initial_max_streams_bidi(100);
-        config.set_initial_max_streams_uni(100);
-        config.set_disable_active_migration(true);
-        config.set_cc_algorithm(quiche::CongestionControlAlgorithm::BBR2);
-        config.enable_early_data();
-        let h3_config = quiche::h3::Config::new().unwrap();
-        let rng = SystemRandom::new();
-        let conn_id_seed = ring::hmac::Key::generate(ring::hmac::HMAC_SHA256, &rng).unwrap();
         let mut clients = ClientMap::new();
-        let local_addr = socket.local_addr().unwrap();
         let mut total = 0;
         let mut send_packet_time = Instant::now();
         let mut round = 0;
-        //let mut last_instant: Option<Instant> = None;
+        info!("network_ready address={local_addr}");
+
+        #[cfg(test)]
+        if let Some(result) = crate::server_init::startup_tests::after_network_ready(local_addr) {
+            return result;
+        }
 
         loop {
             round += 1;
@@ -332,7 +337,12 @@ mod quiche_implementation {
                     }
                 }
             }
-            poll.poll(&mut events, timeout).unwrap();
+            if let Err(error) = poll.poll(&mut events, timeout) {
+                if error.kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(ServerRunError::io("poll", error));
+            }
             // Read incoming UDP packets from the socket and feed them to quiche,
             // until there are no more packets to read.
 
@@ -355,7 +365,10 @@ mod quiche_implementation {
                             debug!("recv() would block");
                             break 'read;
                         }
-                        panic!("recv() failed: {:?}", e);
+                        if e.kind() == std::io::ErrorKind::Interrupted {
+                            continue 'read;
+                        }
+                        return Err(ServerRunError::io("udp_receive", e));
                     }
                 };
                 debug!("got {} bytes", len);
@@ -434,8 +447,8 @@ mod quiche_implementation {
                     let scid = hdr.dcid.clone();
                     //debug!("New connection: dcid={:?} scid={:?}", hdr.dcid, scid);
                     debug!("New connection: dcid={:?} scid={:?}", hdr.dcid, scid);
-                    let conn = quiche::accept(&scid, Some(&odcid), local_addr, from, &mut config)
-                        .unwrap();
+                    let conn =
+                        quiche::accept(&scid, Some(&odcid), local_addr, from, &mut config).unwrap();
                     let client = Client {
                         conn,
                         http3_conn: None,
