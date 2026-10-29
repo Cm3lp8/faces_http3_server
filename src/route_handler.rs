@@ -719,6 +719,64 @@ mod route_handle_implementation {
             error!("Failed to wake poll for unknown route: {error}");
         }
     }
+    // Middleware admission is complete. Queue the final response before allowing
+    // the callback to publish data; both use the existing per-stream queues.
+    fn open_stream_then_call(
+        queues: &ChunksDispatchChannel,
+        waker: &mio::Waker,
+        stream_id: u64,
+        scid: &[u8],
+        callback: impl FnOnce() -> Result<(), ()>,
+    ) -> Result<(), ()> {
+        let (_, header) = HeaderRequest::new(
+            stream_id,
+            scid,
+            vec![h3::Header::new(b":status", b"200")],
+            false,
+            None,
+            None,
+            HeaderPriority::OpenStream,
+        );
+        queues
+            .send_to_high_priority_queue(stream_id, scid, QueuedRequest::Header(header))
+            .map_err(|_| ())?;
+        let _ = waker.wake();
+        if callback().is_err() {
+            // A second final status cannot describe a failure after opening.
+            // Reset only this stream; never acknowledge data on the callback's behalf.
+            queues
+                .send_to_high_priority_queue(
+                    stream_id,
+                    scid,
+                    QueuedRequest::StreamReset {
+                        stream_id,
+                        scid: scid.to_vec(),
+                    },
+                )
+                .map_err(|_| ())?;
+            let _ = waker.wake();
+            return Err(());
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    mod stream_open_queue_tests {
+        #[test]
+        fn unavailable_open_queue_does_not_call_handler() {
+            let queues = super::ChunksDispatchChannel::new();
+            let poll = mio::Poll::new().unwrap();
+            let waker = mio::Waker::new(poll.registry(), mio::Token(1)).unwrap();
+            let mut called = false;
+            assert!(super::open_stream_then_call(&queues, &waker, 0, &[1], || {
+                called = true;
+                Ok(())
+            })
+            .is_err());
+            assert!(!called);
+        }
+    }
+
     pub fn response_preparation_with_route_handler<
         S: Send + Sync + 'static + Clone,
         T: UserSessions<Output = T>,
@@ -780,11 +838,16 @@ mod route_handle_implementation {
                     };
 
                     if let Some((event, callback)) = callback {
-                        if let Ok(res) = callback.call(event, &stream_sessions, &app_state) {
-                        } else {
-                            error!("Stream sessions not called ! []");
-
-                            // send error + close mecanism
+                        if open_stream_then_call(
+                            &chunk_dispatch_channel,
+                            waker,
+                            stream_id,
+                            scid,
+                            || callback.call(event, &stream_sessions, &app_state),
+                        )
+                        .is_err()
+                        {
+                            error!("Stream opening or callback failed for stream {stream_id}");
                         }
                     }
                 }

@@ -689,18 +689,34 @@ mod quiche_implementation {
                         // Don't try to pop new chunk from the chunk queue if there are still something
                         // in the pending queue for this stream.
 
-                        if !client.pending_body_queue.is_stream_queue_empty(stream_id) {
-                            // try resend here ?
-                            continue;
-                        }
                         if client.partial_responses.get(&stream_id).is_some() {
                             continue;
                         }
-                        if let Ok(mut request_chunk) =
-                            chunk_dispatch_channel.try_pop(stream_id, &scid)
+                        let opening_retry = client
+                            .pending_body_queue
+                            .get_queue_mut(stream_id)
+                            .and_then(|queue| {
+                                if matches!(queue.front(), Some(QueuedRequest::Header(header))
+                                    if matches!(header.priority_mode(), HeaderPriority::OpenStream))
+                                {
+                                    queue.pop_front()
+                                } else {
+                                    None
+                                }
+                            });
+                        if opening_retry.is_none()
+                            && !client.pending_body_queue.is_stream_queue_empty(stream_id)
+                        {
+                            continue;
+                        }
+                        if let Some(mut request_chunk) = opening_retry
+                            .or_else(|| chunk_dispatch_channel.try_pop(stream_id, &scid).ok())
                         {
                             let p_id = request_chunk.packet_id();
                             match request_chunk {
+                                QueuedRequest::StreamReset { .. } => {
+                                    reset_failed_stream(client, stream_id, &chunk_dispatch_channel);
+                                }
                                 QueuedRequest::Body(ref mut content) => {
                                     if !client.headers_send(stream_id) {
                                         let response = PartialResponse {
@@ -779,6 +795,35 @@ mod quiche_implementation {
                                         response_ends_on_headers(is_end, attached_body_len);
 
                                     match content.priority_mode() {
+                                        HeaderPriority::OpenStream => {
+                                            let result =
+                                                send_stream_opening(client, stream_id, &headers);
+                                            match result {
+                                                Ok(()) => {
+                                                    client.set_headers_send(stream_id, true);
+                                                }
+                                                Err(h3::Error::StreamBlocked | h3::Error::Done)
+                                                | Err(h3::Error::TransportError(
+                                                    quiche::Error::Done,
+                                                )) => {
+                                                    client
+                                                        .pending_body_queue
+                                                        .push_item_on_front(request_chunk);
+                                                }
+                                                Err(error) => {
+                                                    error!("Stream opening failed stream={stream_id} error={error:?}");
+                                                    reset_failed_stream(
+                                                        client,
+                                                        stream_id,
+                                                        &chunk_dispatch_channel,
+                                                    );
+                                                }
+                                            }
+                                            #[cfg(test)]
+                                            if crate::stream_open_tests::opening_was_injected() {
+                                                let _ = waker.wake();
+                                            }
+                                        }
                                         HeaderPriority::SendHeader => {
                                             if let Ok(_n) = quiche_http3_server::send_header(
                                                 client,
@@ -959,6 +1004,41 @@ mod quiche_implementation {
             });
         }
     }
+    fn send_stream_opening(
+        client: &mut Client,
+        stream_id: u64,
+        headers: &[h3::Header],
+    ) -> Result<(), h3::Error> {
+        #[cfg(test)]
+        if crate::stream_open_tests::block_opening_once() {
+            return Err(h3::Error::StreamBlocked);
+        }
+        client.http3_conn.as_mut().unwrap().send_additional_headers(
+            &mut client.conn,
+            stream_id,
+            headers,
+            false,
+            false,
+        )
+    }
+
+    fn reset_failed_stream(
+        client: &mut Client,
+        stream_id: u64,
+        queues: &crate::request_response::ChunksDispatchChannel,
+    ) {
+        // H3_INTERNAL_ERROR. Existing callback side effects are not rolled back.
+        let _ = client
+            .conn
+            .stream_shutdown(stream_id, quiche::Shutdown::Read, 0x102);
+        let _ = client
+            .conn
+            .stream_shutdown(stream_id, quiche::Shutdown::Write, 0x102);
+        client.clean_client(stream_id);
+        client.pending_body_queue.remove_stream_queue(stream_id);
+        queues.remove_stream(stream_id, client.conn.source_id().as_ref());
+    }
+
     /// Handles incoming HTTP/3 requests.
     pub fn send_header(
         client: &mut Client,

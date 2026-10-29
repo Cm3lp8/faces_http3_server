@@ -88,3 +88,6 @@ mod tests {
 
 #[cfg(test)]
 mod test_support;
+
+#[cfg(test)]
+mod stream_open_tests;
