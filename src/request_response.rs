@@ -365,7 +365,6 @@ mod response_queue {
                 QueuedRequest::Body(content) => content.stream_id,
                 QueuedRequest::BodyProgression(content) => content.stream_id,
                 QueuedRequest::StreamData(content) => content.stream_id,
-                QueuedRequest::StreamReset { stream_id, .. } => *stream_id,
             }
         }
         fn is_last_item(&self) -> bool {
@@ -374,7 +373,6 @@ mod response_queue {
                 QueuedRequest::Body(content) => content.is_end,
                 QueuedRequest::BodyProgression(content) => content.is_end,
                 QueuedRequest::StreamData(content) => content.is_end,
-                QueuedRequest::StreamReset { .. } => true,
             }
         }
         fn scid(&self) -> Vec<u8> {
@@ -383,7 +381,6 @@ mod response_queue {
                 QueuedRequest::Body(content) => content.scid.to_vec(),
                 QueuedRequest::BodyProgression(content) => content.scid.to_vec(),
                 QueuedRequest::StreamData(content) => content.scid.to_vec(),
-                QueuedRequest::StreamReset { scid, .. } => scid.clone(),
             }
         }
         fn len(&self) -> usize {
@@ -392,7 +389,6 @@ mod response_queue {
                 QueuedRequest::Body(content) => content.len(),
                 QueuedRequest::BodyProgression(content) => content.len(),
                 QueuedRequest::StreamData(content) => content.len(),
-                QueuedRequest::StreamReset { .. } => 0,
             }
         }
     }
@@ -403,7 +399,6 @@ mod response_queue {
         Body(BodyRequest),
         BodyProgression(BodyRequest),
         StreamData(BodyRequest),
-        StreamReset { stream_id: u64, scid: Vec<u8> },
     }
     impl QueuedRequest {
         pub fn new_body(req: BodyRequest) -> Self {
@@ -418,7 +413,6 @@ mod response_queue {
                 Self::Body(body) => body.packet_id,
                 Self::BodyProgression(body) => body.packet_id,
                 Self::StreamData(body) => body.packet_id,
-                Self::StreamReset { .. } => 0,
             }
         }
     }

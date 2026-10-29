@@ -744,16 +744,7 @@ mod route_handle_implementation {
         if callback().is_err() {
             // A second final status cannot describe a failure after opening.
             // Reset only this stream; never acknowledge data on the callback's behalf.
-            queues
-                .send_to_high_priority_queue(
-                    stream_id,
-                    scid,
-                    QueuedRequest::StreamReset {
-                        stream_id,
-                        scid: scid.to_vec(),
-                    },
-                )
-                .map_err(|_| ())?;
+            queues.request_stream_reset(stream_id, scid)?;
             let _ = waker.wake();
             return Err(());
         }

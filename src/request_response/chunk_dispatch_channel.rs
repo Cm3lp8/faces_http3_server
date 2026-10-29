@@ -70,6 +70,22 @@ mod dispatcher {
             }
         }
 
+        // Cancellation must remain observable even when a header or body is blocked.
+        pub(crate) fn request_stream_reset(&self, stream_id: u64, scid: &[u8]) -> Result<(), ()> {
+            let Some(mut entry) = self.inner.map.get_mut(&(stream_id, scid.to_vec())) else {
+                return Err(());
+            };
+            entry.4 = true;
+            Ok(())
+        }
+
+        pub(crate) fn requested_stream_resets(&self, client_scid: &[u8]) -> Vec<u64> {
+            self.inner.map.iter()
+                .filter(|entry| entry.value().4 && entry.key().1 == client_scid)
+                .map(|entry| entry.key().0)
+                .collect()
+        }
+
         pub fn streams(&self, client_scid: &[u8]) -> Vec<u64> {
             let inner = &*self.inner;
 
@@ -125,7 +141,7 @@ mod dispatcher {
 
                 inner.insert(
                     (stream_id, scid.to_vec()),
-                    (sender_0, sender_1, receiver_0, receiver_1),
+                    (sender_0, sender_1, receiver_0, receiver_1, false),
                 );
             }
         }
@@ -150,7 +166,8 @@ mod dispatcher {
     struct ChunksDispatchChannelInner {
         //2 sender and 2 receiver : one for header, the other for bodies (differents level of
         //  prioriyt)
-        map: DashMap<Ids, (ChunkSender, ChunkSender, ChunkReceiver, ChunkReceiver)>,
+        // The final flag requests cancellation independently of either FIFO.
+        map: DashMap<Ids, (ChunkSender, ChunkSender, ChunkReceiver, ChunkReceiver, bool)>,
     }
     impl ChunksDispatchChannelInner {
         fn new() -> Self {
@@ -161,7 +178,7 @@ mod dispatcher {
         fn insert(
             &self,
             key: Ids,
-            value: (ChunkSender, ChunkSender, ChunkReceiver, ChunkReceiver),
+            value: (ChunkSender, ChunkSender, ChunkReceiver, ChunkReceiver, bool),
         ) {
             if let None = self.map.get(&key) {
                 self.map.insert(key, value);

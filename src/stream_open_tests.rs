@@ -39,7 +39,18 @@ fn stream_callback(
 ) -> Result<(), ()> {
     std::fs::write(&state.called, b"called").unwrap();
     *state.target.lock().unwrap() = Some((event.scid().to_vec(), event.stream_id()));
-    if std::env::var("FACES_STREAM_CASE").as_deref() == Ok("callback-error") {
+    let case = std::env::var("FACES_STREAM_CASE").unwrap();
+    if case == "blocked-callback-error" {
+        // Ensure an opening attempt really is pending before the callback fails.
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while OPENING_ATTEMPTS.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+            assert!(Instant::now() < deadline, "opening was never attempted");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        send_frame(state, b"must-not-arrive")?;
+        return Err(());
+    }
+    if case == "callback-error" {
         return Err(());
     }
     send_frame(state, b"first")
@@ -270,6 +281,7 @@ fn run_case(case: &str, expected: u16) {
         b"/stream".as_slice()
     };
     let stream = client.request(path, case != "rejected");
+    let reset_deadline = Instant::now() + Duration::from_secs(2);
     let mut final_status = None;
     let mut payload = Vec::new();
     let mut ack = None;
@@ -278,6 +290,12 @@ fn run_case(case: &str, expected: u16) {
     let mut completed_at = None;
     loop {
         assert!(Instant::now() < deadline, "stream deadline case={case}");
+        if case == "blocked-callback-error" {
+            assert!(
+                Instant::now() < reset_deadline,
+                "blocked opening prevented reset within two seconds"
+            );
+        }
         client.pump();
         let http = client.http.as_mut().unwrap();
         loop {
@@ -324,9 +342,19 @@ fn run_case(case: &str, expected: u16) {
                 Ok((id, h3::Event::Finished)) if Some(id) == ack => {
                     ack_finished = true;
                 }
-                Ok((id, h3::Event::Reset(code))) if id == stream && case == "callback-error" => {
+                Ok((id, h3::Event::Reset(code)))
+                    if id == stream
+                        && matches!(case, "callback-error" | "blocked-callback-error") =>
+                {
                     assert_eq!(code, 0x102);
                     assert!(server.root.join("called").exists());
+                    if case == "blocked-callback-error" {
+                        assert!(server.root.join("blocked").exists());
+                        assert_eq!(final_status, None);
+                        assert!(payload.is_empty());
+                        assert!(ack.is_none());
+                        assert!(Instant::now() < reset_deadline);
+                    }
                     return;
                 }
                 Ok((_, h3::Event::Reset(code))) => panic!("unexpected reset {code}"),
@@ -386,8 +414,9 @@ fn unknown_stream_does_not_call_handler() {
 }
 
 static OPENING_ATTEMPTS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-pub(crate) fn block_opening_once() -> bool {
-    if std::env::var("FACES_STREAM_CASE").as_deref() != Ok("blocked") {
+pub(crate) fn block_opening_for_test() -> bool {
+    let case = std::env::var("FACES_STREAM_CASE").unwrap_or_default();
+    if !matches!(case.as_str(), "blocked" | "blocked-callback-error") {
         return false;
     }
     let first = OPENING_ATTEMPTS.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0;
@@ -395,7 +424,7 @@ pub(crate) fn block_opening_once() -> bool {
         let root = PathBuf::from(std::env::var("FACES_STREAM_ROOT").unwrap());
         std::fs::write(root.join("blocked"), b"opening blocked once").unwrap();
     }
-    first
+    first || case == "blocked-callback-error"
 }
 pub(crate) fn opening_was_injected() -> bool {
     OPENING_ATTEMPTS.load(std::sync::atomic::Ordering::SeqCst) == 1
@@ -409,4 +438,10 @@ fn blocked_opening_resumes_before_data_without_duplication() {
 #[ignore = "requires explicit local fixture root and loopback"]
 fn callback_error_resets_stream_instead_of_silent_success() {
     run_case("callback-error", 200);
+}
+
+#[test]
+#[ignore = "requires explicit local fixture root and loopback"]
+fn blocked_opening_callback_error_resets_without_final_headers_or_data() {
+    run_case("blocked-callback-error", 200);
 }

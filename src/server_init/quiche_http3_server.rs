@@ -663,6 +663,11 @@ mod quiche_implementation {
             {
                 std::thread::sleep(Duration::from_nanos(10));
                 for client in clients.values_mut() {
+                    let scid = client.conn.source_id().as_ref().to_vec();
+                    // Do not gate cancellation on writability, header retries or partial bodies.
+                    for stream_id in chunk_dispatch_channel.requested_stream_resets(&scid) {
+                        reset_failed_stream(client, stream_id, &chunk_dispatch_channel);
+                    }
                     for stream_id in client.conn.writable() {
                         // Don't try to pop new chunk from the chunk queue if there are still something
                         // in the pending queue for this stream.
@@ -681,7 +686,6 @@ mod quiche_implementation {
                             }
                         }
                     }
-                    let scid = client.conn.source_id().as_ref().to_vec();
                     let mut writtable = 0;
                     for stream_id in client.conn.writable() {
                         writtable += 1;
@@ -714,9 +718,6 @@ mod quiche_implementation {
                         {
                             let p_id = request_chunk.packet_id();
                             match request_chunk {
-                                QueuedRequest::StreamReset { .. } => {
-                                    reset_failed_stream(client, stream_id, &chunk_dispatch_channel);
-                                }
                                 QueuedRequest::Body(ref mut content) => {
                                     if !client.headers_send(stream_id) {
                                         let response = PartialResponse {
@@ -1010,7 +1011,7 @@ mod quiche_implementation {
         headers: &[h3::Header],
     ) -> Result<(), h3::Error> {
         #[cfg(test)]
-        if crate::stream_open_tests::block_opening_once() {
+        if crate::stream_open_tests::block_opening_for_test() {
             return Err(h3::Error::StreamBlocked);
         }
         client.http3_conn.as_mut().unwrap().send_additional_headers(
