@@ -15,16 +15,16 @@ mod stream_sessions {
     use stream_framer::FrameWriter;
 
     use crate::{
+        StreamBridgeOps, StreamIdent,
         prelude::StreamMessageCapsule,
         request_response::{BodyRequest, BodyType, ChunkingStation},
         stream_sessions::UserUuid,
-        StreamBridgeOps, StreamIdent,
     };
 
     use super::{
-        stream_types::{stream_cleaning, Stream},
-        user_sessions_trait::UserSessions,
         StreamBridge, StreamBuilder, StreamCreation, StreamManagement, ToStreamIdent,
+        stream_types::{Stream, stream_cleaning},
+        user_sessions_trait::UserSessions,
     };
 
     type StreamPath = String;
@@ -103,6 +103,22 @@ mod stream_sessions {
                     return Err("Stream on path : No Session found ".to_string());
                 };
 
+                // Validation and enqueue share the registry lock. A prepared capsule
+                // must not escape to a replaced stream or a reassigned connection.
+                let registered = stream
+                    .registered_sessions()
+                    .get_connection_ids_on_user_ids(&[user_id])
+                    .into_iter()
+                    .any(|entry| {
+                        entry.to_stream_ident().is_ok_and(|id| {
+                            id.user_id == user_id
+                                && id.dcid == message.get_scid()
+                                && id.stream_id == message.stream_id()
+                        })
+                    });
+                if !registered {
+                    return Err("capsule target is no longer registered to this user".into());
+                }
                 let conn_ids = (message.get_scid(), message.stream_id());
                 let conn_ids = (&conn_ids.0[..], conn_ids.1);
                 match session.send_one_message_on_stream(conn_ids, |_| {
@@ -131,29 +147,12 @@ mod stream_sessions {
             path: &str,
             scids: &[&[u8]],
         ) -> Result<StreamMessageCapsule<U>, String> {
-            self.get_stream_session(|session| {
-                let Some(stream) = session.sessions.get(path) else {
-                    return Err("Stream on path : No Session found ".to_string());
-                };
-
-                let conn_ids = (message.get_scid(), message.stream_id());
-                let conn_ids = (&conn_ids.0[..], conn_ids.1);
-                match session.send_one_message_on_stream(conn_ids, |_| {
-                    let message = message.clone();
-                    let enc = bincode::encode_to_vec(&message, bincode::config::standard())
-                        .map_err(|e| e.to_string())?;
-
-                    Ok((message, enc))
-                }) {
-                    Ok(messages) => Ok(messages),
-                    Err(e) => {
-                        error!("Failed To send message to [{:?}] ", user_id);
-                        Err(e)
-                    }
-                }
-            })
-            .map_err(|e| String::from("Failed to send message to subscriber"))
+            if scids.contains(&message.get_scid().as_slice()) {
+                return Err("capsule target is excluded".into());
+            }
+            self.retry_send_message_to_subscriber_on_path(user_id, message, path)
         }
+
         fn send_message_to_subscriber_on_path<U: Decode<()> + Encode + Clone>(
             &self,
             user_id: UserUuid,
@@ -430,33 +429,43 @@ mod stream_sessions {
         #[test]
         fn unavailable_targets_never_report_success_or_enqueue_a_partial_known_set() {
             let mut session = StreamSessionsInner::<TestSessions>::new();
-            assert!(session
-                .send_one_message_on_stream((&[1], 0), encoded)
-                .is_err());
+            assert!(
+                session
+                    .send_one_message_on_stream((&[1], 0), encoded)
+                    .is_err()
+            );
             let (_poll, station) = station();
             let queues = station.get_chunking_dispatch_channel();
             session.chunking_station = Some(station);
-            assert!(session
-                .send_one_message_on_stream((&[1], 0), encoded)
-                .is_err());
-            assert!(session
-                .send_one_or_more_message_on_stream::<u64>(&[], encoded)
-                .is_err());
+            assert!(
+                session
+                    .send_one_message_on_stream((&[1], 0), encoded)
+                    .is_err()
+            );
+            assert!(
+                session
+                    .send_one_or_more_message_on_stream::<u64>(&[], encoded)
+                    .is_err()
+            );
             queues.insert_new_channel(0, &[1]);
-            assert!(session
-                .send_one_or_more_message_on_stream(&[(&[1], 0), (&[1], 4)], encoded)
-                .is_err());
+            assert!(
+                session
+                    .send_one_or_more_message_on_stream(&[(&[1], 0), (&[1], 4)], encoded)
+                    .is_err()
+            );
             assert_eq!(queues.in_queue(0, &[1]).unwrap(), 0);
             queues.insert_new_channel(4, &[1]);
-            assert!(session
-                .send_one_or_more_message_on_stream(&[(&[1], 0), (&[1], 4)], |ids| {
-                    if ids.1 == 4 {
-                        Err("encoding failure".into())
-                    } else {
-                        encoded(ids)
-                    }
-                })
-                .is_err());
+            assert!(
+                session
+                    .send_one_or_more_message_on_stream(&[(&[1], 0), (&[1], 4)], |ids| {
+                        if ids.1 == 4 {
+                            Err("encoding failure".into())
+                        } else {
+                            encoded(ids)
+                        }
+                    })
+                    .is_err()
+            );
             assert_eq!(queues.in_queue(0, &[1]).unwrap(), 0);
         }
 
@@ -499,6 +508,135 @@ mod stream_sessions {
             });
             assert!(result.is_err());
         }
+
+        #[derive(Clone)]
+        struct Registered(HashMap<Vec<u8>, (Uuid, u64)>);
+        use uuid::Uuid;
+        impl UserSessions for Registered {
+            type Output = Self;
+            fn new() -> Self {
+                Self(HashMap::new())
+            }
+            fn user_sessions(&self) -> &Self {
+                self
+            }
+            fn is_user_connected(&self, user: Uuid) -> bool {
+                self.0.values().any(|(u, _)| *u == user)
+            }
+            fn get_connection_ids_on_user_ids(&self, users: &[Uuid]) -> Vec<impl ToStreamIdent> {
+                self.0
+                    .iter()
+                    .filter(|(_, (u, _))| users.contains(u))
+                    .map(|(c, (u, s))| (*u, c.clone(), *s))
+                    .collect::<Vec<_>>()
+            }
+            fn get_all_connections(&self) -> Vec<impl ToStreamIdent + std::fmt::Debug> {
+                self.0
+                    .iter()
+                    .map(|(c, (u, s))| (*u, c.clone(), *s))
+                    .collect::<Vec<_>>()
+            }
+            fn register_sessions(&mut self, user: Uuid, (c, s): (Vec<u8>, u64)) {
+                self.0.insert(c, (user, s));
+            }
+            fn remove_sessions_by_connection(&mut self, c: &[u8]) -> Option<Uuid> {
+                self.0.remove(c).map(|(u, _)| u)
+            }
+        }
+
+        #[test]
+        fn prepared_capsule_is_revalidated_against_current_owner_and_stream_with_old_queues_present()
+         {
+            fn handler(
+                _: crate::FinishedEvent,
+                _: &StreamSessions<Registered>,
+                _: &(),
+            ) -> Result<(), ()> {
+                Ok(())
+            }
+            let (_poll, station) = station();
+            let queues = station.get_chunking_dispatch_channel();
+            queues.insert_new_channel(0, &[1]);
+            queues.insert_new_channel(4, &[1]);
+            let sessions = StreamSessions::<Registered>::new();
+            sessions.set_chunking_station(&station);
+            let mut router =
+                crate::RouteManager::new_with_app_state(()).with_stream_sessions(&sessions);
+            let callback = router.to_stream_handler(&handler);
+            router.down_stream("/events", (), |s| {
+                s.stream_handler(&callback);
+            });
+            let owner = Uuid::new_v4();
+            let other = Uuid::new_v4();
+            let bind = |user, stream| {
+                sessions
+                    .get_stream_from_path("/events", |s| {
+                        s.registered_sessions_mut()
+                            .register_sessions(user, (vec![1], stream))
+                    })
+                    .unwrap()
+            };
+            bind(owner, 0);
+            let old = StreamMessageCapsule::new(&42u64, &[1], 0);
+            sessions
+                .retry_send_message_to_subscriber_on_path(owner, old.clone(), "/events")
+                .unwrap();
+            assert_eq!(queues.in_queue(0, &[1]).unwrap(), 1);
+            queues.try_pop(0, &[1]).unwrap();
+            bind(owner, 4);
+            assert!(
+                sessions
+                    .retry_send_message_to_subscriber_on_path(owner, old, "/events")
+                    .is_err()
+            );
+            assert_eq!(queues.in_queue(0, &[1]).unwrap(), 0);
+            let current = StreamMessageCapsule::new(&43u64, &[1], 4);
+            sessions
+                .retry_send_message_to_subscriber_on_path(owner, current.clone(), "/events")
+                .unwrap();
+            queues.try_pop(4, &[1]).unwrap();
+            bind(other, 4);
+            assert!(
+                sessions
+                    .retry_send_message_to_subscriber_on_path(owner, current.clone(), "/events")
+                    .is_err()
+            );
+            assert_eq!(queues.in_queue(4, &[1]).unwrap(), 0);
+            assert!(
+                sessions
+                    .retry_send_message_to_subscriber_on_path_with_filtered_scids(
+                        other,
+                        current.clone(),
+                        "/events",
+                        &[&[1]]
+                    )
+                    .is_err()
+            );
+            assert_eq!(queues.in_queue(4, &[1]).unwrap(), 0);
+            sessions
+                .retry_send_message_to_subscriber_on_path(other, current, "/events")
+                .unwrap();
+            assert_eq!(queues.in_queue(4, &[1]).unwrap(), 1);
+        }
+
+        #[test]
+        fn second_queue_failure_can_follow_acceptance_by_first_target() {
+            let (_poll, station) = station();
+            let queues = station.get_chunking_dispatch_channel();
+            queues.insert_new_channel(0, &[1]);
+            queues.insert_new_channel(4, &[1]);
+            let mut session = StreamSessionsInner::<TestSessions>::new();
+            session.chunking_station = Some(station);
+            let result =
+                session.send_one_or_more_message_on_stream(&[(&[1], 0), (&[1], 4)], |ids| {
+                    if ids.1 == 4 {
+                        queues.remove_stream(4, &[1]);
+                    }
+                    encoded(ids)
+                });
+            assert!(result.is_err());
+            assert_eq!(queues.in_queue(0, &[1]).unwrap(), 1);
+        }
     }
 }
 mod stream_sessions_traits {
@@ -507,8 +645,8 @@ mod stream_sessions_traits {
     use bincode::{Decode, Encode};
 
     use crate::{
-        prelude::StreamMessageCapsule, stream_sessions::UserUuid, FinishedEvent, StreamSessions,
-        UserSessions,
+        FinishedEvent, StreamSessions, UserSessions, prelude::StreamMessageCapsule,
+        stream_sessions::UserUuid,
     };
 
     use super::{
@@ -632,7 +770,7 @@ mod stream_sessions_traits {
     }
 
     mod to_stream_ident_foreign_implementations {
-        use crate::stream_sessions::{stream_types::StreamIdent, UserUuid};
+        use crate::stream_sessions::{UserUuid, stream_types::StreamIdent};
 
         use super::ToStreamIdent;
 
@@ -660,9 +798,9 @@ mod stream_types {
     use serde::{Deserialize, Serialize};
     use uuid::Uuid;
 
-    use crate::{handler_dispatcher, stream_sessions::UserUuid, MiddleWare};
+    use crate::{MiddleWare, handler_dispatcher, stream_sessions::UserUuid};
 
-    use super::{user_sessions_trait::UserSessions, StreamHandle};
+    use super::{StreamHandle, user_sessions_trait::UserSessions};
 
     // an Id field to make possible request confirmation when client responds
 
