@@ -560,8 +560,10 @@ fn post_to(client: &mut WireClient, path: &[u8], length: Option<&[u8]>) -> u64 {
 #[ignore = "requires explicit local fixture root and loopback"]
 fn constrained_bodies_and_panicking_handlers_leave_the_connection_usable() {
     let (mut server, mut client) = start_server("body-security");
-    let id = post_to(&mut client, b"/echo", Some(b"9"));
-    assert_eq!(terminal(&mut client, id), Err(0x107));
+    for _ in 0..5 {
+        let id = post_to(&mut client, b"/echo", Some(b"9"));
+        assert_eq!(terminal(&mut client, id), Err(0x107));
+    }
     let id = post_to(&mut client, b"/echo", None);
     client
         .http
@@ -592,6 +594,27 @@ fn constrained_bodies_and_panicking_handlers_leave_the_connection_usable() {
         .unwrap();
     assert_eq!(terminal(&mut client, id), Ok(b"12345678".to_vec()));
     assert!(server.child.try_wait().unwrap().is_none());
+    let log = std::fs::read_to_string(server.root.join("server.log")).unwrap();
+    let reports: Vec<_> = log
+        .lines()
+        .filter(|line| line.contains("http3_body_rejections "))
+        .collect();
+    let admission: Vec<_> = reports
+        .iter()
+        .filter(|line| line.contains("stage=admission "))
+        .collect();
+    assert_eq!(admission.len(), 3);
+    for (line, expected) in admission.iter().zip([1, 2, 4]) {
+        assert!(line.contains(&format!("stage_total={expected} ")));
+    }
+    for stage in ["receive", "expiration"] {
+        assert!(reports
+            .iter()
+            .any(|line| line.contains(&format!("stage={stage} stage_total=1 "))));
+    }
+    assert!(reports
+        .iter()
+        .all(|line| line.contains(" retained_bytes=") && line.contains(" active_requests=")));
 }
 
 #[test]

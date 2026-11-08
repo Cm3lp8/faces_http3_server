@@ -180,6 +180,7 @@ mod quiche_implementation {
     use quiche::h3::Priority;
 
     use crate::{
+        body_budget::RejectionStage,
         file_writer::FileWriter,
         header_queue_processing::{parse_request_headers, HeaderProcessing},
         request_response::{ChunkingStation, HeaderPriority, ResponseQueue},
@@ -314,7 +315,6 @@ mod quiche_implementation {
 
         let routes = route_manager.routes_handler();
         let bodies = routes.routes_states();
-        let mut rejected_bodies: u64 = 0;
         let mut clients = ClientMap::new();
         let mut total = 0;
         let mut send_packet_time = Instant::now();
@@ -568,7 +568,7 @@ mod quiche_implementation {
                                         &route_manager,
                                         &response_injection_buffer,
                                         &chunk_dispatch_channel,
-                                        &mut rejected_bodies,
+                                        RejectionStage::Admission,
                                     );
                                     continue;
                                 };
@@ -619,7 +619,7 @@ mod quiche_implementation {
                                             &route_manager,
                                             &response_injection_buffer,
                                             &chunk_dispatch_channel,
-                                            &mut rejected_bodies,
+                                            RejectionStage::Receive,
                                         );
                                         break;
                                     }
@@ -690,7 +690,7 @@ mod quiche_implementation {
                             &route_manager,
                             &response_injection_buffer,
                             &chunk_dispatch_channel,
-                            &mut rejected_bodies,
+                            RejectionStage::Expiration,
                         );
                     }
                 }
@@ -1090,8 +1090,13 @@ mod quiche_implementation {
         router: &RouteManager<S, T>,
         buffer: &ResponseInjectionBuffer<S, T>,
         queues: &crate::request_response::ChunksDispatchChannel,
-        rejected: &mut u64,
+        stage: RejectionStage,
     ) {
+        router
+            .routes_handler()
+            .routes_states()
+            .budgets
+            .note_rejection(stage, client.conn.trace_id(), stream);
         let scid = client.conn.source_id().to_vec();
         buffer.cancel_request(client.conn.trace_id(), stream);
         router
@@ -1099,10 +1104,6 @@ mod quiche_implementation {
             .is_finished_request_a_valid_path(scid.clone(), stream);
         shutdown_request(&mut client.conn, stream, 0x107); // H3_EXCESSIVE_LOAD
         clean_stream(client, stream, queues);
-        *rejected = rejected.saturating_add(1);
-        if rejected.is_power_of_two() {
-            warn!("http3_body_rejections total={rejected}");
-        }
     }
 
     fn reset_failed_stream(

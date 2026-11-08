@@ -39,8 +39,19 @@ struct StreamUsage {
     deadline: Option<Instant>,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum RejectionStage {
+    Admission,
+    Receive,
+    Expiration,
+}
+
 #[derive(Default)]
 struct Usage {
+    total_rejections: u64,
+    admission_rejections: u64,
+    receive_rejections: u64,
+    expirations: u64,
     connections: HashMap<String, ConnectionUsage>,
     bytes: usize,
     requests: usize,
@@ -103,6 +114,38 @@ impl BodyBudgets {
             memory_limit,
             body_limit,
         }))
+    }
+
+    pub(crate) fn note_rejection(&self, stage: RejectionStage, connection: &str, stream: u64) {
+        let mut usage = self.usage.lock().unwrap();
+        // A DATA event can discover the expired deadline before the timer fires.
+        let stage = match stage {
+            RejectionStage::Receive
+                if usage
+                    .connections
+                    .get(connection)
+                    .and_then(|conn| conn.streams.get(&stream))
+                    .and_then(|body| body.deadline)
+                    .is_some_and(|deadline| Instant::now() >= deadline) =>
+            {
+                RejectionStage::Expiration
+            }
+            stage => stage,
+        };
+        usage.total_rejections = usage.total_rejections.saturating_add(1);
+        let (name, count) = match stage {
+            RejectionStage::Admission => ("admission", &mut usage.admission_rejections),
+            RejectionStage::Receive => ("receive", &mut usage.receive_rejections),
+            RejectionStage::Expiration => ("expiration", &mut usage.expirations),
+        };
+        *count = count.saturating_add(1);
+        let stage_total = *count;
+        if stage_total.is_power_of_two() {
+            let (total, retained_bytes, active_requests) =
+                (usage.total_rejections, usage.bytes, usage.requests);
+            drop(usage);
+            warn!("http3_body_rejections stage={name} stage_total={stage_total} total={total} retained_bytes={retained_bytes} active_requests={active_requests}");
+        }
     }
 
     pub(crate) fn next_deadline(&self) -> Option<Instant> {
