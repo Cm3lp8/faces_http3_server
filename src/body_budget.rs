@@ -12,6 +12,7 @@ pub struct BodyLimits {
     pub server_bytes: usize,
     pub connection_requests: usize,
     pub server_requests: usize,
+    pub max_connections: usize,
     pub receive_timeout: Duration,
 }
 
@@ -23,6 +24,7 @@ impl Default for BodyLimits {
             server_bytes: 64 << 20,
             connection_requests: 32,
             server_requests: 512,
+            max_connections: 128,
             receive_timeout: Duration::from_secs(30),
         }
     }
@@ -41,6 +43,7 @@ struct StreamUsage {
 
 #[derive(Clone, Copy)]
 pub(crate) enum RejectionStage {
+    Connection,
     Admission,
     Receive,
     Expiration,
@@ -49,6 +52,7 @@ pub(crate) enum RejectionStage {
 #[derive(Default)]
 struct Usage {
     total_rejections: u64,
+    connection_rejections: u64,
     admission_rejections: u64,
     receive_rejections: u64,
     expirations: u64,
@@ -70,25 +74,12 @@ impl BodyBudgets {
         }
     }
 
-    // A disk-backed route can have an arbitrarily long declared body. Its
-    // prefix still obeys the memory limits while authorization is pending.
-    pub(crate) fn admit(
+    pub(crate) fn reserve_request(
         self: &Arc<Self>,
         connection: &str,
         stream: u64,
-        disk_backed: bool,
-        route_limit: Option<usize>,
-        declared: Option<usize>,
         now: Instant,
-    ) -> Result<Arc<BodyLease>, ()> {
-        let memory_limit = route_limit.unwrap_or(self.limits.default_body_bytes);
-        let body_limit = route_limit.or_else(|| (!disk_backed).then_some(memory_limit));
-        if declared
-            .zip(body_limit)
-            .is_some_and(|(length, limit)| length > limit)
-        {
-            return Err(());
-        }
+    ) -> Result<BodyLease, ()> {
         let mut usage = self.usage.lock().unwrap();
         if usage.requests >= self.limits.server_requests || self.limits.connection_requests == 0 {
             return Err(());
@@ -107,15 +98,18 @@ impl BodyBudgets {
             },
         );
         usage.requests += 1;
-        Ok(Arc::new(BodyLease {
+        Ok(BodyLease {
             budgets: self.clone(),
             connection: connection.to_owned(),
             stream,
-            memory_limit,
-            body_limit,
-        }))
+            memory_limit: self.limits.default_body_bytes,
+            body_limit: None,
+        })
     }
 
+    pub(crate) fn limits(&self) -> BodyLimits {
+        self.limits
+    }
     pub(crate) fn note_rejection(&self, stage: RejectionStage, connection: &str, stream: u64) {
         let mut usage = self.usage.lock().unwrap();
         // A DATA event can discover the expired deadline before the timer fires.
@@ -134,6 +128,7 @@ impl BodyBudgets {
         };
         usage.total_rejections = usage.total_rejections.saturating_add(1);
         let (name, count) = match stage {
+            RejectionStage::Connection => ("connection", &mut usage.connection_rejections),
             RejectionStage::Admission => ("admission", &mut usage.admission_rejections),
             RejectionStage::Receive => ("receive", &mut usage.receive_rejections),
             RejectionStage::Expiration => ("expiration", &mut usage.expirations),
@@ -181,6 +176,24 @@ pub(crate) struct BodyLease {
 }
 
 impl BodyLease {
+    pub(crate) fn configure_route(
+        &mut self,
+        disk_backed: bool,
+        route_limit: Option<usize>,
+        declared: Option<usize>,
+    ) -> Result<(), ()> {
+        let memory_limit = route_limit.unwrap_or(self.budgets.limits.default_body_bytes);
+        let body_limit = route_limit.or_else(|| (!disk_backed).then_some(memory_limit));
+        if declared
+            .zip(body_limit)
+            .is_some_and(|(length, limit)| length > limit)
+        {
+            return Err(());
+        }
+        self.memory_limit = memory_limit;
+        self.body_limit = body_limit;
+        Ok(())
+    }
     fn check_length(&self, received: usize, packet: usize) -> Result<(), ()> {
         let total = received.checked_add(packet).ok_or(())?;
         if self.body_limit.is_some_and(|limit| total > limit) {
@@ -328,6 +341,21 @@ impl Drop for BodyLease {
 mod tests {
     use super::*;
 
+    impl BodyBudgets {
+        fn admit(
+            self: &Arc<Self>,
+            connection: &str,
+            stream: u64,
+            disk_backed: bool,
+            limit: Option<usize>,
+            declared: Option<usize>,
+            now: Instant,
+        ) -> Result<Arc<BodyLease>, ()> {
+            let mut lease = self.reserve_request(connection, stream, now)?;
+            lease.configure_route(disk_backed, limit, declared)?;
+            Ok(Arc::new(lease))
+        }
+    }
     fn limits() -> BodyLimits {
         BodyLimits {
             default_body_bytes: 4,
@@ -335,6 +363,7 @@ mod tests {
             server_bytes: 8,
             connection_requests: 2,
             server_requests: 3,
+            max_connections: 2,
             receive_timeout: Duration::from_secs(1),
         }
     }

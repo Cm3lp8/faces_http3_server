@@ -94,9 +94,12 @@ fn stream_server_child() {
     router.route_get("/ack", RouteConfig::default(), |r| {
         r.handler(&ack);
     });
-    if std::env::var("FACES_STREAM_CASE").as_deref() == Ok("body-security") {
+    let case = std::env::var("FACES_STREAM_CASE").unwrap();
+    if case == "body-security" || case == "preheader-security" {
         router = router.with_body_limits(BodyLimits {
             default_body_bytes: 8,
+            server_requests: if case == "preheader-security" { 3 } else { 512 },
+            max_connections: if case == "preheader-security" { 2 } else { 128 },
             receive_timeout: Duration::from_millis(600),
             ..BodyLimits::default()
         });
@@ -195,6 +198,14 @@ impl WireClient {
         }
     }
     fn pump(&mut self) {
+        self.pump_allow_close();
+        assert!(
+            !self.conn.is_closed(),
+            "connection closed: {:?}",
+            self.conn.peer_error()
+        );
+    }
+    fn pump_allow_close(&mut self) {
         let mut buf = [0; 65535];
         loop {
             match self.socket.recv_from(&mut buf) {
@@ -216,11 +227,6 @@ impl WireClient {
         if self.conn.timeout().is_some_and(|t| t.is_zero()) {
             self.conn.on_timeout();
         }
-        assert!(
-            !self.conn.is_closed(),
-            "connection closed: {:?}",
-            self.conn.peer_error()
-        );
         if self.conn.is_established() && self.http.is_none() {
             self.http = Some(
                 h3::Connection::with_transport(&mut self.conn, &h3::Config::new().unwrap())
@@ -323,6 +329,17 @@ fn start_server(case: &str) -> (OwnedServer, WireClient) {
     (server, client)
 }
 
+fn connect_peer(first: &WireClient, root: &std::path::Path) -> WireClient {
+    let address = first.conn.path_stats().next().unwrap().peer_addr;
+    let mut peer = WireClient::new(address, root);
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while peer.http.is_none() {
+        assert!(Instant::now() < deadline);
+        peer.pump();
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    peer
+}
 fn run_case(case: &str, expected: u16) {
     let (mut server, mut client) = start_server(case);
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -668,4 +685,95 @@ fn file_prefix_reset_and_authorized_disk_stream_preserve_the_route() {
             .count(),
         1
     );
+}
+
+fn echo_byte(client: &mut WireClient) {
+    let id = post_to(client, b"/echo", Some(b"1"));
+    client
+        .http
+        .as_mut()
+        .unwrap()
+        .send_body(&mut client.conn, id, b"x", true)
+        .unwrap();
+    assert_eq!(terminal(client, id), Ok(b"x".to_vec()));
+}
+
+fn raw_resets(client: &mut WireClient, mut streams: Vec<u64>) {
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while !streams.is_empty() {
+        assert!(Instant::now() < deadline, "missing resets {streams:?}");
+        client.pump();
+        streams.retain(|&id| match client.conn.stream_recv(id, &mut [0; 1]) {
+            Err(quiche::Error::StreamReset(0x107)) => false,
+            Err(quiche::Error::Done) => true,
+            other => panic!("unexpected incomplete stream result: {other:?}"),
+        });
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
+#[test]
+#[ignore = "requires explicit local fixture root and loopback"]
+fn incomplete_headers_share_slots_expire_and_excessive_declaration_closes_only_its_connection() {
+    let (server, mut first) = start_server("preheader-security");
+    echo_byte(&mut first);
+    let mut second = connect_peer(&first, &server.root);
+    echo_byte(&mut second);
+    let address = first.conn.path_stats().next().unwrap().peer_addr;
+    let mut extra = WireClient::new(address, &server.root);
+    let probe_until = Instant::now() + Duration::from_millis(120);
+    while Instant::now() < probe_until {
+        extra.pump();
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert!(
+        extra.http.is_none(),
+        "third connection must wait for capacity"
+    );
+    // HEADERS of 32 KiB with only one payload byte. Three open streams
+    // occupy all shared slots; the fourth is refused before H3 parsing.
+    let fragment = [0x01, 0x80, 0x00, 0x80, 0x00, 0x00];
+    for id in [8, 12] {
+        first.conn.stream_send(id, &fragment, false).unwrap();
+    }
+    first.flush();
+    second.conn.stream_send(8, &fragment, false).unwrap();
+    second.flush();
+    std::thread::sleep(Duration::from_millis(30));
+    second.conn.stream_send(12, &fragment, false).unwrap();
+    second.flush();
+    raw_resets(&mut second, vec![12]);
+    raw_resets(&mut first, vec![8, 12]);
+    raw_resets(&mut second, vec![8]);
+    echo_byte(&mut first);
+    // Five bytes announce a nearly 16 MiB HEADERS payload. The upstream
+    // pre-allocation guard closes the offender without waiting for a payload.
+    first
+        .conn
+        .stream_send(16, &[0x01, 0x80, 0xff, 0xff, 0xfe], false)
+        .unwrap();
+    first.flush();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while first.conn.peer_error().is_none() {
+        assert!(Instant::now() < deadline);
+        first.pump_allow_close();
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    let error = first.conn.peer_error().unwrap();
+    assert!(error.is_app);
+    assert_eq!(error.error_code, 0x107);
+    echo_byte(&mut second);
+    let deadline = Instant::now() + Duration::from_secs(4);
+    while extra.http.is_none() {
+        assert!(Instant::now() < deadline, "connection slot not released");
+        extra.pump();
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    echo_byte(&mut extra);
+    let log = std::fs::read_to_string(server.root.join("server.log")).unwrap();
+    assert!(log
+        .lines()
+        .any(|line| line.contains("stage=admission ") && line.contains("active_requests=3")));
+    assert!(log.lines().any(|line| line.contains("stage=expiration ")));
+    assert!(log.lines().any(|line| line.contains("stage=connection ")));
 }

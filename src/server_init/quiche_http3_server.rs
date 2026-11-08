@@ -31,6 +31,11 @@ struct PartialResponse {
 }
 pub struct Client {
     conn: quiche::Connection,
+    // A slot is owned from the first readable request byte through dispatch.
+    pending_headers: HashMap<u64, crate::body_budget::BodyLease>,
+    admitted_streams: std::collections::HashSet<u64>,
+    aborted_streams: usize,
+    first_request_deadline: Option<std::time::Instant>,
     http3_conn: Option<quiche::h3::Connection>,
     partial_responses: HashMap<u64, PartialResponse>,
     progress_status_requests: HashMap<u64, u64>,
@@ -224,16 +229,25 @@ mod quiche_implementation {
         config.set_max_idle_timeout(20_000);
         config.set_max_recv_udp_payload_size(MAX_DATAGRAM_SIZE);
         config.set_max_send_udp_payload_size(MAX_DATAGRAM_SIZE);
-        config.set_initial_max_data(100_000_000);
-        config.set_initial_max_stream_data_bidi_local(200_000_000);
-        config.set_initial_max_stream_data_bidi_remote(200_000_000);
-        config.set_initial_max_stream_data_uni(100_000_000);
-        config.set_initial_max_streams_bidi(100);
-        config.set_initial_max_streams_uni(100);
+        let routes = route_manager.routes_handler();
+        let bodies = routes.routes_states();
+        let limits = bodies.budgets.limits();
+        // Bound unread/out-of-order QUIC bytes even before HTTP/3 sees a stream.
+        config.set_initial_max_data(256 << 10);
+        config.set_max_connection_window(1 << 20);
+        config.set_max_stream_window(256 << 10);
+        config.set_initial_max_stream_data_bidi_local(64 << 10);
+        config.set_initial_max_stream_data_bidi_remote(64 << 10);
+        config.set_initial_max_stream_data_uni(32 << 10);
+        config.set_initial_max_streams_bidi(limits.connection_requests as u64);
+        config.set_initial_max_streams_uni(8);
         config.set_disable_active_migration(true);
-        config.set_cc_algorithm(quiche::CongestionControlAlgorithm::BBR2);
+        config.set_cc_algorithm(quiche::CongestionControlAlgorithm::Bbr2Gcongestion);
         config.enable_early_data();
-        let h3_config = quiche::h3::Config::new().map_err(ServerRunError::Http3)?;
+        let mut h3_config = quiche::h3::Config::new().map_err(ServerRunError::Http3)?;
+        // quiche >= 0.29.3 checks both the encoded frame (with 50% margin)
+        // before allocation and RFC 9114 field sizes during QPACK decoding.
+        h3_config.set_max_field_section_size(32 << 10);
         let rng = SystemRandom::new();
         let conn_id_seed = ring::hmac::Key::generate(ring::hmac::HMAC_SHA256, &rng)
             .map_err(|_| ServerRunError::Entropy("connection_id_key"))?;
@@ -313,8 +327,6 @@ mod quiche_implementation {
             response_injection_buffer.register(response_injection)
         });
 
-        let routes = route_manager.routes_handler();
-        let bodies = routes.routes_states();
         let mut clients = ClientMap::new();
         let mut total = 0;
         let mut send_packet_time = Instant::now();
@@ -331,7 +343,16 @@ mod quiche_implementation {
             // Find the shorter timeout from all the active connections.
             //
             // TODO: use event loop that properly supports timers
-            let deadline = bodies.budgets.next_deadline();
+            let deadline = bodies
+                .budgets
+                .next_deadline()
+                .into_iter()
+                .chain(
+                    clients
+                        .values()
+                        .filter_map(|client| client.first_request_deadline),
+                )
+                .min();
             let timeout = clients
                 .values()
                 .filter_map(|c| c.conn.timeout())
@@ -456,6 +477,12 @@ mod quiche_implementation {
                     let Some(odcid) = retry_tokens.validate(token, &hdr.dcid, &from) else {
                         continue 'read;
                     };
+                    if clients.len() >= limits.max_connections {
+                        bodies
+                            .budgets
+                            .note_rejection(RejectionStage::Connection, "", 0);
+                        continue 'read;
+                    }
                     // Reuse the source connection ID we sent in the Retry packet,
                     // instead of changing it again.
                     let scid = hdr.dcid.clone();
@@ -466,6 +493,10 @@ mod quiche_implementation {
                     let client = Client {
                         conn,
                         http3_conn: None,
+                        pending_headers: HashMap::new(),
+                        admitted_streams: HashSet::new(),
+                        aborted_streams: 0,
+                        first_request_deadline: Instant::now().checked_add(limits.receive_timeout),
                         partial_responses: HashMap::new(),
                         progress_status_requests: HashMap::new(),
                         headers_sending_tracker: DashMap::new(),
@@ -496,6 +527,9 @@ mod quiche_implementation {
                 debug!("{} processed {} bytes", client.conn.trace_id(), read);
                 // Create a new HTTP/3 connection as soon as the QUIC connection
                 // is established.
+                if client.conn.local_error().is_some() || client.conn.is_draining() {
+                    continue 'read;
+                }
                 if (client.conn.is_in_early_data() || client.conn.is_established())
                     && client.http3_conn.is_none()
                 {
@@ -522,6 +556,42 @@ mod quiche_implementation {
                     client.http3_conn = Some(h3_conn);
                 }
                 if client.http3_conn.is_some() {
+                    // quiche exposes readable stream IDs before its HTTP/3 parser
+                    // consumes frames. Reserve a shared request slot at this boundary.
+                    for id in client.conn.readable() {
+                        if id % 4 == 2 && id / 4 >= 32 {
+                            let _ = client
+                                .conn
+                                .close(true, 0x107, b"unidirectional stream limit");
+                            break;
+                        }
+                        if id % 4 != 0
+                            || client.admitted_streams.contains(&id)
+                            || client.pending_headers.contains_key(&id)
+                        {
+                            continue;
+                        }
+                        match bodies.budgets.reserve_request(
+                            client.conn.trace_id(),
+                            id,
+                            Instant::now(),
+                        ) {
+                            Ok(lease) => {
+                                client.pending_headers.insert(id, lease);
+                            }
+                            Err(()) => {
+                                bodies.budgets.note_rejection(
+                                    RejectionStage::Admission,
+                                    client.conn.trace_id(),
+                                    id,
+                                );
+                                shutdown_request(&mut client.conn, id, 0x107);
+                            }
+                        }
+                    }
+                    if client.conn.local_error().is_some() {
+                        continue 'read;
+                    }
                     // Process HTTP/3 events.
                     'h3_read: loop {
                         let http3_conn = client.http3_conn.as_mut().unwrap();
@@ -539,7 +609,9 @@ mod quiche_implementation {
                                     route_manager
                                         .in_flight_streams_path_verification()
                                         .is_finished_request_a_valid_path(scid, stream_id);
-                                    shutdown_request(&mut client.conn, stream_id, 0x10e);
+                                    client.pending_headers.remove(&stream_id);
+                                    client.admitted_streams.remove(&stream_id);
+                                    abort_request(client, stream_id, 0x10e);
                                     continue;
                                 };
                                 let method = crate::H3Method::parse(&method)
@@ -554,14 +626,9 @@ mod quiche_implementation {
                                     )
                                 });
                                 let limit = route.as_ref().and_then(|(r, _)| r.max_body_bytes());
-                                let Ok(lease) = bodies.budgets.admit(
-                                    &conn_id,
-                                    stream_id,
-                                    disk_backed,
-                                    limit,
-                                    declared,
-                                    Instant::now(),
-                                ) else {
+                                let Some(mut lease) = client.pending_headers.remove(&stream_id)
+                                else {
+                                    // No initial request slot for a second header block.
                                     reject_body(
                                         client,
                                         stream_id,
@@ -572,6 +639,20 @@ mod quiche_implementation {
                                     );
                                     continue;
                                 };
+                                if lease.configure_route(disk_backed, limit, declared).is_err() {
+                                    reject_body(
+                                        client,
+                                        stream_id,
+                                        &route_manager,
+                                        &response_injection_buffer,
+                                        &chunk_dispatch_channel,
+                                        RejectionStage::Admission,
+                                    );
+                                    continue;
+                                }
+                                let lease = Arc::new(lease);
+                                client.first_request_deadline = None;
+                                client.admitted_streams.insert(stream_id);
                                 // Only the receive loop opens an outgoing queue. A late
                                 // worker cannot recreate it after RESET or close.
                                 chunk_dispatch_channel.insert_new_channel(stream_id, &scid);
@@ -627,6 +708,11 @@ mod quiche_implementation {
                                 }
                             }
                             Ok((stream_id, quiche::h3::Event::Finished)) => {
+                                client.admitted_streams.remove(&stream_id);
+                                if client.pending_headers.remove(&stream_id).is_some() {
+                                    abort_request(client, stream_id, 0x10e);
+                                    continue;
+                                }
                                 let trace_id = client.conn.trace_id().to_owned();
                                 let scid = client.conn.source_id().as_ref().to_vec();
 
@@ -647,6 +733,9 @@ mod quiche_implementation {
                                 ()
                             }
                             Ok((stream_id, quiche::h3::Event::Reset { .. })) => {
+                                client.admitted_streams.remove(&stream_id);
+                                client.pending_headers.remove(&stream_id);
+                                abort_request(client, stream_id, 0x10c);
                                 clean_stream(client, stream_id, &chunk_dispatch_channel);
                                 response_injection_buffer
                                     .cancel_request(client.conn.trace_id(), stream_id);
@@ -679,6 +768,16 @@ mod quiche_implementation {
             }
 
             if deadline.is_some_and(|time| Instant::now() >= time) {
+                let now = Instant::now();
+                for client in clients.values_mut() {
+                    if client
+                        .first_request_deadline
+                        .is_some_and(|deadline| now >= deadline)
+                    {
+                        client.first_request_deadline = None;
+                        let _ = client.conn.close(true, 0x107, b"first request deadline");
+                    }
+                }
                 for (connection, stream) in bodies.budgets.expired(Instant::now()) {
                     if let Some(client) = clients
                         .values_mut()
@@ -1039,6 +1138,12 @@ mod quiche_implementation {
             send_packet_time = Instant::now();
             // Garbage collect closed connections.
             clients.retain(|_, ref mut c| {
+                if c.conn.local_error().is_some() || c.conn.is_draining() {
+                    c.first_request_deadline = None;
+                    c.pending_headers.clear();
+                    c.admitted_streams.clear();
+                    c.http3_conn = None;
+                }
                 if c.conn.is_closed() {
                     response_injection_buffer.cancel_connection(c.conn.trace_id());
                     for stream in chunk_dispatch_channel.streams(c.conn.source_id().as_ref()) {
@@ -1102,8 +1207,20 @@ mod quiche_implementation {
         router
             .in_flight_streams_path_verification()
             .is_finished_request_a_valid_path(scid.clone(), stream);
-        shutdown_request(&mut client.conn, stream, 0x107); // H3_EXCESSIVE_LOAD
+        client.pending_headers.remove(&stream);
+        client.admitted_streams.remove(&stream);
+        abort_request(client, stream, 0x107); // H3_EXCESSIVE_LOAD
         clean_stream(client, stream, queues);
+    }
+
+    // quiche 0.29.3 retains per-stream parser state when a local response
+    // never finishes on an aborted stream. Bound those retained states too.
+    fn abort_request(client: &mut Client, stream: u64, code: u64) {
+        shutdown_request(&mut client.conn, stream, code);
+        client.aborted_streams += 1;
+        if client.aborted_streams >= 32 {
+            let _ = client.conn.close(true, 0x107, b"aborted stream limit");
+        }
     }
 
     fn reset_failed_stream(
@@ -1111,13 +1228,7 @@ mod quiche_implementation {
         stream_id: u64,
         queues: &crate::request_response::ChunksDispatchChannel,
     ) {
-        // H3_INTERNAL_ERROR. Existing callback side effects are not rolled back.
-        let _ = client
-            .conn
-            .stream_shutdown(stream_id, quiche::Shutdown::Read, 0x102);
-        let _ = client
-            .conn
-            .stream_shutdown(stream_id, quiche::Shutdown::Write, 0x102);
+        abort_request(client, stream_id, 0x102);
         clean_stream(client, stream_id, queues);
     }
 
