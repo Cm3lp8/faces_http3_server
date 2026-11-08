@@ -94,6 +94,51 @@ fn stream_server_child() {
     router.route_get("/ack", RouteConfig::default(), |r| {
         r.handler(&ack);
     });
+    if std::env::var("FACES_STREAM_CASE").as_deref() == Ok("body-security") {
+        router = router.with_body_limits(BodyLimits {
+            default_body_bytes: 8,
+            receive_timeout: Duration::from_millis(600),
+            ..BodyLimits::default()
+        });
+        let file_auth = router.middleware(&|headers, state: &State| {
+            let root = state.called.parent().unwrap();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !root.join("allow-upload").exists() {
+                assert!(Instant::now() < deadline);
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            MiddleWareFlow::Continue(headers)
+        });
+        let file = router.handler(&|event, _, _| {
+            let writer = event.file_writer().unwrap();
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while !writer.is_file_written().unwrap() {
+                assert!(Instant::now() < deadline);
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            let bytes = std::fs::read(event.get_file_path().unwrap()).unwrap();
+            Response::ok_200_with_data(event, bytes)
+        });
+        router.route_post(
+            "/file",
+            RouteConfig::new(DataManagement::Storage(BodyStorage::File)),
+            |route| {
+                route.middleware(&file_auth);
+                route.handler(&file);
+            },
+        );
+        let panic = router.handler(&|_, _, _| panic!("fixture handler unwind"));
+        router.route_get("/panic", RouteConfig::default(), |r| {
+            r.handler(&panic);
+        });
+        let echo = router.handler(&|event, _, _| {
+            let body = event.as_body().to_vec();
+            Response::ok_200_with_data(event, body)
+        });
+        router.route_post("/echo", RouteConfig::default(), |r| {
+            r.handler(&echo);
+        });
+    }
     let tls = PathBuf::from(std::env::var("FACES_STREAM_TLS").unwrap());
     Http3Server::new(&address.to_string())
         .add_cert_path(tls.join("cert.pem"))
@@ -210,7 +255,7 @@ impl WireClient {
         id
     }
 }
-fn run_case(case: &str, expected: u16) {
+fn start_server(case: &str) -> (OwnedServer, WireClient) {
     let base = PathBuf::from(
         std::env::var("FACES_TEST_ARTIFACT_DIR").expect("explicit local test artifact root"),
     );
@@ -275,6 +320,12 @@ fn run_case(case: &str, expected: u16) {
         client.pump();
         std::thread::sleep(Duration::from_millis(2));
     }
+    (server, client)
+}
+
+fn run_case(case: &str, expected: u16) {
+    let (mut server, mut client) = start_server(case);
+    let deadline = Instant::now() + Duration::from_secs(5);
     let path = if case == "missing" {
         b"/missing".as_slice()
     } else {
@@ -444,4 +495,154 @@ fn callback_error_resets_stream_instead_of_silent_success() {
 #[ignore = "requires explicit local fixture root and loopback"]
 fn blocked_opening_callback_error_resets_without_final_headers_or_data() {
     run_case("blocked-callback-error", 200);
+}
+
+// Await a terminal response on this stream, retaining the same verified
+// connection so a reset cannot masquerade as a process or connection failure.
+fn terminal(client: &mut WireClient, stream: u64) -> Result<Vec<u8>, u64> {
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let mut payload = Vec::new();
+    let mut ok = false;
+    loop {
+        assert!(Instant::now() < deadline, "response deadline for {stream}");
+        client.pump();
+        let http = client.http.as_mut().unwrap();
+        loop {
+            match http.poll(&mut client.conn) {
+                Ok((id, h3::Event::Reset(code))) if id == stream => return Err(code),
+                Ok((id, h3::Event::Headers { list, .. })) if id == stream => {
+                    if list
+                        .iter()
+                        .any(|h| h.name() == b":status" && h.value() == b"200")
+                    {
+                        ok = true;
+                    }
+                }
+                Ok((id, h3::Event::Data)) => {
+                    let mut part = [0; 2048];
+                    while let Ok(len) = http.recv_body(&mut client.conn, id, &mut part) {
+                        if id == stream {
+                            payload.extend_from_slice(&part[..len]);
+                        }
+                    }
+                }
+                Ok((id, h3::Event::Finished)) if id == stream => {
+                    assert!(ok);
+                    return Ok(payload);
+                }
+                Ok(_) => {}
+                Err(h3::Error::Done) => break,
+                Err(error) => panic!("poll failed: {error:?}"),
+            }
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+fn post_to(client: &mut WireClient, path: &[u8], length: Option<&[u8]>) -> u64 {
+    let mut headers = vec![
+        Header::new(b":method", b"POST"),
+        Header::new(b":scheme", b"https"),
+        Header::new(b":authority", b"localhost"),
+        Header::new(b":path", path),
+    ];
+    if let Some(length) = length {
+        headers.push(Header::new(b"content-length", length));
+    }
+    client
+        .http
+        .as_mut()
+        .unwrap()
+        .send_request(&mut client.conn, &headers, false)
+        .unwrap()
+}
+
+#[test]
+#[ignore = "requires explicit local fixture root and loopback"]
+fn constrained_bodies_and_panicking_handlers_leave_the_connection_usable() {
+    let (mut server, mut client) = start_server("body-security");
+    let id = post_to(&mut client, b"/echo", Some(b"9"));
+    assert_eq!(terminal(&mut client, id), Err(0x107));
+    let id = post_to(&mut client, b"/echo", None);
+    client
+        .http
+        .as_mut()
+        .unwrap()
+        .send_body(&mut client.conn, id, b"1234", false)
+        .unwrap();
+    client.flush();
+    client
+        .http
+        .as_mut()
+        .unwrap()
+        .send_body(&mut client.conn, id, b"56789", true)
+        .unwrap();
+    assert_eq!(terminal(&mut client, id), Err(0x107));
+    let id = post_to(&mut client, b"/echo", None);
+    assert_eq!(terminal(&mut client, id), Err(0x107)); // absolute timeout without further DATA
+    for _ in 0..10 {
+        let id = client.request(b"/panic", false);
+        assert_eq!(terminal(&mut client, id), Err(0x102));
+    }
+    let id = post_to(&mut client, b"/echo", Some(b"8"));
+    client
+        .http
+        .as_mut()
+        .unwrap()
+        .send_body(&mut client.conn, id, b"12345678", true)
+        .unwrap();
+    assert_eq!(terminal(&mut client, id), Ok(b"12345678".to_vec()));
+    assert!(server.child.try_wait().unwrap().is_none());
+}
+
+#[test]
+#[ignore = "requires explicit local fixture root and loopback"]
+fn file_prefix_reset_and_authorized_disk_stream_preserve_the_route() {
+    let (server, mut client) = start_server("body-security");
+    let id = post_to(&mut client, b"/file", None);
+    client
+        .http
+        .as_mut()
+        .unwrap()
+        .send_body(&mut client.conn, id, b"012345678", true)
+        .unwrap();
+    assert_eq!(terminal(&mut client, id), Err(0x107));
+    // Middleware finishing after this reset must not create a staging file.
+    assert_eq!(
+        std::fs::read_dir(server.root.join("staging"))
+            .unwrap()
+            .count(),
+        0
+    );
+    std::fs::write(server.root.join("allow-upload"), b"yes").unwrap();
+    let id = post_to(&mut client, b"/file", Some(b"16"));
+    client
+        .http
+        .as_mut()
+        .unwrap()
+        .send_body(&mut client.conn, id, b"prefix", false)
+        .unwrap();
+    client.flush();
+    let deadline = Instant::now() + Duration::from_millis(500);
+    while std::fs::read_dir(server.root.join("staging"))
+        .unwrap()
+        .count()
+        == 0
+    {
+        assert!(Instant::now() < deadline);
+        client.pump();
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    client
+        .http
+        .as_mut()
+        .unwrap()
+        .send_body(&mut client.conn, id, b"0123456789", true)
+        .unwrap();
+    assert_eq!(terminal(&mut client, id), Ok(b"prefix0123456789".to_vec()));
+    assert_eq!(
+        std::fs::read_dir(server.root.join("staging"))
+            .unwrap()
+            .count(),
+        1
+    );
 }

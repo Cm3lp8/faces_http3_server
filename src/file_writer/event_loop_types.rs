@@ -24,6 +24,11 @@ impl FileWriterListener {
             sender: sender.clone(),
         }
     }
+    pub(crate) fn try_send_writable_item(&self, item: WritableItem) -> Result<(), ()> {
+        self.sender
+            .try_send(FileWrkrEvEvent::WriteOnDisk(item))
+            .map_err(|_| ())
+    }
     pub fn send_writable_item(&self, writable_item: WritableItem) {
         self.sender
             .send(FileWrkrEvEvent::WriteOnDisk(writable_item));

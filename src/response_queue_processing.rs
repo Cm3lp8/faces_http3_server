@@ -22,6 +22,7 @@ mod response_pool_processing {
     use super::{response_worker::ResponseThreadPool, ResponseInjectionBuffer};
 
     pub struct ResponseInjection {
+        pub(crate) lease: Option<Arc<crate::body_budget::BodyLease>>,
         stream_id: u64,
         scid: Vec<u8>,
         conn_id: String,
@@ -37,6 +38,7 @@ mod response_pool_processing {
             mio_waker: Arc<mio::Waker>,
         ) -> Self {
             Self {
+                lease: None,
                 stream_id,
                 scid: scid.to_vec(),
                 conn_id: conn_id.to_string(),
@@ -151,10 +153,23 @@ mod response_pool_processing {
             has_more_frames: bool,
             mio_waker: &Arc<mio::Waker>,
         ) -> Result<(), crossbeam_channel::SendError<ResponseInjection>> {
+            self.send_admitted(stream_id, scid, conn_id, has_more_frames, mio_waker, None)
+        }
+
+        pub(crate) fn send_admitted(
+            &self,
+            stream_id: u64,
+            scid: &[u8],
+            conn_id: &str,
+            has_more_frames: bool,
+            mio_waker: &Arc<mio::Waker>,
+            lease: Option<Arc<crate::body_budget::BodyLease>>,
+        ) -> Result<(), crossbeam_channel::SendError<ResponseInjection>> {
             let mio_waker = mio_waker.clone();
-            let response_injection =
+            let mut response_injection =
                 ResponseInjection::new(stream_id, scid, conn_id, has_more_frames, mio_waker);
 
+            response_injection.lease = lease;
             self.sender.send(response_injection)
         }
     }

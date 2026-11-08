@@ -85,9 +85,18 @@ mod reponse_process_thread_pool {
             let worker = std::thread::spawn(move || {
                 // TODO secure this with a retry logic
                 while let Ok(response_injection) = injection_channel.1.recv() {
-                    match worker_cb(response_injection, &response_injection_buffer_clone) {
-                        Ok(_) => {}
-                        Err(response_injection) => {
+                    let (stream, conn) = response_injection.req_id();
+                    let scid = response_injection.scid();
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        worker_cb(response_injection, &response_injection_buffer_clone)
+                    }));
+                    match result {
+                        Err(_) => {
+                            error!("request handler panicked; resetting stream");
+                            response_injection_buffer_clone.fail_stream(&conn, stream, &scid);
+                        }
+                        Ok(Ok(())) => {}
+                        Ok(Err(response_injection)) => {
                             std::thread::sleep(Duration::from_micros(100));
                             if let Err(e) = injection_channel.0.send(response_injection) {
                                 error!("Faces_quic_server: failed to send response_injection")

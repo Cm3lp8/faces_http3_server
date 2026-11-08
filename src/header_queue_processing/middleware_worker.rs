@@ -246,39 +246,23 @@ mod thread_pool {
             waker: &Waker,
             new_request_signal: &SignalNewRequest,
         ) {
-            //if the thread reached here,create an entry in partial response table
-            if route_handler.is_request_set_in_table(stream_id, conn_id) {
-                let (data_management_type, event_listener) =
-                    route_handler.get_additionnal_attributes(path, method);
-
-                // the partial was partially set on the first data packet
-                // but path, methods, headers was not known because
-                // header wasn't entirelly processed.
-                // file was not created yet
-                route_handler.complete_request_entry_in_table(
-                    server_config,
-                    stream_id,
-                    conn_id,
-                    method,
-                    path,
-                    &headers,
-                    content_length,
-                    data_management_type,
-                    event_listener,
-                    file_writer_manager,
-                );
-            } else {
-                route_handler.create_new_request_in_table(
-                    path,
-                    stream_id,
-                    conn_id,
-                    method,
-                    &headers,
-                    content_length,
-                    has_more_frames,
-                    server_config,
-                    file_writer_manager,
-                );
+            let (data_management_type, event_listener) =
+                route_handler.get_additionnal_attributes(path, method);
+            if !route_handler.complete_admitted_request(
+                server_config,
+                stream_id,
+                conn_id,
+                method,
+                path,
+                headers,
+                content_length,
+                data_management_type,
+                event_listener,
+                file_writer_manager,
+            ) {
+                // A cancelled stream has no entry to recreate.
+                let _ = new_request_signal.send_rejected((stream_id, conn_id.to_owned()));
+                return;
             }
             if let Err(_) = route_handler.send_reception_status_first(
                 stream_id,
@@ -314,32 +298,25 @@ mod thread_pool {
             waker: &Waker,
             new_request_signal: &SignalNewRequest,
         ) {
-            //if the thread reached here,create an entry in partial response table
-            if route_handler.is_request_set_in_table(stream_id, conn_id) {
-                route_handler.complete_request_entry_in_table(
-                    server_config,
-                    stream_id,
-                    conn_id,
-                    method,
-                    path,
-                    &headers,
-                    content_length,
-                    Some(DataManagement::Storage(crate::BodyStorage::InMemory)),
-                    None,
-                    file_writer_manager,
-                );
-            } else {
-                route_handler.create_new_request_in_table(
-                    path,
-                    stream_id,
-                    conn_id,
-                    method,
-                    &headers,
-                    content_length,
-                    true,
-                    server_config,
-                    file_writer_manager,
-                );
+            let (data_management_type, event_listener) = (
+                Some(DataManagement::Storage(crate::BodyStorage::InMemory)),
+                None,
+            );
+            if !route_handler.complete_admitted_request(
+                server_config,
+                stream_id,
+                conn_id,
+                method,
+                path,
+                headers,
+                content_length,
+                data_management_type,
+                event_listener,
+                file_writer_manager,
+            ) {
+                // A cancelled stream has no entry to recreate.
+                let _ = new_request_signal.send_rejected((stream_id, conn_id.to_owned()));
+                return;
             }
             if let Err(_) = route_handler.send_reception_status_first(
                 stream_id,
@@ -375,6 +352,7 @@ mod job {
     }
 
     pub struct MiddleWareJob {
+        pub(crate) lease: Option<Arc<crate::body_budget::BodyLease>>,
         path: String,
         method: H3Method,
         stream_id: u64,
@@ -403,6 +381,7 @@ mod job {
             task_done_sender: crossbeam_channel::Sender<MiddleWareResult>,
         ) -> Self {
             Self {
+                lease: None,
                 path: path.to_string(),
                 method,
                 stream_id,

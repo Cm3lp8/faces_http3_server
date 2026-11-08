@@ -92,7 +92,7 @@ mod request_hndlr {
             let conn_id = msg.conn_id();
             let has_more_frames = msg.more_frames();
             let headers = msg.headers();
-            let middleware_job = MiddleWareJob::new(
+            let mut middleware_job = MiddleWareJob::new(
                 path,
                 method,
                 route_type,
@@ -106,6 +106,7 @@ mod request_hndlr {
                 middleware_result_sender,
             );
 
+            middleware_job.lease = msg.lease;
             Some(middleware_job)
         }
         pub fn set_intermediate_headers_send(&self, stream_id: u64, client: &Client) {
@@ -175,7 +176,6 @@ mod request_hndlr {
             chunk_dispatch_channel: &ChunksDispatchChannel,
         ) -> Result<usize, ()> {
             let inner = &*self.inner;
-            let sender = chunk_dispatch_channel.insert_new_channel(stream_id, &scid);
 
             let headers = vec![
                 h3::Header::new(b":status", b"100"),
@@ -322,9 +322,13 @@ mod request_hndlr {
             waker: &Arc<Waker>,
             response_injection_sender: &ResponsePoolProcessingSender,
         ) {
-            if let Err(e) = response_injection_sender.send(
-                stream_id, scid, conn_id, false, // content_length,
+            if let Err(e) = response_injection_sender.send_admitted(
+                stream_id,
+                scid,
+                conn_id,
+                false,
                 waker,
+                self.routes_states().dispatch_lease(conn_id, stream_id),
             ) {
                 error!("failed response injection on handle finished stream send ");
             }
@@ -416,27 +420,8 @@ mod request_hndlr {
             event_subscriber: Option<Arc<dyn RouteEventListener + 'static + Send + Sync>>,
             file_writer_manager: &Arc<FileWriter>,
         ) {
-            let inner = &self.inner;
-
-            let mut file_storage = None::<PathBuf>;
-            let mut file_open = None::<FileWriterHandle>;
-            match response_queue_processing::utils::build_temp_stage_file_storage_path(
+            let _ = self.complete_admitted_request(
                 server_config,
-                headers,
-                stream_id,
-                conn_id.to_owned(),
-                content_length,
-                &data_management_type,
-                file_writer_manager,
-            ) {
-                Some(file_s) => {
-                    file_storage = Some(file_s.0);
-                    file_open = Some(file_s.1)
-                }
-                None => {}
-            };
-
-            inner.routes_states().complete_request_entry_in_table(
                 stream_id,
                 conn_id,
                 method,
@@ -445,8 +430,33 @@ mod request_hndlr {
                 content_length,
                 data_management_type,
                 event_subscriber,
-                file_storage,
-                file_open,
+                file_writer_manager,
+            );
+        }
+        pub(crate) fn complete_admitted_request(
+            &self,
+            server_config: &Arc<ServerConfig>,
+            stream_id: u64,
+            conn_id: &str,
+            method: H3Method,
+            path: &str,
+            headers: &[h3::Header],
+            content_length: Option<usize>,
+            data_management_type: Option<DataManagement>,
+            event_subscriber: Option<Arc<dyn RouteEventListener + 'static + Send + Sync>>,
+            file_writer_manager: &Arc<FileWriter>,
+        ) -> bool {
+            self.inner.routes_states().complete_admitted_request(
+                stream_id,
+                conn_id,
+                method,
+                path,
+                headers,
+                content_length,
+                data_management_type,
+                event_subscriber,
+                server_config,
+                file_writer_manager,
             )
         }
         pub fn create_new_request_in_table(
@@ -599,7 +609,6 @@ mod route_handle_implementation {
         _event_type: EventType,
         header_priority: HeaderPriority,
     ) {
-        chunk_dispatch_channel.insert_new_channel(stream_id, scid);
         let header_sender = chunk_dispatch_channel.get_high_priority_sender(stream_id, scid);
         let (status, content) = match error_type {
             ErrorResponse::Error401(content) => (b"401", content),
@@ -651,7 +660,7 @@ mod route_handle_implementation {
     ) {
         if let Some((mut headers, body)) = guard.get_error_response(ErrorType::Error404) {
             headers.push(h3::Header::new(b"x-wrong-path", req_path.as_bytes()));
-            chunk_dispatch_channel.insert_new_channel(stream_id, &scid);
+
             let header_sender = chunk_dispatch_channel.get_high_priority_sender(stream_id, &scid);
             let body_sender = chunk_dispatch_channel.get_low_priority_sender(stream_id, &scid);
             match body {
@@ -697,7 +706,6 @@ mod route_handle_implementation {
                 }
             }
         } else {
-            chunk_dispatch_channel.insert_new_channel(stream_id, &scid);
             let header_sender = chunk_dispatch_channel.get_high_priority_sender(stream_id, &scid);
             let (_recv_send_confirmation, header_req) = HeaderRequest::new(
                 stream_id,
@@ -710,7 +718,11 @@ mod route_handle_implementation {
             );
             if let Err(_) = chunking_station
                 .get_chunking_dispatch_channel()
-                .send_to_high_priority_queue(stream_id, &scid, QueuedRequest::new_header(header_req))
+                .send_to_high_priority_queue(
+                    stream_id,
+                    &scid,
+                    QueuedRequest::new_header(header_req),
+                )
             {
                 error!("Failed to send header_req")
             }
@@ -789,7 +801,7 @@ mod route_handle_implementation {
         {
             route_event = Some(rt_event);
         }
-        chunk_dispatch_channel.insert_new_channel(stream_id, &scid);
+
         let header_sender = chunk_dispatch_channel.get_high_priority_sender(stream_id, &scid);
         let body_sender = chunk_dispatch_channel.get_low_priority_sender(stream_id, &scid);
 
@@ -862,8 +874,8 @@ mod route_handle_implementation {
                     H3Method::GET => {
                         /*stream shutdown send response*/
 
-                        if let Some(resp) = &mut response {
-                            resp.attach_chunk_sender(body_sender.unwrap());
+                        if let (Some(resp), Some(sender)) = (&mut response, body_sender) {
+                            resp.attach_chunk_sender(sender);
                         }
                         if let Ok((headers, body)) =
                             route_form.build_response(stream_id, &scid, conn_id, response)
@@ -919,13 +931,12 @@ mod route_handle_implementation {
                         }
                     }
                     H3Method::POST => {
-                        chunk_dispatch_channel.insert_new_channel(stream_id, scid);
                         let body_sender =
                             chunk_dispatch_channel.get_low_priority_sender(stream_id, scid);
                         let header_sender =
                             chunk_dispatch_channel.get_high_priority_sender(stream_id, scid);
-                        if let Some(resp) = &mut response {
-                            resp.attach_chunk_sender(body_sender.unwrap())
+                        if let (Some(resp), Some(sender)) = (&mut response, body_sender) {
+                            resp.attach_chunk_sender(sender)
                         }
                         if let Ok((headers, body)) =
                             route_form.build_response(stream_id, scid, conn_id, response)
@@ -983,13 +994,12 @@ mod route_handle_implementation {
                         }
                     }
                     H3Method::DELETE => {
-                        chunk_dispatch_channel.insert_new_channel(stream_id, scid);
                         let body_sender =
                             chunk_dispatch_channel.get_low_priority_sender(stream_id, scid);
                         let header_sender =
                             chunk_dispatch_channel.get_high_priority_sender(stream_id, scid);
-                        if let Some(resp) = &mut response {
-                            resp.attach_chunk_sender(body_sender.unwrap())
+                        if let (Some(resp), Some(sender)) = (&mut response, body_sender) {
+                            resp.attach_chunk_sender(sender)
                         }
                         if let Ok((headers, body)) =
                             route_form.build_response(stream_id, scid, conn_id, response)
@@ -1066,7 +1076,6 @@ mod route_handle_implementation {
             .routes_states()
             .build_route_event(conn_id, scid, stream_id, event_type)
         {
-            chunk_dispatch_channel.insert_new_channel(stream_id, &scid);
             let header_sender = chunk_dispatch_channel.get_high_priority_sender(stream_id, &scid);
             let body_sender = chunk_dispatch_channel.get_low_priority_sender(stream_id, &scid);
             let is_end = route_event.is_end();
@@ -1085,8 +1094,8 @@ mod route_handle_implementation {
                                 None
                             };
 
-                        if let Some(resp) = &mut response {
-                            resp.attach_chunk_sender(body_sender.unwrap());
+                        if let (Some(resp), Some(sender)) = (&mut response, body_sender) {
+                            resp.attach_chunk_sender(sender);
                         }
                         /*
                                                     client
@@ -1142,7 +1151,6 @@ mod route_handle_implementation {
                         }
                     }
                     H3Method::POST => {
-                        chunk_dispatch_channel.insert_new_channel(stream_id, scid);
                         let body_sender =
                             chunk_dispatch_channel.get_low_priority_sender(stream_id, scid);
                         let header_sender =
@@ -1153,8 +1161,8 @@ mod route_handle_implementation {
                             } else {
                                 None
                             };
-                        if let Some(resp) = &mut response {
-                            resp.attach_chunk_sender(body_sender.unwrap())
+                        if let (Some(resp), Some(sender)) = (&mut response, body_sender) {
+                            resp.attach_chunk_sender(sender)
                         }
                         if let Ok((headers, body)) =
                             route_form.build_response(stream_id, scid, conn_id, response)
@@ -1245,6 +1253,7 @@ mod route_handle_implementation {
                 (4, ErrorResponse::Error403(None), b"403", None),
                 (8, ErrorResponse::Error415(Some(vec![])), b"415", None),
             ] {
+                queues.insert_new_channel(id, &[1]);
                 route.inner(|guard| {
                     send_error(
                         error,
@@ -1277,5 +1286,4 @@ mod route_handle_implementation {
             }
         }
     }
-
 }

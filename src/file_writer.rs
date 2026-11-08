@@ -74,6 +74,10 @@ mod file_wrtr {
             self.file_worker_pool
                 .associate_stream_with_next_listener(stream_id, conn_id);
         }
+        pub(crate) fn forget_stream(&self, stream_id: u64, conn: &str) {
+            self.file_worker_pool
+                .remove_completed_stream_from_map(stream_id, conn.to_owned());
+        }
         pub fn create_file_writer_handle(
             &self,
             file: std::fs::File,
@@ -298,6 +302,15 @@ mod writable_type {
             }
         }
 
+        pub(crate) fn cancel(&self) {
+            let error = self
+                .inner
+                .lock()
+                .unwrap()
+                .fail(io::Error::new(ErrorKind::Interrupted, "request cancelled"));
+            self.take_callback();
+            self.settle(&Err(error), None);
+        }
         pub fn set_file_length(&self, file_length: usize) {
             let (result, callback) = {
                 let mut state = self.inner.lock().unwrap();
@@ -487,14 +500,16 @@ mod writable_type {
     #[derive(Clone)]
     pub struct WritableItem {
         packet_id: usize,
-        data: Vec<u8>,
+        data: Arc<Vec<u8>>,
+        pub(crate) charge: Option<Arc<crate::body_budget::FilePacket>>,
         writer: FileWriterHandle,
     }
     impl WritableItem {
         pub fn new(data: Vec<u8>, packet_id: usize, writer: FileWriterHandle) -> Self {
             Self {
                 packet_id,
-                data,
+                data: Arc::new(data),
+                charge: None,
                 writer,
             }
         }

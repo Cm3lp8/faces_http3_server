@@ -2,6 +2,7 @@
 pub use header_reception::{HeaderMessage, HeaderProcessing};
 pub use middleware_worker::{MiddleWareJob, RouteType};
 pub use workers::extract_path_from_hdr;
+pub(crate) use workers::parse_request_headers;
 
 mod middleware_worker;
 mod header_reception {
@@ -26,6 +27,7 @@ mod header_reception {
 
     #[derive(Clone)]
     pub struct HeaderMessage {
+        pub(crate) lease: Option<Arc<crate::body_budget::BodyLease>>,
         stream_id: u64,
         scid: Vec<u8>,
         conn_id: String,
@@ -41,6 +43,7 @@ mod header_reception {
             headers: Vec<h3::Header>,
         ) -> Self {
             Self {
+                lease: None,
                 stream_id,
                 scid,
                 conn_id,
@@ -122,9 +125,12 @@ mod header_reception {
             conn_id: String,
             header: Vec<h3::Header>,
             more_frames: bool,
+            lease: Arc<crate::body_budget::BodyLease>,
         ) {
-            let header_message = HeaderMessage::new(stream_id, scid, conn_id, more_frames, header);
+            let mut header_message =
+                HeaderMessage::new(stream_id, scid, conn_id, more_frames, header);
 
+            header_message.lease = Some(lease);
             if let Err(e) = self.incoming_header_channel.0.send(header_message) {
                 error!("Failed to send new incoming header");
             }
@@ -416,7 +422,9 @@ mod workers {
         parse_request_headers(headers).map(|(_, path, _)| path)
     }
 
-    fn parse_request_headers(headers: &[h3::Header]) -> Option<(Vec<u8>, String, Option<usize>)> {
+    pub(crate) fn parse_request_headers(
+        headers: &[h3::Header],
+    ) -> Option<(Vec<u8>, String, Option<usize>)> {
         let mut method = None;
         let mut path = None;
         let mut content_length = None;

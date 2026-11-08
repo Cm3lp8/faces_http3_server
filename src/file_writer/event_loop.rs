@@ -32,7 +32,7 @@ impl FileWriterPool {
         let mut workers: Vec<(Chan, FileWriterWorker)> = (0..workers_amount)
             .into_iter()
             .map(|i| {
-                let chan = crossbeam_channel::unbounded();
+                let chan = crossbeam_channel::bounded(1024);
 
                 (chan.clone(), FileWriterWorker::new(chan.1, &m_ev))
             })

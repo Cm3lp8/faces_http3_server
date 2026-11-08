@@ -27,6 +27,8 @@ pub use stream_sessions::StreamSessions;
 pub use stream_sessions::UserSessions;
 pub use stream_sessions::{StreamIdent, StreamManagement, ToStreamIdent};
 
+mod body_budget;
+pub use body_budget::BodyLimits;
 mod event_listener;
 mod file_writer;
 mod middleware;
@@ -63,13 +65,13 @@ pub mod prelude {
     };
     pub use crate::server_init::Http3Server;
     pub use crate::stream_sessions::StreamMessageCapsule;
-    pub use crate::ServerRunError;
     pub use crate::StreamBridge;
     pub use crate::StreamHandle;
     pub use crate::StreamIdent;
     pub use crate::StreamSessions;
     pub use crate::ToStreamIdent;
     pub use crate::UserSessions;
+    pub use crate::{BodyLimits, ServerRunError};
     pub use quiche::h3;
 }
 

@@ -42,19 +42,31 @@ mod route_config {
     }
     #[derive(Debug)]
     pub struct RouteConfig {
+        max_body_bytes: Option<usize>,
         data_management: DataManagement,
     }
 
     impl Default for RouteConfig {
         fn default() -> Self {
             Self {
+                max_body_bytes: None,
                 data_management: Default::default(),
             }
         }
     }
     impl RouteConfig {
         pub fn new(data_management: DataManagement) -> RouteConfig {
-            Self { data_management }
+            Self {
+                data_management,
+                max_body_bytes: None,
+            }
+        }
+        pub fn with_max_body_bytes(mut self, bytes: usize) -> Self {
+            self.max_body_bytes = Some(bytes);
+            self
+        }
+        pub(crate) fn max_body_bytes(&self) -> Option<usize> {
+            self.max_body_bytes
         }
         pub fn data_management(&self) -> DataManagement {
             self.data_management
@@ -122,6 +134,7 @@ mod route_mngr {
                 routes_formats: HashMap::new(),
                 stream_sessions: Some(StreamSessions::<T>::new()),
                 error_formats: HashMap::new(),
+                body_limits: crate::BodyLimits::default(),
                 app_state: Some(app_state),
                 global_middlewares: vec![],
             }
@@ -310,10 +323,16 @@ mod route_mngr {
         routes_formats: HashMap<ReqPath, Vec<Arc<RouteForm<S>>>>,
         stream_sessions: Option<StreamSessions<T>>,
         error_formats: HashMap<ErrorType, ErrorForm>,
+        body_limits: crate::BodyLimits,
         app_state: Option<S>,
         global_middlewares: Vec<Arc<dyn MiddleWare + Send + Sync + 'static>>,
     }
     impl<S: Send + Sync + 'static + Clone, T: UserSessions<Output = T>> RouteManagerBuilder<S, T> {
+        pub fn with_body_limits(mut self, limits: crate::BodyLimits) -> Self {
+            self.body_limits = limits;
+            self
+        }
+
         pub fn with_stream_sessions(mut self, stream_sessions: &StreamSessions<T>) -> Self {
             self.stream_sessions = Some(stream_sessions.clone());
             self
@@ -340,7 +359,7 @@ mod route_mngr {
                 routes_formats,
                 error_formats: std::mem::replace(&mut self.error_formats, HashMap::new()),
                 app_state: self.app_state.take().unwrap(),
-                route_states: RequestsTable::new(),
+                route_states: RequestsTable::with_body_limits(self.body_limits),
                 route_event_dispatcher: handle_dispatcher,
             };
 
@@ -753,6 +772,12 @@ mod route_mngr {
             &self,
         ) -> Option<Arc<dyn RouteEventListener + 'static + Send + Sync>> {
             self.event_subscriber.clone()
+        }
+
+        pub(crate) fn max_body_bytes(&self) -> Option<usize> {
+            self.route_configuration
+                .as_ref()
+                .and_then(|config| config.max_body_bytes())
         }
 
         pub fn data_management_type(&self) -> Option<DataManagement> {

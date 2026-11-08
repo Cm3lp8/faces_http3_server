@@ -98,22 +98,71 @@ mod req_temp_table {
 
     use super::*;
 
+    use crate::body_budget::{BodyBudgets, BodyLease};
+    use std::time::Instant;
     type ReqId = (String, u64);
     pub struct RequestsTable {
         table: Arc<DashMap<ReqId, PartialReq>>,
+        pub(crate) budgets: Arc<BodyBudgets>,
     }
 
     impl RequestsTable {
         pub fn new() -> Self {
+            Self::with_body_limits(crate::BodyLimits::default())
+        }
+        pub(crate) fn with_body_limits(limits: crate::BodyLimits) -> Self {
             Self {
+                budgets: Arc::new(BodyBudgets::new(limits)),
                 table: Arc::new(DashMap::new()),
             }
+        }
+        pub(crate) fn track_body(
+            &self,
+            conn: &str,
+            stream: u64,
+            lease: Arc<BodyLease>,
+            writer: Arc<FileWriter>,
+            end: bool,
+        ) {
+            let mut entry = PartialReq::new(
+                conn.to_owned(),
+                stream,
+                None,
+                Some(DataManagement::default()),
+                None,
+                None,
+                None,
+                writer,
+                None,
+                None,
+                None,
+                end,
+            );
+            entry.lease = Some(lease);
+            self.table.insert((conn.to_owned(), stream), entry);
+        }
+
+        pub(crate) fn reject_body(&self, conn: &str, stream: u64) {
+            if let Some(mut entry) = self.table.get_mut(&(conn.to_owned(), stream)) {
+                entry.body = Vec::new();
+                entry.rejected = true;
+                if let Some(lease) = &entry.lease {
+                    lease.clear_buffered(false);
+                }
+            }
+        }
+
+        pub(crate) fn dispatch_lease(&self, conn: &str, stream: u64) -> Option<Arc<BodyLease>> {
+            self.table
+                .get(&(conn.to_owned(), stream))
+                .and_then(|entry| entry.lease.clone())
         }
         pub(crate) fn discard_request(&self, conn_id: &str, stream_id: u64) {
             self.table.remove(&(conn_id.to_owned(), stream_id));
         }
         pub(crate) fn discard_connection(&self, conn_id: &str) {
-            self.table.retain(|(connection, _), _| connection != conn_id);
+            self.table
+                .retain(|(connection, _), _| connection != conn_id);
         }
         pub fn set_intermediate_headers_send(&self, stream_id: u64, conn_id: String) {
             if let Some(mut entry) = self.table.get_mut(&(conn_id, stream_id)) {
@@ -147,6 +196,62 @@ mod req_temp_table {
                     entry.content_length = content_length;
                     entry.headers = Some(headers.to_vec());
                 });
+        }
+        pub(crate) fn complete_admitted_request(
+            &self,
+            stream_id: u64,
+            conn_id: &str,
+            method: H3Method,
+            path: &str,
+            headers: &[h3::Header],
+            content_length: Option<usize>,
+            data_management_type: Option<DataManagement>,
+            event_subscriber: Option<Arc<dyn RouteEventListener + 'static + Send + Sync>>,
+            server_config: &ServerConfig,
+            file_writer_manager: &Arc<FileWriter>,
+        ) -> bool {
+            let Some(mut entry) = self.table.get_mut(&(conn_id.to_owned(), stream_id)) else {
+                // Reset, timeout or connection cleanup beat the middleware.
+                return false;
+            };
+            let (path, args) = ReqArgs::parse_args(path);
+            entry.method = Some(method);
+            entry.path = Some(path);
+            entry.args = args;
+            entry.event_subscriber = event_subscriber;
+            entry.data_management_type = data_management_type;
+            entry.content_length = content_length;
+            entry.headers = Some(headers.to_vec());
+            if matches!(
+                data_management_type,
+                Some(DataManagement::Storage(BodyStorage::File))
+            ) {
+                let storage =
+                    crate::response_queue_processing::utils::build_temp_stage_file_storage_path(
+                        server_config,
+                        headers,
+                        stream_id,
+                        conn_id.to_owned(),
+                        content_length,
+                        &data_management_type,
+                        file_writer_manager,
+                    );
+                let prefix = std::mem::take(&mut entry.body);
+                if let Some((path, writer)) = storage {
+                    entry.storage_path = Some(path);
+                    if !prefix.is_empty() {
+                        // FileWriter retains the error (including a bad declared
+                        // length) for the existing upload handler at FIN.
+                        let _ = writer.write_on_disk(&prefix);
+                    }
+                    entry.file_opened = Some(writer);
+                }
+                drop(prefix);
+                if let Some(lease) = &entry.lease {
+                    lease.clear_buffered(false);
+                }
+            }
+            true
         }
         pub fn is_entry_partial_reponse_set(&self, stream_id: u64, conn_id: &str) -> bool {
             if let Some(_entry) = self.table.get(&(conn_id.to_string(), stream_id)) {
@@ -237,6 +342,7 @@ mod req_temp_table {
                         _ => {}
                     }
                 }
+                partial_req.dispatched = true;
                 let request_event =
                     partial_req.to_route_event(stream_id, scid, conn_id, event_type);
 
@@ -269,9 +375,19 @@ mod req_temp_table {
         ) -> Result<usize, ()> {
             let mut total_written: Result<usize, ()> = Err(());
             if let Some(mut entry) = self.table.get_mut(&(conn_id.clone(), stream_id)) {
+                if entry.rejected {
+                    return Ok(0);
+                }
                 if let Some(data_mngmt) = entry.data_management_type() {
+                    let received = entry.written();
+                    let lease = entry.lease.clone();
+                    let now = Instant::now();
                     match data_mngmt {
                         DataManagement::Stream => {
+                            if let Some(lease) = &lease {
+                                lease.receive_stream(received, packet.len(), now)?;
+                            }
+                            entry.body_written_size += packet.len();
                             if let Some(suscriber) = entry.event_subscriber() {
                                 suscriber.on_data(RouteEvent::new_data(DataEvent::new(
                                     stream_id,
@@ -281,13 +397,28 @@ mod req_temp_table {
                                     is_end,
                                 )));
                             }
+                            total_written = Ok(entry.written());
                         }
                         DataManagement::Storage(body_storage) => match body_storage {
                             BodyStorage::InMemory => {
+                                if let Some(lease) = &lease {
+                                    lease.reserve_buffer(
+                                        &mut entry.body,
+                                        received,
+                                        packet.len(),
+                                        now,
+                                    )?;
+                                }
                                 entry.extend_data(packet, is_end);
                                 total_written = Ok(entry.written());
                             }
                             BodyStorage::File => {
+                                let charge = lease
+                                    .as_ref()
+                                    .map(|lease| {
+                                        lease.queue_file_packet(received, packet.len(), now)
+                                    })
+                                    .transpose()?;
                                 if let Some(suscriber) = entry.event_subscriber() {
                                     suscriber.on_data(RouteEvent::new_data(DataEvent::new(
                                         stream_id,
@@ -303,7 +434,7 @@ mod req_temp_table {
 
                                 entry.flush_and_prefix_with_temp_buffer_if_any_bytes();
 
-                                entry.write_file(packet, 0, is_end);
+                                entry.write_file(packet, 0, is_end, charge)?;
                                 total_written = Ok(entry.written());
                             }
                         },
@@ -518,6 +649,9 @@ mod req_temp_table {
         }
     }
     struct PartialReq {
+        lease: Option<Arc<BodyLease>>,
+        rejected: bool,
+        dispatched: bool,
         conn_id: String,
         stream_id: u64,
         headers: Option<Vec<h3::Header>>,
@@ -535,6 +669,27 @@ mod req_temp_table {
         progress_header_sent: bool,
         body: Vec<u8>,
         is_end: bool,
+    }
+    impl Drop for PartialReq {
+        fn drop(&mut self) {
+            if !self.dispatched {
+                self.body = Vec::new();
+                if let Some(lease) = &self.lease {
+                    lease.clear_buffered(true);
+                }
+            }
+            if self.storage_path.is_some() {
+                self.file_writer_manager
+                    .forget_stream(self.stream_id, &self.conn_id);
+            }
+            // A successful FIN transfers this handle to FinishedEvent.
+            if let Some(writer) = self.file_opened.take() {
+                writer.cancel();
+                if let Some(path) = self.storage_path.take() {
+                    let _ = std::fs::remove_file(path);
+                }
+            }
+        }
     }
     impl Debug for PartialReq {
         fn fmt(&self, f: &mut Formatter) -> Result<(), std::fmt::Error> {
@@ -578,6 +733,9 @@ mod req_temp_table {
                     precedent_percentage_written: None,
                     progress_header_sent: false,
                     body: vec![],
+                    lease: None,
+                    rejected: false,
+                    dispatched: false,
                     file_writer_manager,
                     is_end,
                 }
@@ -598,6 +756,9 @@ mod req_temp_table {
                     precedent_percentage_written: None,
                     progress_header_sent: false,
                     body: vec![],
+                    lease: None,
+                    rejected: false,
+                    dispatched: false,
                     file_writer_manager,
                     is_end,
                 }
@@ -631,25 +792,24 @@ mod req_temp_table {
             }
         }
         #[inline]
-        pub fn write_file(&mut self, packet: &[u8], packet_id: usize, is_end: bool) {
+        fn write_file(
+            &mut self,
+            packet: &[u8],
+            packet_id: usize,
+            is_end: bool,
+            charge: Option<Arc<crate::body_budget::FilePacket>>,
+        ) -> Result<(), ()> {
             self.is_end = is_end;
-
-            if let Some(file_writer) = &self.file_opened {
-                match self
-                    .file_writer_manager
-                    .get_file_writer_sender_by_index(file_writer.get_associated_worker_index())
-                {
-                    Some(listener) => {
-                        listener.send_writable_item(WritableItem::new(
-                            packet.to_vec(),
-                            packet_id,
-                            file_writer.clone(),
-                        ));
-                    }
-                    None => {}
-                }
-                self.body_written_size += packet.len();
-            }
+            let writer = self.file_opened.as_ref().ok_or(())?;
+            let listener = self
+                .file_writer_manager
+                .get_file_writer_sender_by_index(writer.get_associated_worker_index())
+                .ok_or(())?;
+            let mut item = WritableItem::new(packet.to_vec(), packet_id, writer.clone());
+            item.charge = charge;
+            listener.try_send_writable_item(item)?;
+            self.body_written_size += packet.len();
+            Ok(())
         }
         #[inline]
         pub fn extend_data(&mut self, packet: &[u8], is_end: bool) {

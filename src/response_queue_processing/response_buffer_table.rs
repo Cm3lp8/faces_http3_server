@@ -89,6 +89,21 @@ mod response_buff {
                 .map(|(_, state)| state)
             {
                 Some(RequestDisposition::Ready) => {
+                    // Hold the retained bytes and slot until this callback returns,
+                    // even though building FinishedEvent removes the table entry.
+                    let _lease = self.route_handler.routes_states().dispatch_lease(
+                        &response_injection.conn_id(),
+                        response_injection.stream_id(),
+                    );
+                    if _lease
+                        .as_ref()
+                        .is_some_and(|lease| !lease.finish_receiving(std::time::Instant::now()))
+                    {
+                        // The network worker owns the excessive-load reset and the
+                        // deadline still identifies this expired table entry.
+                        let _ = self.waker.wake();
+                        return Ok(());
+                    }
                     response_preparation_with_route_handler(
                         &self.route_handler,
                         &self.waker,
@@ -119,6 +134,12 @@ mod response_buff {
                     }
                 }
             }
+        }
+        pub(crate) fn fail_stream(&self, conn: &str, stream: u64, scid: &[u8]) {
+            self.cancel_request(conn, stream);
+            let queues = self.chunking_station.get_chunking_dispatch_channel();
+            let _ = queues.request_stream_reset(stream, scid);
+            let _ = self.waker.wake();
         }
         pub(crate) fn begin_request(&self, conn_id: &str, stream_id: u64) {
             self.signal
@@ -225,6 +246,10 @@ mod response_buff {
                 (12, false, true),
             ] {
                 let key = (id, "connection".to_owned());
+                buffer
+                    .chunking_station
+                    .get_chunking_dispatch_channel()
+                    .insert_new_channel(id, &[1]);
                 buffer.begin_request("connection", id);
                 handler.create_new_request_in_table(
                     "/test",
@@ -348,6 +373,11 @@ mod signal_receiver {
             while let Ok((request, state)) = receiver.recv() {
                 // This signal indicates that the middlewares have been processed
                 if let Some(mut active) = signal_set.get_mut(&request) {
+                    if state == RequestDisposition::Rejected {
+                        route_handler
+                            .routes_states()
+                            .reject_body(&request.1, request.0);
+                    }
                     *active = state;
                 } else {
                     // A worker can finish after reset/connection cleanup.

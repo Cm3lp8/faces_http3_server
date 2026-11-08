@@ -102,6 +102,7 @@ impl Client {
         self.pending_body_queue.max_pending_queue()
     }
     pub fn clean_client(&mut self, stream_id: u64) {
+        self.body_sending_tracker.remove(&stream_id);
         self.headers_sending_tracker.remove(&stream_id);
         self.partial_responses.remove(&stream_id);
         self.progress_status_requests.remove(&stream_id);
@@ -180,7 +181,7 @@ mod quiche_implementation {
 
     use crate::{
         file_writer::FileWriter,
-        header_queue_processing::{extract_path_from_hdr, HeaderProcessing},
+        header_queue_processing::{parse_request_headers, HeaderProcessing},
         request_response::{ChunkingStation, HeaderPriority, ResponseQueue},
         response_queue_processing::{
             ResponseInjection, ResponseInjectionBuffer, ResponsePoolProcessing,
@@ -311,6 +312,9 @@ mod quiche_implementation {
             response_injection_buffer.register(response_injection)
         });
 
+        let routes = route_manager.routes_handler();
+        let bodies = routes.routes_states();
+        let mut rejected_bodies: u64 = 0;
         let mut clients = ClientMap::new();
         let mut total = 0;
         let mut send_packet_time = Instant::now();
@@ -327,7 +331,12 @@ mod quiche_implementation {
             // Find the shorter timeout from all the active connections.
             //
             // TODO: use event loop that properly supports timers
-            let timeout = clients.values().filter_map(|c| c.conn.timeout()).min();
+            let deadline = bodies.budgets.next_deadline();
+            let timeout = clients
+                .values()
+                .filter_map(|c| c.conn.timeout())
+                .chain(deadline.map(|t| t.saturating_duration_since(Instant::now())))
+                .min();
             for client in clients.values() {
                 for stream_id in chunk_dispatch_channel.streams(client.conn.source_id().as_ref()) {
                     let written = client.get_written(stream_id);
@@ -349,6 +358,11 @@ mod quiche_implementation {
             let mut read_loop_count = 0;
             'read: loop {
                 read_loop_count += 1;
+                if read_loop_count > 256 {
+                    // Service deadlines and outgoing RESET_STREAM under continuous UDP input.
+                    let _ = waker.wake();
+                    break 'read;
+                }
                 // If the event loop reported no events, it means that the timeout
                 // has expired, so handle it without attempting to read packets. We
                 // will then proceed with the send loop.
@@ -519,91 +533,98 @@ mod quiche_implementation {
                                 );
                                 let scid = client.conn.source_id().as_ref().to_vec();
                                 let conn_id = client.conn.trace_id().to_string();
-                                let request_path = extract_path_from_hdr(&list);
-
-                                if let Some(path) = request_path {
-                                    response_injection_buffer.begin_request(&conn_id, stream_id);
-                                    if route_manager
-                                        .in_flight_streams_path_verification()
-                                        .insert_stream_path_for_conn(scid.clone(), stream_id, &path)
-                                    {
-                                    } else {
-                                    }
-                                    header_queue_processing.process_header(
-                                        stream_id,
-                                        scid,
-                                        conn_id,
-                                        list.clone(),
-                                        more_frames,
-                                    );
-                                } else {
+                                let Some((method, path, declared)) = parse_request_headers(&list)
+                                else {
                                     response_injection_buffer.cancel_request(&conn_id, stream_id);
                                     route_manager
                                         .in_flight_streams_path_verification()
                                         .is_finished_request_a_valid_path(scid, stream_id);
-                                    // H3_MESSAGE_ERROR: reject before recording a path or queuing work.
-                                    let _ = client.conn.stream_shutdown(
+                                    shutdown_request(&mut client.conn, stream_id, 0x10e);
+                                    continue;
+                                };
+                                let method = crate::H3Method::parse(&method)
+                                    .expect("validated request method");
+                                let route = routes.get_routes_from_path_and_method(&path, method);
+                                let disk_backed = route.as_ref().is_some_and(|(r, _)| {
+                                    matches!(
+                                        r.data_management_type(),
+                                        Some(crate::DataManagement::Storage(
+                                            crate::BodyStorage::File
+                                        ))
+                                    )
+                                });
+                                let limit = route.as_ref().and_then(|(r, _)| r.max_body_bytes());
+                                let Ok(lease) = bodies.budgets.admit(
+                                    &conn_id,
+                                    stream_id,
+                                    disk_backed,
+                                    limit,
+                                    declared,
+                                    Instant::now(),
+                                ) else {
+                                    reject_body(
+                                        client,
                                         stream_id,
-                                        quiche::Shutdown::Read,
-                                        0x10e,
+                                        &route_manager,
+                                        &response_injection_buffer,
+                                        &chunk_dispatch_channel,
+                                        &mut rejected_bodies,
                                     );
-                                    let _ = client.conn.stream_shutdown(
+                                    continue;
+                                };
+                                // Only the receive loop opens an outgoing queue. A late
+                                // worker cannot recreate it after RESET or close.
+                                chunk_dispatch_channel.insert_new_channel(stream_id, &scid);
+                                bodies.track_body(
+                                    &conn_id,
+                                    stream_id,
+                                    lease.clone(),
+                                    file_writer_manager.clone(),
+                                    !more_frames,
+                                );
+                                response_injection_buffer.begin_request(&conn_id, stream_id);
+                                route_manager
+                                    .in_flight_streams_path_verification()
+                                    .insert_stream_path_for_conn(
+                                        scid.clone(),
                                         stream_id,
-                                        quiche::Shutdown::Write,
-                                        0x10e,
+                                        path.split('?').next().unwrap_or(&path),
                                     );
-                                }
+                                header_queue_processing.process_header(
+                                    stream_id,
+                                    scid,
+                                    conn_id,
+                                    list,
+                                    more_frames,
+                                    lease,
+                                );
                             }
                             Ok((stream_id, quiche::h3::Event::Data)) => {
                                 while let Ok(read) =
                                     http3_conn.recv_body(&mut client.conn, stream_id, &mut out)
                                 {
-                                    let trace_id = client.conn.trace_id().to_string();
-                                    let scid = client.conn.source_id().to_vec();
-                                    if !route_manager
-                                        .is_request_set_in_table(stream_id, trace_id.as_str())
-                                    {
-                                        route_manager.set_request_in_table(
+                                    if routes
+                                        .write_body_packet(
                                             stream_id,
-                                            trace_id.as_str(),
-                                            &scid,
-                                            &server_config,
-                                            &file_writer_manager,
-                                        );
-                                    }
-                                    let scid = client.conn.source_id().as_ref().to_vec();
-
-                                    if let Err(e) =
-                                        route_manager.routes_handler().write_body_packet(
-                                            stream_id,
-                                            &scid,
+                                            client.conn.source_id().as_ref(),
                                             client.conn.trace_id(),
                                             &out[..read],
                                             false,
                                         )
+                                        .is_err()
                                     {
-                                        error!(
-                                            "Failed writing body packet on stream_id [{stream_id}] [{:?}]", e
+                                        reject_body(
+                                            client,
+                                            stream_id,
+                                            &route_manager,
+                                            &response_injection_buffer,
+                                            &chunk_dispatch_channel,
+                                            &mut rejected_bodies,
                                         );
+                                        break;
                                     }
                                     total += read;
                                 }
-
-                                /*
-                                let trace_id = client.conn.trace_id().to_string();
-                                if let Err(_) =
-                                    route_manager.routes_handler().send_reception_status(
-                                        client,
-                                        response_queue.get_high_priority_sender(),
-                                        response_queue.get_low_priority_sender(),
-                                        stream_id,
-                                        trace_id.as_str(),
-                                        &chunk_dispatch_channel,
-                                    )
-                                {
-                                    error!("Failed to send progress response status")
-                                }
-                                */
                             }
                             Ok((stream_id, quiche::h3::Event::Finished)) => {
                                 let trace_id = client.conn.trace_id().to_owned();
@@ -626,6 +647,7 @@ mod quiche_implementation {
                                 ()
                             }
                             Ok((stream_id, quiche::h3::Event::Reset { .. })) => {
+                                clean_stream(client, stream_id, &chunk_dispatch_channel);
                                 response_injection_buffer
                                     .cancel_request(client.conn.trace_id(), stream_id);
                                 route_manager
@@ -652,6 +674,24 @@ mod quiche_implementation {
                             }
                         }
                         // }
+                    }
+                }
+            }
+
+            if deadline.is_some_and(|time| Instant::now() >= time) {
+                for (connection, stream) in bodies.budgets.expired(Instant::now()) {
+                    if let Some(client) = clients
+                        .values_mut()
+                        .find(|c| c.conn.trace_id() == connection)
+                    {
+                        reject_body(
+                            client,
+                            stream,
+                            &route_manager,
+                            &response_injection_buffer,
+                            &chunk_dispatch_channel,
+                            &mut rejected_bodies,
+                        );
                     }
                 }
             }
@@ -753,8 +793,7 @@ mod quiche_implementation {
                                         {
                                             error!("Failed send end ! [{:?}]", e);
                                         }
-                                        client.pending_body_queue.remove_stream_queue(stream_id);
-                                        chunk_dispatch_channel.remove_stream(stream_id, &scid);
+                                        clean_stream(client, stream_id, &chunk_dispatch_channel);
                                     }
                                     if let Err(_e) = waker_clone.wake() {}
                                 }
@@ -832,7 +871,15 @@ mod quiche_implementation {
                                                 headers.to_vec(),
                                                 end_on_headers,
                                             ) {
-                                                client.set_headers_send(stream_id, true);
+                                                if end_on_headers {
+                                                    clean_stream(
+                                                        client,
+                                                        stream_id,
+                                                        &chunk_dispatch_channel,
+                                                    );
+                                                } else {
+                                                    client.set_headers_send(stream_id, true);
+                                                }
                                                 if let Some(body_len) =
                                                     non_empty_attached_body(attached_body_len)
                                                 {
@@ -888,7 +935,13 @@ mod quiche_implementation {
                                                 headers.clone(),
                                                 end_on_headers,
                                             ) {
-                                                if attached_body_len.is_some() {
+                                                if end_on_headers {
+                                                    clean_stream(
+                                                        client,
+                                                        stream_id,
+                                                        &chunk_dispatch_channel,
+                                                    );
+                                                } else if attached_body_len.is_some() {
                                                     client.set_headers_send(stream_id, true);
                                                 }
                                                 if let Some(body_len) =
@@ -988,6 +1041,9 @@ mod quiche_implementation {
             clients.retain(|_, ref mut c| {
                 if c.conn.is_closed() {
                     response_injection_buffer.cancel_connection(c.conn.trace_id());
+                    for stream in chunk_dispatch_channel.streams(c.conn.source_id().as_ref()) {
+                        chunk_dispatch_channel.remove_stream(stream, c.conn.source_id().as_ref());
+                    }
                     route_manager
                         .in_flight_streams_path_verification()
                         .remove_connection(c.conn.source_id().as_ref());
@@ -1023,6 +1079,32 @@ mod quiche_implementation {
         )
     }
 
+    fn shutdown_request(conn: &mut Connection, stream: u64, code: u64) {
+        let _ = conn.stream_shutdown(stream, quiche::Shutdown::Read, code);
+        let _ = conn.stream_shutdown(stream, quiche::Shutdown::Write, code);
+    }
+
+    fn reject_body<S: Send + Sync + Clone + 'static, T: UserSessions<Output = T>>(
+        client: &mut Client,
+        stream: u64,
+        router: &RouteManager<S, T>,
+        buffer: &ResponseInjectionBuffer<S, T>,
+        queues: &crate::request_response::ChunksDispatchChannel,
+        rejected: &mut u64,
+    ) {
+        let scid = client.conn.source_id().to_vec();
+        buffer.cancel_request(client.conn.trace_id(), stream);
+        router
+            .in_flight_streams_path_verification()
+            .is_finished_request_a_valid_path(scid.clone(), stream);
+        shutdown_request(&mut client.conn, stream, 0x107); // H3_EXCESSIVE_LOAD
+        clean_stream(client, stream, queues);
+        *rejected = rejected.saturating_add(1);
+        if rejected.is_power_of_two() {
+            warn!("http3_body_rejections total={rejected}");
+        }
+    }
+
     fn reset_failed_stream(
         client: &mut Client,
         stream_id: u64,
@@ -1035,8 +1117,16 @@ mod quiche_implementation {
         let _ = client
             .conn
             .stream_shutdown(stream_id, quiche::Shutdown::Write, 0x102);
+        clean_stream(client, stream_id, queues);
+    }
+
+    fn clean_stream(
+        client: &mut Client,
+        stream_id: u64,
+        queues: &crate::request_response::ChunksDispatchChannel,
+    ) {
         client.clean_client(stream_id);
-        client.pending_body_queue.remove_stream_queue(stream_id);
+        client.pending_body_queue.remove(stream_id);
         queues.remove_stream(stream_id, client.conn.source_id().as_ref());
     }
 
