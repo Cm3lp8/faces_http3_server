@@ -97,13 +97,22 @@ fn stream_server_child() {
     let case = std::env::var("FACES_STREAM_CASE").unwrap();
     if matches!(
         case.as_str(),
-        "body-security" | "preheader-security" | "file-cancellation"
+        "body-security" | "preheader-security" | "file-cancellation" | "priority-security"
     ) {
         router = router.with_body_limits(BodyLimits {
             default_body_bytes: 8,
-            server_requests: if case == "preheader-security" { 3 } else { 512 },
+            server_requests: if matches!(case.as_str(), "preheader-security" | "priority-security")
+            {
+                3
+            } else {
+                512
+            },
             max_connections: if case == "preheader-security" { 2 } else { 128 },
-            receive_timeout: Duration::from_millis(600),
+            receive_timeout: Duration::from_millis(if case == "priority-security" {
+                3000
+            } else {
+                600
+            }),
             ..BodyLimits::default()
         });
         let file_auth = router.middleware(&|headers, state: &State| {
@@ -925,4 +934,73 @@ fn disconnect_after_fin_cleans_staging_when_the_handler_returns() {
         std::thread::sleep(Duration::from_millis(2));
     }
     assert!(server.child.try_wait().unwrap().is_none());
+}
+
+fn priority(client: &mut WireClient, id: u64) {
+    client
+        .http
+        .as_mut()
+        .unwrap()
+        .send_priority_update_for_request(&mut client.conn, id, &h3::Priority::new(3, false))
+        .unwrap();
+    client.flush();
+}
+fn wait_for_close(client: &mut WireClient, reason: &[u8]) {
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while client.conn.peer_error().is_none() {
+        assert!(
+            Instant::now() < deadline,
+            "offending connection did not close"
+        );
+        client.pump_allow_close();
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    let error = client.conn.peer_error().unwrap();
+    assert!(error.is_app);
+    assert_eq!(error.error_code, 0x107);
+    assert_eq!(error.reason, reason);
+}
+#[test]
+#[ignore = "requires explicit local fixture root and loopback"]
+fn priorities_for_future_requests_share_preheader_slots() {
+    let (server, mut first) = start_server("preheader-security");
+    echo_byte(&mut first);
+    let mut second = connect_peer(&first, &server.root);
+    echo_byte(&mut second);
+    priority(&mut first, 4);
+    echo_byte(&mut first); // The actual request takes over its reserved prefix.
+    for id in [8, 12, 16] {
+        priority(&mut first, id);
+    }
+    std::thread::sleep(Duration::from_millis(30));
+    priority(&mut second, 4); // No request-stream bytes at all.
+    wait_for_close(&mut second, b"priority admission limit");
+    echo_byte(&mut first); // Reuse the announced slot on the surviving connection.
+    let log = std::fs::read_to_string(server.root.join("server.log")).unwrap();
+    assert!(log
+        .lines()
+        .any(|line| line.contains("stage=admission ") && line.contains("active_requests=3")));
+}
+#[test]
+#[ignore = "requires explicit local fixture root and loopback"]
+fn refusals_before_h3_parsing_count_towards_the_aborted_stream_limit() {
+    let (server, mut first) = start_server("priority-security");
+    echo_byte(&mut first);
+    let mut second = connect_peer(&first, &server.root);
+    echo_byte(&mut second);
+    for id in [4, 8, 12] {
+        priority(&mut first, id);
+    }
+    std::thread::sleep(Duration::from_millis(30));
+    // The quota is exhausted before any of these request streams enter poll().
+    for index in 1..32 {
+        let id = index * 4;
+        second.conn.stream_send(id, &[1, 0x40, 80], false).unwrap();
+        second.flush();
+        raw_resets(&mut second, vec![id]);
+    }
+    second.conn.stream_send(128, &[1, 0x40, 80], false).unwrap();
+    second.flush();
+    wait_for_close(&mut second, b"aborted stream limit");
+    echo_byte(&mut first);
 }

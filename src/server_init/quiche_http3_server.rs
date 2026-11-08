@@ -565,27 +565,12 @@ mod quiche_implementation {
                                 .close(true, 0x107, b"unidirectional stream limit");
                             break;
                         }
-                        if id % 4 != 0
-                            || client.admitted_streams.contains(&id)
-                            || client.pending_headers.contains_key(&id)
-                        {
-                            continue;
-                        }
-                        match bodies.budgets.reserve_request(
-                            client.conn.trace_id(),
-                            id,
-                            Instant::now(),
-                        ) {
-                            Ok(lease) => {
-                                client.pending_headers.insert(id, lease);
-                            }
-                            Err(()) => {
-                                bodies.budgets.note_rejection(
-                                    RejectionStage::Admission,
-                                    client.conn.trace_id(),
-                                    id,
-                                );
-                                shutdown_request(&mut client.conn, id, 0x107);
+                        if id % 4 == 0 && !track_request_prefix(client, &bodies.budgets, id) {
+                            // A previous PRIORITY_UPDATE may already have created
+                            // parser state for this stream. Count this abandonment.
+                            abort_request(client, id, 0x107);
+                            if client.conn.local_error().is_some() {
+                                break;
                             }
                         }
                     }
@@ -746,9 +731,22 @@ mod quiche_implementation {
                                         stream_id,
                                     );
                             }
-                            Ok((_prioritized_element_id, quiche::h3::Event::PriorityUpdate)) => {
-                                debug!("prioritytupdate");
-                                ()
+                            Ok((id, quiche::h3::Event::PriorityUpdate)) => {
+                                // quiche can create H3 state for a future request
+                                // before any bidirectional stream is readable.
+                                // The router does not use the advisory priority.
+                                let _ = http3_conn.take_last_priority_update(id);
+                                if chunk_dispatch_channel
+                                    .get_high_priority_sender(id, client.conn.source_id().as_ref())
+                                    .is_none()
+                                    && !track_request_prefix(client, &bodies.budgets, id)
+                                {
+                                    // A never-opened QUIC stream cannot be reset.
+                                    // Closing this connection drops its parser state.
+                                    let _ =
+                                        client.conn.close(true, 0x107, b"priority admission limit");
+                                    break;
+                                }
                             }
                             Ok((_goaway_id, quiche::h3::Event::GoAway)) => {
                                 error!("GoAway");
@@ -1188,6 +1186,25 @@ mod quiche_implementation {
         )
     }
 
+    fn track_request_prefix(
+        client: &mut Client,
+        budgets: &Arc<crate::body_budget::BodyBudgets>,
+        id: u64,
+    ) -> bool {
+        if client.admitted_streams.contains(&id) || client.pending_headers.contains_key(&id) {
+            return true;
+        }
+        match budgets.reserve_request(client.conn.trace_id(), id, Instant::now()) {
+            Ok(lease) => {
+                client.pending_headers.insert(id, lease);
+                true
+            }
+            Err(()) => {
+                budgets.note_rejection(RejectionStage::Admission, client.conn.trace_id(), id);
+                false
+            }
+        }
+    }
     fn shutdown_request(conn: &mut Connection, stream: u64, code: u64) {
         let _ = conn.stream_shutdown(stream, quiche::Shutdown::Read, code);
         let _ = conn.stream_shutdown(stream, quiche::Shutdown::Write, code);
