@@ -142,9 +142,9 @@ fn stream_server_child() {
                 route.handler(&file);
             },
         );
-        let file_panic = router.handler(&|event, state: &State, _| {
+        let file_failure = router.handler(&|event, state: &State, _| {
             let path = event.get_file_path().unwrap();
-            if event.path() == "/publish-panic" {
+            if matches!(event.path(), "/publish-panic" | "/publish-reject") {
                 let deadline = Instant::now() + Duration::from_secs(2);
                 while !event.file_writer().unwrap().is_file_written().unwrap() {
                     assert!(Instant::now() < deadline);
@@ -154,14 +154,22 @@ fn stream_server_child() {
                 std::fs::rename(path, root.join("published")).unwrap();
                 std::fs::write(path, b"different file").unwrap();
             }
+            if matches!(event.path(), "/file-reject" | "/publish-reject") {
+                return Response::error_422(event, b"invalid upload".to_vec());
+            }
             panic!("file handler unwind");
         });
-        for path in ["/file-panic", "/publish-panic"] {
+        for path in [
+            "/file-panic",
+            "/publish-panic",
+            "/file-reject",
+            "/publish-reject",
+        ] {
             router.route_post(
                 path,
                 RouteConfig::new(DataManagement::Storage(BodyStorage::File)),
                 |route| {
-                    route.handler(&file_panic);
+                    route.handler(&file_failure);
                 },
             );
         }
@@ -594,6 +602,14 @@ fn blocked_opening_callback_error_resets_without_final_headers_or_data() {
 // Await a terminal response on this stream, retaining the same verified
 // connection so a reset cannot masquerade as a process or connection failure.
 fn terminal(client: &mut WireClient, stream: u64) -> Result<Vec<u8>, u64> {
+    terminal_with_status(client, stream, b"200")
+}
+
+fn terminal_with_status(
+    client: &mut WireClient,
+    stream: u64,
+    expected: &[u8],
+) -> Result<Vec<u8>, u64> {
     let deadline = Instant::now() + Duration::from_secs(3);
     let mut payload = Vec::new();
     let mut ok = false;
@@ -607,7 +623,7 @@ fn terminal(client: &mut WireClient, stream: u64) -> Result<Vec<u8>, u64> {
                 Ok((id, h3::Event::Headers { list, .. })) if id == stream => {
                     if list
                         .iter()
-                        .any(|h| h.name() == b":status" && h.value() == b"200")
+                        .any(|h| h.name() == b":status" && h.value() == expected)
                     {
                         ok = true;
                     }
@@ -1003,4 +1019,37 @@ fn refusals_before_h3_parsing_count_towards_the_aborted_stream_limit() {
     second.flush();
     wait_for_close(&mut second, b"aborted stream limit");
     echo_byte(&mut first);
+}
+
+#[test]
+#[ignore = "requires explicit local fixture root and loopback"]
+fn ordinary_upload_rejection_cleans_only_the_original_stage_and_keeps_its_http_response() {
+    let (server, mut client) = start_server("body-security");
+    let staging = server.root.join("staging");
+    for path in [b"/file-reject".as_slice(), b"/publish-reject"] {
+        let id = post_to(&mut client, path, Some(b"4"));
+        client
+            .http
+            .as_mut()
+            .unwrap()
+            .send_body(&mut client.conn, id, b"file", true)
+            .unwrap();
+        assert_eq!(
+            terminal_with_status(&mut client, id, b"422"),
+            Ok(b"invalid upload".to_vec())
+        );
+        if path == b"/file-reject" {
+            assert_eq!(std::fs::read_dir(&staging).unwrap().count(), 0);
+        }
+    }
+    assert_eq!(
+        std::fs::read(server.root.join("published")).unwrap(),
+        b"file"
+    );
+    let mut entries = std::fs::read_dir(&staging).unwrap();
+    assert_eq!(
+        std::fs::read(entries.next().unwrap().unwrap().path()).unwrap(),
+        b"different file"
+    );
+    assert!(entries.next().is_none());
 }

@@ -722,6 +722,10 @@ mod request_reponse_builder {
     }
 
     impl RequestResponse {
+        pub(crate) fn is_success(&self) -> bool {
+            matches!(self.status.value(), [b'2', b'0'..=b'9', b'0'..=b'9'])
+        }
+
         pub fn new() -> ResponseBuilder {
             ResponseBuilder::new()
         }

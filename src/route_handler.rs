@@ -826,13 +826,18 @@ mod route_handle_implementation {
             return None;
         }
         match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| dispatch(event))) {
-            Ok(result) => {
-                if stream_is_live() {
-                    result
-                } else {
+            Ok(result) if stream_is_live() => {
+                if !result
+                    .as_ref()
+                    .is_some_and(crate::RequestResponse::is_success)
+                {
                     cancel_stage();
-                    None
                 }
+                result
+            }
+            Ok(_) => {
+                cancel_stage();
+                None
             }
             Err(panic) => {
                 cancel_stage();
