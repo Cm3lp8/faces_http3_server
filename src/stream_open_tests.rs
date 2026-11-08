@@ -95,7 +95,10 @@ fn stream_server_child() {
         r.handler(&ack);
     });
     let case = std::env::var("FACES_STREAM_CASE").unwrap();
-    if case == "body-security" || case == "preheader-security" {
+    if matches!(
+        case.as_str(),
+        "body-security" | "preheader-security" | "file-cancellation"
+    ) {
         router = router.with_body_limits(BodyLimits {
             default_body_bytes: 8,
             server_requests: if case == "preheader-security" { 3 } else { 512 },
@@ -130,6 +133,64 @@ fn stream_server_child() {
                 route.handler(&file);
             },
         );
+        let file_panic = router.handler(&|event, state: &State, _| {
+            let path = event.get_file_path().unwrap();
+            if event.path() == "/publish-panic" {
+                let deadline = Instant::now() + Duration::from_secs(2);
+                while !event.file_writer().unwrap().is_file_written().unwrap() {
+                    assert!(Instant::now() < deadline);
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                let root = state.called.parent().unwrap();
+                std::fs::rename(path, root.join("published")).unwrap();
+                std::fs::write(path, b"different file").unwrap();
+            }
+            panic!("file handler unwind");
+        });
+        for path in ["/file-panic", "/publish-panic"] {
+            router.route_post(
+                path,
+                RouteConfig::new(DataManagement::Storage(BodyStorage::File)),
+                |route| {
+                    route.handler(&file_panic);
+                },
+            );
+        }
+        let wait_for_cancel = router.handler(&|event, state: &State, _| {
+            let root = state.called.parent().unwrap();
+            std::fs::write(root.join("file-dispatched"), b"yes").unwrap();
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !root.join("return-from-handler").exists() {
+                assert!(Instant::now() < deadline);
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            Response::ok_200(event)
+        });
+        router.route_post(
+            "/cancel-file",
+            RouteConfig::new(DataManagement::Storage(BodyStorage::File)),
+            |route| {
+                route.handler(&wait_for_cancel);
+            },
+        );
+        let panic_middleware = router.middleware(&|_, state: &State| {
+            use std::io::Write;
+            let mut visits = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(state.called.parent().unwrap().join("middleware-visits"))
+                .unwrap();
+            visits.write_all(b"x").unwrap();
+            panic!("middleware unwind");
+        });
+        let unreachable_handler = router.handler(&|event, state: &State, _| {
+            std::fs::write(&state.called, b"called").unwrap();
+            Response::ok_200(event)
+        });
+        router.route_get("/middleware-panic", RouteConfig::default(), |route| {
+            route.middleware(&panic_middleware);
+            route.handler(&unreachable_handler);
+        });
         let panic = router.handler(&|_, _, _| panic!("fixture handler unwind"));
         router.route_get("/panic", RouteConfig::default(), |r| {
             r.handler(&panic);
@@ -307,7 +368,14 @@ fn start_server(case: &str) -> (OwnedServer, WireClient) {
             "--nocapture",
         ])
         .env_clear()
-        .env("RUST_LOG", "info")
+        .env(
+            "RUST_LOG",
+            if case == "file-cancellation" {
+                "info,faces_quic_server::server_init::quiche_http3_server=debug"
+            } else {
+                "info"
+            },
+        )
         .env("FACES_STREAM_ADDRESS", address.to_string())
         .env("FACES_STREAM_ROOT", &root)
         .env("FACES_STREAM_TLS", &tls)
@@ -776,4 +844,85 @@ fn incomplete_headers_share_slots_expire_and_excessive_declaration_closes_only_i
         .any(|line| line.contains("stage=admission ") && line.contains("active_requests=3")));
     assert!(log.lines().any(|line| line.contains("stage=expiration ")));
     assert!(log.lines().any(|line| line.contains("stage=connection ")));
+}
+
+#[test]
+#[ignore = "requires explicit local fixture root and loopback"]
+fn panicking_middleware_and_file_handlers_reset_without_replay_or_unowned_deletion() {
+    let (mut server, mut client) = start_server("body-security");
+    for _ in 0..10 {
+        let id = client.request(b"/middleware-panic", false);
+        assert_eq!(terminal(&mut client, id), Err(0x102));
+    }
+    assert_eq!(
+        std::fs::read(server.root.join("middleware-visits")).unwrap(),
+        b"xxxxxxxxxx"
+    );
+    assert!(!server.root.join("called").exists());
+
+    let staging = server.root.join("staging");
+    let upload = |client: &mut WireClient, path| {
+        let id = post_to(client, path, Some(b"4"));
+        client
+            .http
+            .as_mut()
+            .unwrap()
+            .send_body(&mut client.conn, id, b"file", true)
+            .unwrap();
+        terminal(client, id)
+    };
+    assert_eq!(upload(&mut client, b"/file-panic"), Err(0x102));
+    assert_eq!(std::fs::read_dir(&staging).unwrap().count(), 0);
+    assert_eq!(upload(&mut client, b"/publish-panic"), Err(0x102));
+    assert_eq!(
+        std::fs::read(server.root.join("published")).unwrap(),
+        b"file"
+    );
+    let remaining: Vec<_> = std::fs::read_dir(&staging)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(std::fs::read(&remaining[0]).unwrap(), b"different file");
+    assert_eq!(upload(&mut client, b"/echo"), Ok(b"file".to_vec()));
+    assert!(server.child.try_wait().unwrap().is_none());
+}
+
+#[test]
+#[ignore = "requires explicit local fixture root and loopback"]
+fn disconnect_after_fin_cleans_staging_when_the_handler_returns() {
+    let (mut server, mut client) = start_server("file-cancellation");
+    let stream = post_to(&mut client, b"/cancel-file", Some(b"4"));
+    client
+        .http
+        .as_mut()
+        .unwrap()
+        .send_body(&mut client.conn, stream, b"file", true)
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(6);
+    while !server.root.join("file-dispatched").exists() {
+        assert!(Instant::now() < deadline, "file handler did not run");
+        client.pump();
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    let staging = server.root.join("staging");
+    assert_eq!(std::fs::read_dir(&staging).unwrap().count(), 1);
+    client.conn.close(true, 0x100, b"fixture complete").unwrap();
+    client.flush();
+    while !std::fs::read_to_string(server.root.join("server.log"))
+        .unwrap()
+        .contains("connection collected")
+    {
+        assert!(
+            Instant::now() < deadline,
+            "server did not collect closed connection"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    std::fs::write(server.root.join("return-from-handler"), b"yes").unwrap();
+    while std::fs::read_dir(&staging).unwrap().count() != 0 {
+        assert!(Instant::now() < deadline, "cancelled staging file retained");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert!(server.child.try_wait().unwrap().is_none());
 }

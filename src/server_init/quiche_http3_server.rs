@@ -805,6 +805,10 @@ mod quiche_implementation {
                     let scid = client.conn.source_id().as_ref().to_vec();
                     // Do not gate cancellation on writability, header retries or partial bodies.
                     for stream_id in chunk_dispatch_channel.requested_stream_resets(&scid) {
+                        response_injection_buffer.cancel_request(client.conn.trace_id(), stream_id);
+                        route_manager
+                            .in_flight_streams_path_verification()
+                            .is_finished_request_a_valid_path(scid.clone(), stream_id);
                         reset_failed_stream(client, stream_id, &chunk_dispatch_channel);
                     }
                     for stream_id in client.conn.writable() {
@@ -1228,6 +1232,8 @@ mod quiche_implementation {
         stream_id: u64,
         queues: &crate::request_response::ChunksDispatchChannel,
     ) {
+        client.pending_headers.remove(&stream_id);
+        client.admitted_streams.remove(&stream_id);
         abort_request(client, stream_id, 0x102);
         clean_stream(client, stream_id, queues);
     }

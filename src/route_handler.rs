@@ -780,6 +780,68 @@ mod route_handle_implementation {
         }
     }
 
+    // After FIN the event owns the writer. On a failed dispatch only the original
+    // staging inode may be removed; a handler may already have published it.
+    fn dispatch_finished_file(
+        event: crate::FinishedEvent,
+        conn_id: &str,
+        stream_is_live: impl Fn() -> bool,
+        dispatch: impl FnOnce(crate::FinishedEvent) -> Option<crate::RequestResponse>,
+    ) -> Option<crate::RequestResponse> {
+        let Some((path, writer)) = event
+            .get_file_path()
+            .cloned()
+            .zip(event.file_writer().cloned())
+        else {
+            return dispatch(event);
+        };
+        let identity = match same_file::Handle::from_path(&path) {
+            Ok(identity) => identity,
+            Err(error) => {
+                error!("cannot identify staging file before dispatch: {error}");
+                writer.cancel();
+                return Some(crate::RequestResponse::new_503_with_data(
+                    event.stream_id(),
+                    event.scid(),
+                    conn_id,
+                    b"internal_error".to_vec(),
+                ));
+            }
+        };
+        let cancel_stage = || {
+            // Never follow a symlink installed in the place of an upload.
+            if std::fs::symlink_metadata(&path).is_ok_and(|m| m.is_file())
+                && same_file::Handle::from_path(&path).is_ok_and(|current| current == identity)
+            {
+                writer.cancel();
+                if let Err(error) = std::fs::remove_file(&path) {
+                    if error.kind() != std::io::ErrorKind::NotFound {
+                        error!("failed to remove interrupted staging file: {error}");
+                    }
+                }
+            }
+        };
+        if !stream_is_live() {
+            cancel_stage();
+            return None;
+        }
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| dispatch(event))) {
+            Ok(result) => {
+                if stream_is_live() {
+                    result
+                } else {
+                    cancel_stage();
+                    None
+                }
+            }
+            Err(panic) => {
+                cancel_stage();
+                // The response worker resets the stream and continues receiving jobs.
+                std::panic::resume_unwind(panic);
+            }
+        }
+    }
+
     pub fn response_preparation_with_route_handler<
         S: Send + Sync + 'static + Clone,
         T: UserSessions<Output = T>,
@@ -862,7 +924,16 @@ mod route_handle_implementation {
                 match route_event {
                     RouteEvent::OnFinished(event) => {
                         is_end = event.is_end();
-                        route_handler.process_handler(stream_id, conn_id, scid, event)
+                        dispatch_finished_file(
+                            event,
+                            conn_id,
+                            || {
+                                chunk_dispatch_channel
+                                    .get_high_priority_sender(stream_id, scid)
+                                    .is_some()
+                            },
+                            |event| route_handler.process_handler(stream_id, conn_id, scid, event),
+                        )
                     }
                     _ => None,
                 }

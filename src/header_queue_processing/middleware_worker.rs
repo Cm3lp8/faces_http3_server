@@ -106,7 +106,19 @@ mod thread_pool {
                         let mut temps_headers: Vec<h3::Header> = headers.clone();
 
                         for mdw in &middleware_job.middleware_collection() {
-                            match (mdw.callback(temps_headers, &app_state)) {
+                            let result =
+                                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                    mdw.callback(temps_headers, &app_state)
+                                }));
+                            let Ok(result) = result else {
+                                error!("request middleware panicked; resetting stream");
+                                let _ = chunking_station
+                                    .get_chunking_dispatch_channel()
+                                    .request_stream_reset(stream_id, &scid);
+                                let _ = waker.wake();
+                                continue 'injection;
+                            };
+                            match result {
                                 Ok(middleware_res) => {
                                     match middleware_res {
                                         MiddleWareFlow::Continue(headers) => {
