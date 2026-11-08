@@ -340,9 +340,7 @@ mod quiche_implementation {
 
         loop {
             round += 1;
-            // Find the shorter timeout from all the active connections.
-            //
-            // TODO: use event loop that properly supports timers
+            // Poll until the earliest application or QUIC deadline.
             let deadline = bodies
                 .budgets
                 .next_deadline()
@@ -368,27 +366,20 @@ mod quiche_implementation {
                 }
             }
             if let Err(error) = poll.poll(&mut events, timeout) {
-                if error.kind() == std::io::ErrorKind::Interrupted {
-                    continue;
+                if error.kind() != std::io::ErrorKind::Interrupted {
+                    return Err(ServerRunError::io("poll", error));
                 }
-                return Err(ServerRunError::io("poll", error));
+                events.clear();
             }
             // Read incoming UDP packets from the socket and feed them to quiche,
             // until there are no more packets to read.
 
             let mut read_loop_count = 0;
-            'read: loop {
+            'read: while !events.is_empty() {
                 read_loop_count += 1;
                 if read_loop_count > 256 {
                     // Service deadlines and outgoing RESET_STREAM under continuous UDP input.
                     let _ = waker.wake();
-                    break 'read;
-                }
-                // If the event loop reported no events, it means that the timeout
-                // has expired, so handle it without attempting to read packets. We
-                // will then proceed with the send loop.
-                if events.is_empty() {
-                    clients.values_mut().for_each(|c| c.conn.on_timeout());
                     break 'read;
                 }
                 let (len, from) = match socket.recv_from(&mut buf) {
@@ -765,8 +756,15 @@ mod quiche_implementation {
                 }
             }
 
-            if deadline.is_some_and(|time| Instant::now() >= time) {
-                let now = Instant::now();
+            // A socket or worker wakeup can coincide with a retransmission deadline.
+            // Process queued ACKs first, then service every connection whose timer is due.
+            let now = Instant::now();
+            for client in clients.values_mut() {
+                if client.conn.timeout_instant().is_some_and(|time| time <= now) {
+                    client.conn.on_timeout();
+                }
+            }
+            if deadline.is_some_and(|time| time <= now) {
                 for client in clients.values_mut() {
                     if client
                         .first_request_deadline

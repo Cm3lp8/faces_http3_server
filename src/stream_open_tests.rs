@@ -95,6 +95,13 @@ fn stream_server_child() {
         r.handler(&ack);
     });
     let case = std::env::var("FACES_STREAM_CASE").unwrap();
+    if case == "downlink-loss" {
+        let media = router
+            .handler(&|event, _: &State, _| Response::ok_200_with_data(event, sample_media()));
+        router.route_get("/sample-media", RouteConfig::default(), |route| {
+            route.handler(&media);
+        });
+    }
     if matches!(
         case.as_str(),
         "body-security" | "preheader-security" | "file-cancellation" | "priority-security"
@@ -284,10 +291,16 @@ impl WireClient {
         );
     }
     fn pump_allow_close(&mut self) {
+        self.pump_filtered(|_| true);
+    }
+    fn pump_filtered(&mut self, mut accept: impl FnMut(&[u8]) -> bool) {
         let mut buf = [0; 65535];
         loop {
             match self.socket.recv_from(&mut buf) {
                 Ok((len, from)) => {
+                    if !accept(&buf[..len]) {
+                        continue;
+                    }
                     self.conn
                         .recv(
                             &mut buf[..len],
@@ -1052,4 +1065,44 @@ fn ordinary_upload_rejection_cleans_only_the_original_stage_and_keeps_its_http_r
         b"different file"
     );
     assert!(entries.next().is_none());
+}
+
+fn sample_media() -> Vec<u8> {
+    (0..32 * 1024).map(|offset| (offset % 251) as u8).collect()
+}
+
+#[test]
+#[ignore = "requires explicit local fixture root and loopback"]
+fn get_32k_recovers_after_initial_downlink_loss() {
+    let (_server, mut client) = start_server("downlink-loss");
+    let stream = client.request(b"/sample-media", false);
+    // Start the loss window at a payload-sized server datagram. The client
+    // continues to run its QUIC timers and send packets during the outage.
+    let start_deadline = Instant::now() + Duration::from_secs(3);
+    let mut resume_at = None;
+    while resume_at.is_none_or(|end| Instant::now() < end) {
+        client.pump_filtered(|datagram| {
+            if datagram.len() >= 1024 && resume_at.is_none() {
+                resume_at = Some(Instant::now() + Duration::from_millis(450));
+            }
+            false
+        });
+        assert!(
+            resume_at.is_some() || Instant::now() < start_deadline,
+            "no payload-sized server datagram to drop"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    // terminal requires HTTP 200 and FIN. Verify every byte after retransmission.
+    let body = terminal(&mut client, stream).expect("unexpected reset after loss");
+    assert_eq!(body.len(), 32 * 1024);
+    let expected = sample_media();
+    assert!(
+        body == expected,
+        "recovered media differs from the response"
+    );
+
+    let control = client.request(b"/sample-media", false);
+    let body = terminal(&mut client, control).expect("subsequent GET was reset");
+    assert!(body == expected, "subsequent GET returned different media");
 }
