@@ -1,14 +1,11 @@
 pub use dispatcher::ChunksDispatchChannel;
 pub use dispatcher::{ChunkReceiver, ChunkSender};
 mod dispatcher {
-    use std::{
-        ascii::AsciiExt,
-        collections::HashMap,
-        error::Error,
-        sync::{atomic::AtomicUsize, Arc, Mutex},
+    use std::sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc,
     };
 
-    use crossbeam_channel::SendError;
     use dashmap::DashMap;
 
     use crate::request_response::QueuedRequest;
@@ -129,8 +126,8 @@ mod dispatcher {
         pub fn insert_new_channel(&self, stream_id: u64, scid: &[u8]) {
             let inner = &*self.inner;
             if !inner.already_in_map(stream_id, scid) {
-                let chunk_counter_0 = ChunkCounter::new(150);
-                let chunk_counter_1 = ChunkCounter::new(1010);
+                let chunk_counter_0 = Arc::new(ChunkCounter::new(150));
+                let chunk_counter_1 = Arc::new(ChunkCounter::new(1010));
                 let chann_0 = crossbeam_channel::unbounded::<QueuedRequest>();
                 let chann_1 = crossbeam_channel::unbounded::<QueuedRequest>();
 
@@ -195,15 +192,20 @@ mod dispatcher {
     #[derive(Clone, Debug)]
     pub struct ChunkSender {
         sender: crossbeam_channel::Sender<QueuedRequest>,
-        counter: ChunkCounter,
+        counter: Arc<ChunkCounter>,
     }
     impl ChunkSender {
-        fn new(sender: crossbeam_channel::Sender<QueuedRequest>, counter: ChunkCounter) -> Self {
+        fn new(
+            sender: crossbeam_channel::Sender<QueuedRequest>,
+            counter: Arc<ChunkCounter>,
+        ) -> Self {
             Self { sender, counter }
         }
 
-        ///____________________
-        ///Return true if the counter limit of items present in the channel is not reached.
+        pub(crate) fn receiver_closed(&self) -> bool {
+            self.counter.receiver_closed.load(Ordering::Acquire)
+        }
+
         pub fn is_occupied(&self) -> bool {
             self.counter.is_occupied()
         }
@@ -225,12 +227,12 @@ mod dispatcher {
 
     pub struct ChunkReceiver {
         receiver: crossbeam_channel::Receiver<QueuedRequest>,
-        counter: ChunkCounter,
+        counter: Arc<ChunkCounter>,
     }
     impl ChunkReceiver {
         fn new(
             receiver: crossbeam_channel::Receiver<QueuedRequest>,
-            counter: ChunkCounter,
+            counter: Arc<ChunkCounter>,
         ) -> Self {
             Self { receiver, counter }
         }
@@ -246,16 +248,26 @@ mod dispatcher {
             }
         }
     }
+    // Each queue has exactly one receiver in the stream map. Cloned senders can
+    // outlive that entry and must observe its removal even while the queue is full.
+    impl Drop for ChunkReceiver {
+        fn drop(&mut self) {
+            self.counter.receiver_closed.store(true, Ordering::Release);
+        }
+    }
+
     #[derive(Debug)]
     pub struct ChunkCounter {
         counter_limit: usize,
-        counter: Arc<AtomicUsize>,
+        counter: AtomicUsize,
+        receiver_closed: AtomicBool,
     }
     impl ChunkCounter {
         pub fn new(counter_limit: usize) -> Self {
             Self {
                 counter_limit,
-                counter: Arc::new(AtomicUsize::new(0)),
+                counter: AtomicUsize::new(0),
+                receiver_closed: AtomicBool::new(false),
             }
         }
         pub fn in_queue(&self) -> usize {
@@ -282,14 +294,6 @@ mod dispatcher {
             }
         }
     }
-    impl Clone for ChunkCounter {
-        fn clone(&self) -> Self {
-            Self {
-                counter_limit: self.counter_limit,
-                counter: self.counter.clone(),
-            }
-        }
-    }
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -297,7 +301,7 @@ mod dispatcher {
         fn failed_send_does_not_inflate_the_queue_counter() {
             let (sender, receiver) = crossbeam_channel::unbounded();
             drop(receiver);
-            let counter = ChunkCounter::new(2);
+            let counter = Arc::new(ChunkCounter::new(2));
             let sender = ChunkSender::new(sender, counter);
             let body = crate::request_response::BodyRequest::new(0, "", &[], 0, vec![1], true);
             assert!(sender.send(QueuedRequest::StreamData(body)).is_err());

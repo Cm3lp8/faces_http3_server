@@ -68,6 +68,18 @@ mod stream_sessions {
 
             guard.chunking_station = Some(chunking_station.clone());
         }
+
+        #[cfg(test)]
+        pub(crate) fn response_queue_depth(&self, scid: &[u8], stream: u64) -> Option<usize> {
+            self.inner
+                .lock()
+                .unwrap()
+                .chunking_station
+                .as_ref()?
+                .get_chunking_dispatch_channel()
+                .in_queue(stream, scid)
+                .ok()
+        }
     }
 
     impl<T: UserSessions<Output = T>> StreamManagement<T> for StreamSessions<T> {

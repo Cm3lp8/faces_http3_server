@@ -807,6 +807,28 @@ mod quiche_implementation {
                             .is_finished_request_a_valid_path(scid.clone(), stream_id);
                         reset_failed_stream(client, stream_id, &chunk_dispatch_channel);
                     }
+                    // A finished GET can receive STOP_SENDING without an H3 Reset event.
+                    // Check owned responses even when connection flow control hides all writables.
+                    for stream_id in chunk_dispatch_channel.streams(&scid) {
+                        let code = match client.conn.stream_capacity(stream_id) {
+                            Err(quiche::Error::StreamStopped(code)) => code,
+                            Err(quiche::Error::InvalidStreamState(_))
+                                if client.conn.stream_closed(stream_id) => 0x10c,
+                            _ => {
+                                let (written, total) = client.get_written(stream_id);
+                                if written < total {
+                                    let _ = waker_clone.wake();
+                                }
+                                continue;
+                            }
+                        };
+                        retire_closed_response(client, stream_id, code);
+                        clean_stream(client, stream_id, &chunk_dispatch_channel);
+                        response_injection_buffer.cancel_request(client.conn.trace_id(), stream_id);
+                        route_manager
+                            .in_flight_streams_path_verification()
+                            .is_finished_request_a_valid_path(scid.clone(), stream_id);
+                    }
                     for stream_id in client.conn.writable() {
                         // Don't try to pop new chunk from the chunk queue if there are still something
                         // in the pending queue for this stream.
@@ -814,7 +836,7 @@ mod quiche_implementation {
                         if !client.headers_send(stream_id) {
                             continue;
                         }
-                        while client.conn.stream_writable(stream_id, 512).unwrap() {
+                        while matches!(client.conn.stream_writable(stream_id, 512), Ok(true)) {
                             if client.partial_responses.get(&stream_id).is_some() {
                                 if let Some(_val) = handle_writable(client, stream_id) {}
                                 if let Err(_e) = waker_clone.wake() {
@@ -1077,17 +1099,6 @@ mod quiche_implementation {
                         }
                     }
 
-                    {
-                        for stream_id in
-                            chunk_dispatch_channel.streams(client.conn.source_id().as_ref())
-                        {
-                            let written = client.get_written(stream_id);
-                            if written.0 < written.1 {
-                                let _ = waker_clone.wake();
-                                continue;
-                            }
-                        }
-                    }
                 }
 
                 for client in clients.values_mut() {
@@ -1240,6 +1251,30 @@ mod quiche_implementation {
         if client.aborted_streams >= 32 {
             let _ = client.conn.close(true, 0x107, b"aborted stream limit");
         }
+    }
+
+    fn retire_closed_response(client: &mut Client, stream: u64, code: u64) {
+        client.pending_headers.remove(&stream);
+        client.admitted_streams.remove(&stream);
+        if client.conn.stream_finished(stream) {
+            // On a closed send side quiche's terminal write releases its H3 parser
+            // once the request FIN was received. A completed response may already be gone.
+            if let Some(h3) = client.http3_conn.as_mut() {
+                match h3.send_body(&mut client.conn, stream, &[], true) {
+                    Err(quiche::h3::Error::TransportError(
+                        quiche::Error::StreamStopped(_) | quiche::Error::InvalidStreamState(_),
+                    )) => return,
+                    Err(quiche::h3::Error::FrameUnexpected)
+                        if client.headers_send(stream) && client.is_body_totally_written(stream) =>
+                    {
+                        return;
+                    }
+                    _ => (),
+                }
+            }
+        }
+        // No final request or no initialized H3 response: keep the existing parser bound.
+        abort_request(client, stream, code);
     }
 
     fn reset_failed_stream(

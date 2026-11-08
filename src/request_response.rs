@@ -113,6 +113,9 @@ mod chunking_implementation {
 
             'read: loop {
                 while let Ok(mut chunkable) = receiver.recv() {
+                    if chunkable.sender.receiver_closed() {
+                        continue;
+                    }
                     if chunkable.sender.is_occupied() {
                         warn!(
                             "chunkable stream_id [{:?} is is_occupied",
@@ -148,8 +151,9 @@ mod chunking_implementation {
                             buf_read[..n].to_vec(),
                             is_end,
                         ));
-                        if let Err(e) = chunkable.sender.send(queueable_item) {
-                            error!("faield to send queued request")
+                        if chunkable.sender.send(queueable_item).is_err() {
+                            // The receiver can disappear while this chunk is being read.
+                            continue;
                         }
                         //  std::thread::sleep(Duration::from_micros(2));
                         if let Err(e) = waker.wake() {
@@ -177,6 +181,9 @@ mod chunking_implementation {
             }
         });
     }
+
+    #[cfg(test)]
+    mod tests;
 }
 mod response_queue {
     use std::{

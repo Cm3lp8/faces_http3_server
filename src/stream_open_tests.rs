@@ -95,11 +95,53 @@ fn stream_server_child() {
         r.handler(&ack);
     });
     let case = std::env::var("FACES_STREAM_CASE").unwrap();
-    if case == "downlink-loss" {
+    if matches!(case.as_str(), "downlink-loss" | "cancel-download") {
         let media = router
             .handler(&|event, _: &State, _| Response::ok_200_with_data(event, sample_media()));
         router.route_get("/sample-media", RouteConfig::default(), |route| {
             route.handler(&media);
+        });
+    }
+    if case == "cancel-download" {
+        let large = router.handler(&|event, state: &State, _| {
+            let sessions = state.sessions.clone();
+            let root = state.called.parent().unwrap().to_owned();
+            let scid = event.scid().to_vec();
+            let stream = event.stream_id();
+            std::thread::spawn(move || {
+                wait_for_queue(|| sessions.response_queue_depth(&scid, stream) == Some(150));
+                std::fs::write(root.join("queue-full"), []).unwrap();
+                wait_for_queue(|| sessions.response_queue_depth(&scid, stream).is_none());
+                std::fs::write(root.join("queue-released"), []).unwrap();
+            });
+            Response::ok_200_with_data(event, vec![42; 2 * 1024 * 1024])
+        });
+        router.route_get("/large-download", RouteConfig::default(), |route| {
+            route.handler(&large);
+        });
+        let blocked =
+            router.handler(&|event, _, _| Response::ok_200_with_data(event, vec![42; 128 * 1024]));
+        router.route_get("/flow-blocked-download", RouteConfig::default(), |route| {
+            route.handler(&blocked);
+        });
+        let delayed = router.handler(&|event, state: &State, _| {
+            let root = state.called.parent().unwrap();
+            assert!(state
+                .sessions
+                .response_queue_depth(event.scid(), event.stream_id())
+                .is_some());
+            std::fs::write(root.join("before-headers"), []).unwrap();
+            wait_for_queue(|| {
+                state
+                    .sessions
+                    .response_queue_depth(event.scid(), event.stream_id())
+                    .is_none()
+            });
+            std::fs::write(root.join("early-queue-released"), []).unwrap();
+            Response::ok_200_with_data(event, b"late response".to_vec())
+        });
+        router.route_get("/delayed-download", RouteConfig::default(), |route| {
+            route.handler(&delayed);
         });
     }
     if matches!(
@@ -1069,6 +1111,121 @@ fn ordinary_upload_rejection_cleans_only_the_original_stage_and_keeps_its_http_r
 
 fn sample_media() -> Vec<u8> {
     (0..32 * 1024).map(|offset| (offset % 251) as u8).collect()
+}
+
+fn wait_for_queue(ready: impl Fn() -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !ready() {
+        assert!(
+            Instant::now() < deadline,
+            "response queue did not reach the expected state"
+        );
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
+fn await_download_marker(server: &mut OwnedServer, client: &mut WireClient, name: &str) {
+    let marker = server.root.join(name);
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while !marker.is_file() {
+        assert!(
+            server.child.try_wait().unwrap().is_none(),
+            "server exited before {name}"
+        );
+        assert!(Instant::now() < deadline, "server did not reach {name}");
+        client.pump();
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
+fn stop_download(client: &mut WireClient, stream: u64) {
+    client
+        .conn
+        .stream_shutdown(stream, quiche::Shutdown::Read, 0x10c)
+        .unwrap();
+    client.flush();
+}
+
+fn verify_next_download(client: &mut WireClient) {
+    let witness = client.request(b"/sample-media", false);
+    let received = terminal(client, witness).expect("same-connection GET was reset");
+    assert!(
+        received == sample_media(),
+        "same-connection GET returned different bytes"
+    );
+}
+
+fn await_final_headers(client: &mut WireClient, stream: u64) {
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        assert!(Instant::now() < deadline, "missing large response headers");
+        client.pump();
+        match client.http.as_mut().unwrap().poll(&mut client.conn) {
+            Ok((id, h3::Event::Headers { list, .. })) if id == stream => {
+                let status = list
+                    .iter()
+                    .find(|h| h.name() == b":status")
+                    .unwrap()
+                    .value();
+                if status == b"200" {
+                    break;
+                }
+                assert_eq!(status, b"100");
+            }
+            Ok((id, _)) if id != stream => (),
+            Err(h3::Error::Done) => std::thread::sleep(Duration::from_millis(2)),
+            event => panic!("unexpected event before headers: {event:?}"),
+        }
+    }
+}
+
+#[test]
+#[ignore = "requires explicit local fixture root and loopback"]
+fn stopping_a_saturated_download_releases_the_queue_on_the_same_connection() {
+    let (mut server, mut client) = start_server("cancel-download");
+    let stream = client.request(b"/large-download", false);
+    // ACK QUIC packets without reading HTTP/3 DATA. The 100,000-byte receive
+    // window ensures a 2 MiB response still has work at the 150-chunk limit.
+    await_download_marker(&mut server, &mut client, "queue-full");
+    await_final_headers(&mut client, stream);
+    stop_download(&mut client, stream);
+    await_download_marker(&mut server, &mut client, "queue-released");
+    verify_next_download(&mut client);
+}
+
+#[test]
+#[ignore = "requires explicit local fixture root and loopback"]
+fn stopping_before_response_headers_releases_the_queue_on_the_same_connection() {
+    let (mut server, mut client) = start_server("cancel-download");
+    let stream = client.request(b"/delayed-download", false);
+    await_download_marker(&mut server, &mut client, "before-headers");
+    stop_download(&mut client, stream);
+    await_download_marker(&mut server, &mut client, "early-queue-released");
+    verify_next_download(&mut client);
+}
+
+#[test]
+#[ignore = "requires explicit local fixture root and loopback"]
+fn stopping_33_initialized_downloads_preserves_the_same_connection() {
+    let (_server, mut client) = start_server("cancel-download");
+    for n in 1..=33 {
+        // Each 128 KiB response exceeds the 100,000-byte stream credit, so
+        // after HTTP 200 its FIN cannot arrive while we leave DATA unread.
+        let stream = client.request(b"/flow-blocked-download", false);
+        await_final_headers(&mut client, stream);
+        let resets = client.conn.stats().reset_stream_count_remote;
+        stop_download(&mut client, stream);
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while client.conn.stats().reset_stream_count_remote == resets {
+            assert!(
+                Instant::now() < deadline,
+                "missing peer RESET_STREAM for download {n}"
+            );
+            client.pump();
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+    verify_next_download(&mut client);
 }
 
 #[test]
