@@ -95,6 +95,39 @@ fn stream_server_child() {
         r.handler(&ack);
     });
     let case = std::env::var("FACES_STREAM_CASE").unwrap();
+    if case == "response-fin" {
+        let media = router.handler(&|event, state: &State, _| {
+            assert!(state
+                .sessions
+                .response_queue_depth(event.scid(), event.stream_id())
+                .is_some());
+            let (_, size) = FIN_CASES
+                .iter()
+                .find(|(path, _)| *path == event.path())
+                .unwrap();
+            Response::ok_200_with_data(event, media_bytes(*size))
+        });
+        for &(path, _) in FIN_CASES {
+            router.route_get(path, RouteConfig::default(), |route| {
+                route.handler(&media);
+            });
+        }
+        let previous = router.handler(&|event, state: &State, _| {
+            let previous_stream = event.stream_id().checked_sub(4).unwrap();
+            let released = state
+                .sessions
+                .response_queue_depth(event.scid(), previous_stream)
+                .is_none();
+            Response::ok_200_with_data(event, vec![u8::from(released)])
+        });
+        router.route_get(
+            "/previous-queue-released",
+            RouteConfig::default(),
+            |route| {
+                route.handler(&previous);
+            },
+        );
+    }
     if matches!(case.as_str(), "downlink-loss" | "cancel-download") {
         let media = router
             .handler(&|event, _: &State, _| Response::ok_200_with_data(event, sample_media()));
@@ -294,6 +327,13 @@ struct WireClient {
 }
 impl WireClient {
     fn new(address: SocketAddr, tls: &std::path::Path) -> Self {
+        Self::with_stream_window(address, tls, None)
+    }
+    fn with_stream_window(
+        address: SocketAddr,
+        tls: &std::path::Path,
+        window: Option<(u64, u64)>,
+    ) -> Self {
         let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
         socket.set_nonblocking(true).unwrap();
         let mut cfg = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
@@ -304,7 +344,10 @@ impl WireClient {
         cfg.set_max_idle_timeout(5000);
         cfg.set_max_send_udp_payload_size(1350);
         cfg.set_initial_max_data(1_000_000);
-        cfg.set_initial_max_stream_data_bidi_local(100_000);
+        cfg.set_initial_max_stream_data_bidi_local(window.map_or(100_000, |(initial, _)| initial));
+        if let Some((_, maximum)) = window {
+            cfg.set_max_stream_window(maximum);
+        }
         cfg.set_initial_max_stream_data_bidi_remote(100_000);
         cfg.set_initial_max_stream_data_uni(100_000);
         cfg.set_initial_max_streams_bidi(20);
@@ -395,6 +438,10 @@ impl WireClient {
     }
 }
 fn start_server(case: &str) -> (OwnedServer, WireClient) {
+    start_server_with_window(case, None)
+}
+
+fn start_server_with_window(case: &str, window: Option<(u64, u64)>) -> (OwnedServer, WireClient) {
     let base = PathBuf::from(
         std::env::var("FACES_TEST_ARTIFACT_DIR").expect("explicit local test artifact root"),
     );
@@ -458,7 +505,7 @@ fn start_server(case: &str) -> (OwnedServer, WireClient) {
         .spawn()
         .unwrap();
     let mut server = OwnedServer { child, root };
-    let mut client = WireClient::new(address, &tls);
+    let mut client = WireClient::with_stream_window(address, &tls, window);
     let deadline = Instant::now() + Duration::from_secs(5);
     while client.http.is_none() {
         assert!(Instant::now() < deadline, "handshake deadline");
@@ -665,11 +712,24 @@ fn terminal_with_status(
     stream: u64,
     expected: &[u8],
 ) -> Result<Vec<u8>, u64> {
+    let (payload, finished) = observe_response(client, stream, expected)?;
+    assert!(finished, "response deadline for {stream}");
+    Ok(payload)
+}
+
+fn observe_response(
+    client: &mut WireClient,
+    stream: u64,
+    expected: &[u8],
+) -> Result<(Vec<u8>, bool), u64> {
     let deadline = Instant::now() + Duration::from_secs(3);
     let mut payload = Vec::new();
     let mut ok = false;
     loop {
-        assert!(Instant::now() < deadline, "response deadline for {stream}");
+        if Instant::now() >= deadline {
+            assert!(ok, "missing response headers for {stream}");
+            return Ok((payload, false));
+        }
         client.pump();
         let http = client.http.as_mut().unwrap();
         loop {
@@ -693,7 +753,7 @@ fn terminal_with_status(
                 }
                 Ok((id, h3::Event::Finished)) if id == stream => {
                     assert!(ok);
-                    return Ok(payload);
+                    return Ok((payload, true));
                 }
                 Ok(_) => {}
                 Err(h3::Error::Done) => break,
@@ -1110,7 +1170,62 @@ fn ordinary_upload_rejection_cleans_only_the_original_stage_and_keeps_its_http_r
 }
 
 fn sample_media() -> Vec<u8> {
-    (0..32 * 1024).map(|offset| (offset % 251) as u8).collect()
+    media_bytes(32 * 1024)
+}
+
+fn media_bytes(size: usize) -> Vec<u8> {
+    (0..size).map(|offset| (offset % 251) as u8).collect()
+}
+
+const FIN_CASES: &[(&str, usize)] = &[
+    // With 4,200 bytes of stream credit, the first and third sizes left too
+    // little room for a separate empty DATA frame carrying FIN.
+    ("/size-4125", 4_125),
+    ("/size-4160", 4_160),
+    ("/size-4161", 4_161),
+    ("/size-4162", 4_162),
+    ("/size-6000", 6_000),
+    // Exercise follow-up writes for both non-final and final 8 KiB chunks.
+    ("/size-20000", 20_000),
+    ("/size-4127", 4_127),
+];
+
+#[test]
+#[ignore = "requires explicit local fixture root and loopback"]
+fn attached_responses_finish_and_release_queues_with_limited_stream_credit() {
+    let mut failures = Vec::new();
+    // At 256 bytes, even a full credit update cannot reach the former 512-byte retry threshold.
+    for (credit, maximum, cases) in [
+        (4_200, 4_200, FIN_CASES),
+        (256, 256, &[("/size-6000", 6_000)][..]),
+        // The first write leaves one body byte. Its final DATA frame needs exactly three bytes.
+        (4_200, 3, &[("/size-4127", 4_127)][..]),
+    ] {
+        let (_server, mut client) =
+            start_server_with_window("response-fin", Some((credit, maximum)));
+        for &(path, size) in cases {
+            let stream = client.request(path.as_bytes(), false);
+            let (body, finished) =
+                observe_response(&mut client, stream, b"200").expect("media reset");
+            let witness = client.request(b"/previous-queue-released", false);
+            assert_eq!(witness, stream + 4);
+            let marker = terminal(&mut client, witness).expect("same-connection GET reset");
+            let released = marker == [1];
+            let received = body.len();
+            let exact = body == media_bytes(size);
+            println!(
+                "initial={credit} window={maximum} size={size} http=200 received={received} exact={exact} \
+                 fin={finished} queue_released={released}"
+            );
+            if !exact || !finished || !released {
+                failures.push((credit, maximum, size, received, exact, finished, released));
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "(initial, window, size, received, exact, FIN, released): {failures:?}"
+    );
 }
 
 fn wait_for_queue(ready: impl Fn() -> bool) {

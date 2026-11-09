@@ -28,7 +28,33 @@ struct PartialResponse {
     headers: Option<Vec<quiche::h3::Header>>,
     body: Vec<u8>,
     written: usize,
+    fin: bool,
 }
+
+impl PartialResponse {
+    fn write(&mut self, client: &mut Client, stream_id: u64) -> h3::Result<usize> {
+        let http = client.http3_conn.as_mut().unwrap();
+        if let Some(headers) = &self.headers {
+            http.send_response(
+                &mut client.conn,
+                stream_id,
+                headers,
+                self.body.is_empty() && self.fin,
+            )?;
+            self.headers = None;
+            if self.body.is_empty() {
+                return Ok(0);
+            }
+        }
+        let suffix = &self.body[self.written..];
+        if suffix.is_empty() && !self.fin {
+            return Ok(0);
+        }
+        // quiche suppresses FIN on a short write. Keep it on every retry of the last chunk.
+        http.send_body(&mut client.conn, stream_id, suffix, self.fin)
+    }
+}
+
 pub struct Client {
     conn: quiche::Connection,
     // A slot is owned from the first readable request byte through dispatch.
@@ -327,6 +353,37 @@ mod quiche_implementation {
             response_injection_buffer.register(response_injection)
         });
 
+        let cancel_response = |client: &mut Client, stream_id, peer_code| {
+            response_injection_buffer.cancel_request(client.conn.trace_id(), stream_id);
+            route_manager
+                .in_flight_streams_path_verification()
+                .is_finished_request_a_valid_path(client.conn.source_id().to_vec(), stream_id);
+            if let Some(code) = peer_code {
+                retire_closed_response(client, stream_id, code);
+            } else {
+                client.pending_headers.remove(&stream_id);
+                client.admitted_streams.remove(&stream_id);
+                abort_request(client, stream_id, 0x102);
+            }
+            clean_stream(client, stream_id, &chunk_dispatch_channel);
+        };
+        let write_chunk = |client: &mut Client, stream_id, chunk| {
+            if let Err(error) =
+                write_response_chunk(client, stream_id, chunk, &chunk_dispatch_channel, &waker)
+            {
+                let peer_code = match error {
+                    h3::Error::TransportError(quiche::Error::StreamStopped(code)) => Some(code),
+                    h3::Error::TransportError(quiche::Error::InvalidStreamState(_))
+                        if client.conn.stream_closed(stream_id) => Some(0x10c),
+                    _ => {
+                        error!("Response write failed stream={stream_id} error={error:?}");
+                        None
+                    }
+                };
+                cancel_response(client, stream_id, peer_code);
+            }
+        };
+
         let mut clients = ClientMap::new();
         let mut total = 0;
         let mut send_packet_time = Instant::now();
@@ -356,15 +413,6 @@ mod quiche_implementation {
                 .filter_map(|c| c.conn.timeout())
                 .chain(deadline.map(|t| t.saturating_duration_since(Instant::now())))
                 .min();
-            for client in clients.values() {
-                for stream_id in chunk_dispatch_channel.streams(client.conn.source_id().as_ref()) {
-                    let written = client.get_written(stream_id);
-                    if written.0 < written.1 {
-                        let _ = waker_clone.wake();
-                        continue;
-                    }
-                }
-            }
             if let Err(error) = poll.poll(&mut events, timeout) {
                 if error.kind() != std::io::ErrorKind::Interrupted {
                     return Err(ServerRunError::io("poll", error));
@@ -798,53 +846,35 @@ mod quiche_implementation {
             {
                 std::thread::sleep(Duration::from_nanos(10));
                 for client in clients.values_mut() {
+                    if client.http3_conn.is_none() || client.conn.local_error().is_some()
+                        || client.conn.is_draining()
+                    {
+                        continue;
+                    }
                     let scid = client.conn.source_id().as_ref().to_vec();
                     // Do not gate cancellation on writability, header retries or partial bodies.
                     for stream_id in chunk_dispatch_channel.requested_stream_resets(&scid) {
-                        response_injection_buffer.cancel_request(client.conn.trace_id(), stream_id);
-                        route_manager
-                            .in_flight_streams_path_verification()
-                            .is_finished_request_a_valid_path(scid.clone(), stream_id);
-                        reset_failed_stream(client, stream_id, &chunk_dispatch_channel);
+                        cancel_response(client, stream_id, None);
                     }
                     // A finished GET can receive STOP_SENDING without an H3 Reset event.
                     // Check owned responses even when connection flow control hides all writables.
                     for stream_id in chunk_dispatch_channel.streams(&scid) {
-                        let code = match client.conn.stream_capacity(stream_id) {
-                            Err(quiche::Error::StreamStopped(code)) => code,
+                        match client.conn.stream_capacity(stream_id) {
+                            Ok(capacity) if capacity > 0 => {
+                                // A tiny suffix can fit below the low watermark left by a larger write.
+                                if let Some(partial) = client.partial_responses.remove(&stream_id) {
+                                    write_chunk(client, stream_id, partial);
+                                }
+                            }
+                            Err(quiche::Error::StreamStopped(code)) => {
+                                cancel_response(client, stream_id, Some(code));
+                            }
                             Err(quiche::Error::InvalidStreamState(_))
-                                if client.conn.stream_closed(stream_id) => 0x10c,
-                            _ => {
-                                let (written, total) = client.get_written(stream_id);
-                                if written < total {
-                                    let _ = waker_clone.wake();
-                                }
-                                continue;
+                                if client.conn.stream_closed(stream_id) =>
+                            {
+                                cancel_response(client, stream_id, Some(0x10c));
                             }
-                        };
-                        retire_closed_response(client, stream_id, code);
-                        clean_stream(client, stream_id, &chunk_dispatch_channel);
-                        response_injection_buffer.cancel_request(client.conn.trace_id(), stream_id);
-                        route_manager
-                            .in_flight_streams_path_verification()
-                            .is_finished_request_a_valid_path(scid.clone(), stream_id);
-                    }
-                    for stream_id in client.conn.writable() {
-                        // Don't try to pop new chunk from the chunk queue if there are still something
-                        // in the pending queue for this stream.
-
-                        if !client.headers_send(stream_id) {
-                            continue;
-                        }
-                        while matches!(client.conn.stream_writable(stream_id, 512), Ok(true)) {
-                            if client.partial_responses.get(&stream_id).is_some() {
-                                if let Some(_val) = handle_writable(client, stream_id) {}
-                                if let Err(_e) = waker_clone.wake() {
-                                    error!("failed to wake poll");
-                                }
-                            } else {
-                                break;
-                            }
+                            _ => {}
                         }
                     }
                     let mut writtable = 0;
@@ -877,76 +907,27 @@ mod quiche_implementation {
                         if let Some(mut request_chunk) = opening_retry
                             .or_else(|| chunk_dispatch_channel.try_pop(stream_id, &scid).ok())
                         {
-                            let p_id = request_chunk.packet_id();
+                            let fin = if let QueuedRequest::Body(body) = &request_chunk {
+                                // Attached bodies are produced only after their response headers were sent.
+                                if !client.headers_send(stream_id) {
+                                    cancel_response(client, stream_id, None);
+                                    continue;
+                                }
+                                body.is_end()
+                            } else {
+                                false
+                            };
                             match request_chunk {
-                                QueuedRequest::Body(ref mut content) => {
-                                    if !client.headers_send(stream_id) {
-                                        let response = PartialResponse {
-                                            headers: None,
-                                            body: content.take_data(),
-                                            written: 0,
-                                        };
-                                        client.partial_responses.insert(stream_id, response);
-                                    }
-                                    if let Err(_e) = send_body_response(
-                                        client,
-                                        content.stream_id(),
-                                        content.take_data(),
-                                        content.is_end(),
-                                    ) {
-                                        warn!(
-                                            "stream_id [{:?}] Body chunk Pushed in pending_body_queue ",
-                                            stream_id
-                                        );
-                                        client.pending_body_queue.push_item_on_front(request_chunk);
-
-                                        if let Err(_e) = waker_clone.wake() {
-                                            error!("failed to wake poll");
-                                        }
-                                        continue;
-                                    } else {
+                                QueuedRequest::Body(ref mut content)
+                                | QueuedRequest::StreamData(ref mut content)
+                                | QueuedRequest::BodyProgression(ref mut content) => {
+                                    let chunk = PartialResponse {
+                                        headers: None,
+                                        body: content.take_data(),
+                                        written: 0,
+                                        fin,
                                     };
-                                    let is_end = client.is_body_totally_written(stream_id);
-
-                                    if is_end {
-                                        if let Err(e) =
-                                            send_body_response(client, stream_id, vec![], is_end)
-                                        {
-                                            error!("Failed send end ! [{:?}]", e);
-                                        }
-                                        clean_stream(client, stream_id, &chunk_dispatch_channel);
-                                    }
-                                    if let Err(_e) = waker_clone.wake() {}
-                                }
-                                QueuedRequest::StreamData(ref mut content) => {
-                                    let b = content.take_data();
-                                    if let Err(_e) = send_body_response_progression(
-                                        client,
-                                        content.stream_id(),
-                                        b,
-                                        false,
-                                    ) {
-                                        warn!(
-                                            "stream_id [{:?}] stream chunk Pushed in pending_body_queue ",
-                                            stream_id
-                                        );
-                                        client.pending_body_queue.push_item_on_front(request_chunk);
-                                    }
-                                }
-                                QueuedRequest::BodyProgression(ref mut content) => {
-                                    let b = content.take_data();
-                                    if let Err(_e) = send_body_response_progression(
-                                        client,
-                                        content.stream_id(),
-                                        b,
-                                        false,
-                                    ) {
-                                        warn!(
-                                            "stream_id [{:?}] body progression chunk Pushed in pending_body_queue ",
-                                            stream_id
-                                        );
-                                        client.pending_body_queue.push_item_on_front(request_chunk);
-                                    }
+                                    write_chunk(client, stream_id, chunk);
                                 }
                                 QueuedRequest::Header(ref mut content) => {
                                     let headers = content.get_headers().to_vec();
@@ -962,6 +943,7 @@ mod quiche_implementation {
                                             match result {
                                                 Ok(()) => {
                                                     client.set_headers_send(stream_id, true);
+                                                    let _ = waker.wake();
                                                 }
                                                 Err(h3::Error::StreamBlocked | h3::Error::Done)
                                                 | Err(h3::Error::TransportError(
@@ -973,11 +955,7 @@ mod quiche_implementation {
                                                 }
                                                 Err(error) => {
                                                     error!("Stream opening failed stream={stream_id} error={error:?}");
-                                                    reset_failed_stream(
-                                                        client,
-                                                        stream_id,
-                                                        &chunk_dispatch_channel,
-                                                    );
+                                                    cancel_response(client, stream_id, None);
                                                 }
                                             }
                                             #[cfg(test)]
@@ -1039,6 +1017,7 @@ mod quiche_implementation {
                                                     .set_intermediate_headers_send(
                                                         stream_id, client,
                                                     );
+                                                let _ = waker.wake();
                                             } else {
                                                 warn!(
                                             "stream_id [{:?}] header 100 chunk Pushed in pending_body_queue ",
@@ -1277,17 +1256,6 @@ mod quiche_implementation {
         abort_request(client, stream, code);
     }
 
-    fn reset_failed_stream(
-        client: &mut Client,
-        stream_id: u64,
-        queues: &crate::request_response::ChunksDispatchChannel,
-    ) {
-        client.pending_headers.remove(&stream_id);
-        client.admitted_streams.remove(&stream_id);
-        abort_request(client, stream_id, 0x102);
-        clean_stream(client, stream_id, queues);
-    }
-
     fn clean_stream(
         client: &mut Client,
         stream_id: u64,
@@ -1365,6 +1333,7 @@ mod quiche_implementation {
         if written < body.len() {
             let response = PartialResponse {
                 headers: None,
+                fin: is_end,
                 body,
                 written,
             };
@@ -1398,6 +1367,7 @@ mod quiche_implementation {
             Err(quiche::h3::Error::StreamBlocked) => {
                 let response = PartialResponse {
                     headers: Some(headers),
+                    fin: true,
                     body,
                     written: 0,
                 };
@@ -1429,6 +1399,7 @@ mod quiche_implementation {
         if written < body.len() {
             let response = PartialResponse {
                 headers: None,
+                fin: true,
                 body,
                 written,
             };
@@ -1461,6 +1432,7 @@ mod quiche_implementation {
             Err(quiche::h3::Error::StreamBlocked) => {
                 let response = PartialResponse {
                     headers: Some(headers),
+                    fin: is_end || !body.is_empty(),
                     body,
                     written: 0,
                 };
@@ -1492,6 +1464,7 @@ mod quiche_implementation {
         if written < body.len() {
             let response = PartialResponse {
                 headers: None,
+                fin: true,
                 body,
                 written,
             };
@@ -1504,91 +1477,36 @@ mod quiche_implementation {
          * */
         Ok(written)
     }
-    fn send_body_response_progression(
+    fn write_response_chunk(
         client: &mut Client,
         stream_id: u64,
-        data: Vec<u8>,
-        is_end: bool,
-    ) -> Result<usize, ()> {
-        debug!("sending body [{}] bytes", data.len());
-        let (already_written, total_len) = client.get_written(stream_id);
-        let http3_conn = &mut client.http3_conn.as_mut().unwrap();
-        let conn = &mut client.conn;
-
-        let written = match http3_conn.send_body(conn, stream_id, &data, false) {
-            Ok(v) => v,
-            Err(quiche::h3::Error::Done) => 0,
-            Err(e) => {
-                error!(
-                    " stramcap [{:?} ]is_end [{:?}]  ...{} [{}] Dsend failed {:?}",
-                    conn.stream_capacity(stream_id),
-                    is_end,
-                    conn.trace_id(),
-                    stream_id,
-                    e
-                );
-                return Err(());
-            }
-        };
-        if written < data.len() {
-            let response = PartialResponse {
-                headers: None,
-                body: data,
-                written,
-            };
-            client.partial_responses.insert(stream_id, response);
-        }
-        client.set_written_to_body_sending_tracker(stream_id, written);
-        /*
-         *
-         * Send reponse to the client
-         *
-         * */
-        Ok(written)
-    }
-    fn send_body_response(
-        client: &mut Client,
-        stream_id: u64,
-        data: Vec<u8>,
-        is_end: bool,
-    ) -> Result<usize, ()> {
-        debug!("sending body [{}] bytes", data.len());
-        let (already_written, total_len) = client.get_written(stream_id);
-        let http3_conn = &mut client.http3_conn.as_mut().unwrap();
-        let conn = &mut client.conn;
-
-        let written =
-            match http3_conn.send_body(conn, stream_id, &data, already_written == total_len) {
-                Ok(v) => v,
-                Err(quiche::h3::Error::Done) => 0,
-                Err(e) => {
-                    error!(
-                        " stramcap [{:?} ]is_end [{:?}]  ...{} [{}] Dsend failed {:?}",
-                        conn.stream_capacity(stream_id),
-                        is_end,
-                        conn.trace_id(),
-                        stream_id,
-                        e
-                    );
-                    return Err(());
+        mut chunk: PartialResponse,
+        queues: &crate::request_response::ChunksDispatchChannel,
+        waker: &Waker,
+    ) -> h3::Result<()> {
+        match chunk.write(client, stream_id) {
+            Ok(written) => {
+                chunk.written += written;
+                client.set_written_to_body_sending_tracker(stream_id, written);
+                if chunk.written == chunk.body.len() {
+                    if chunk.fin {
+                        clean_stream(client, stream_id, queues);
+                    } else {
+                        // Several producer wakes can coalesce while this chunk is queued.
+                        let _ = waker.wake();
+                    }
+                    return Ok(());
                 }
-            };
-        if written < data.len() {
-            let response = PartialResponse {
-                headers: None,
-                body: data,
-                written,
-            };
-            client.partial_responses.insert(stream_id, response);
+            }
+            Err(h3::Error::Done | h3::Error::StreamBlocked)
+            | Err(h3::Error::TransportError(quiche::Error::Done)) => {}
+            Err(error) => return Err(error),
         }
-        client.set_written_to_body_sending_tracker(stream_id, written);
-        /*
-         *
-         * Send reponse to the client
-         *
-         * */
-        Ok(written)
+        // Retain both offset and FIN until QUIC accepts the remaining bytes.
+        client.partial_responses.insert(stream_id, chunk);
+        Ok(())
     }
+
     fn handle_request<S: Send + Sync + 'static, T: UserSessions<Output = T>>(
         client: &mut Client,
         stream_id: u64,
@@ -1614,6 +1532,7 @@ mod quiche_implementation {
             Err(quiche::h3::Error::StreamBlocked) => {
                 let response = PartialResponse {
                     headers: Some(headers),
+                    fin: true,
                     body,
                     written: 0,
                 };
@@ -1636,6 +1555,7 @@ mod quiche_implementation {
         if written < body.len() {
             let response = PartialResponse {
                 headers: None,
+                fin: true,
                 body,
                 written,
             };
@@ -1680,97 +1600,6 @@ mod quiche_implementation {
             quiche::h3::Header::new(b"content-length", body.len().to_string().as_bytes()),
         ];
         (headers, body)
-    }
-    /// Handles newly writable streams.
-    fn handle_writable(client: &mut Client, stream_id: u64) -> Option<bool> {
-        let is_end = client.is_body_totally_written(stream_id);
-        let amount_written = client.get_written(stream_id);
-        let total_to_write = client.get_written(stream_id).1;
-        let conn = &mut client.conn;
-        let http3_conn = &mut client.http3_conn.as_mut().unwrap();
-        debug!("{} stream {} is writable", conn.trace_id(), stream_id);
-        if !client.partial_responses.contains_key(&stream_id) {
-            warn!("no key");
-            return None;
-        }
-        let resp = client.partial_responses.get_mut(&stream_id).unwrap();
-        if let Some(ref headers) = resp.headers {
-            match http3_conn.send_response(conn, stream_id, headers, false) {
-                Ok(_) => (),
-                Err(quiche::h3::Error::StreamBlocked) => {
-                    error!("Stream [{:?}] blocked", stream_id);
-                    return None;
-                }
-                Err(e) => {
-                    error!(
-                        "{} handle writabel stream send failed {:?}",
-                        conn.trace_id(),
-                        e
-                    );
-                    return None;
-                }
-            }
-        }
-        resp.headers = None;
-
-        let body = if !is_end {
-            &resp.body[resp.written..]
-        } else {
-            &resp.body[resp.written..]
-        };
-        let written = match http3_conn.send_body(conn, stream_id, body, false) {
-            Ok(v) => v,
-            Err(quiche::h3::Error::Done) => 0,
-            Err(e) => {
-                client.partial_responses.remove(&stream_id);
-                error!("{} stream send failed {:?}", conn.trace_id(), e);
-                return None;
-            }
-        };
-        resp.written += written;
-        if resp.written == resp.body.len() {
-            {
-                debug!("{}/{}", written + amount_written.0, total_to_write);
-                if written + amount_written.0 == total_to_write {
-                    let _ = match http3_conn.send_body(conn, stream_id, &[], true) {
-                        Ok(v) => v,
-                        Err(quiche::h3::Error::Done) => 0,
-                        Err(e) => {
-                            error!("{} stream send failed {:?}", conn.trace_id(), e);
-                            return None;
-                        }
-                    };
-                }
-            }
-            client.set_written_to_body_sending_tracker(stream_id, written);
-            client.partial_responses.remove(&stream_id);
-            debug!("{:?}", client.get_written(stream_id));
-            return Some(true);
-        }
-
-        if written > 0 {
-            client.set_written_to_body_sending_tracker(stream_id, written);
-            return Some(false);
-        }
-
-        let o = if resp.written + amount_written.0 == amount_written.1 {
-            let _ = match http3_conn.send_body(conn, stream_id, &[], true) {
-                Ok(v) => v,
-                Err(quiche::h3::Error::Done) => 0,
-                Err(e) => {
-                    client.partial_responses.remove(&stream_id);
-                    error!("{} stream send failed {:?}", conn.trace_id(), e);
-                    return None;
-                }
-            };
-
-            Some(true)
-        } else {
-            Some(false)
-        };
-        client.set_written_to_body_sending_tracker(stream_id, written);
-
-        Some(false)
     }
     pub fn hdrs_to_strings(hdrs: &[quiche::h3::Header]) -> Vec<(String, String)> {
         hdrs.iter()
