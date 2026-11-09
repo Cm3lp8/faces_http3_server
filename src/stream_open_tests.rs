@@ -118,6 +118,7 @@ fn stream_server_child() {
                 .sessions
                 .response_queue_depth(event.scid(), previous_stream)
                 .is_none();
+            std::fs::write(state.called.with_file_name("previous-queue-observed"), []).unwrap();
             Response::ok_200_with_data(event, vec![u8::from(released)])
         });
         router.route_get(
@@ -378,7 +379,7 @@ impl WireClient {
     fn pump_allow_close(&mut self) {
         self.pump_filtered(|_| true);
     }
-    fn pump_filtered(&mut self, mut accept: impl FnMut(&[u8]) -> bool) {
+    fn receive_datagrams(&mut self, mut accept: impl FnMut(&[u8]) -> bool) {
         let mut buf = [0; 65535];
         loop {
             match self.socket.recv_from(&mut buf) {
@@ -400,6 +401,9 @@ impl WireClient {
                 Err(e) => panic!("UDP: {e}"),
             }
         }
+    }
+    fn pump_filtered(&mut self, accept: impl FnMut(&[u8]) -> bool) {
+        self.receive_datagrams(accept);
         if self.conn.timeout().is_some_and(|t| t.is_zero()) {
             self.conn.on_timeout();
         }
@@ -1377,4 +1381,145 @@ fn get_32k_recovers_after_initial_downlink_loss() {
     let control = client.request(b"/sample-media", false);
     let body = terminal(&mut client, control).expect("subsequent GET was reset");
     assert!(body == expected, "subsequent GET returned different media");
+}
+
+fn request_with_blocked_final_headers(client: &mut WireClient) -> u64 {
+    let blocked = client.conn.stats().stream_data_blocked_recv_count;
+    let stream = client.request(b"/size-6000", false);
+    let deadline = Instant::now() + Duration::from_secs(3);
+    // QUIC acknowledges packets, but the client reads no HTTP/3 bytes. Only this
+    // request is active. Its interim 100 fits while its final HEADERS do not.
+    while client.conn.stats().stream_data_blocked_recv_count == blocked {
+        assert!(
+            Instant::now() < deadline,
+            "peer did not report STREAM_DATA_BLOCKED"
+        );
+        client.pump();
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    stream
+}
+
+#[test]
+#[ignore = "requires explicit local fixture root and loopback"]
+fn blocked_final_headers_resume_after_stream_credit_returns() {
+    let (mut server, mut client) = start_server_with_window("response-fin", Some((68, 4_200)));
+    let stream = request_with_blocked_final_headers(&mut client);
+    let witness = client.request(b"/previous-queue-released", false);
+    assert_eq!(witness, stream + 4);
+    await_download_marker(&mut server, &mut client, "previous-queue-observed");
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while !client.conn.stream_readable(witness) {
+        assert!(
+            Instant::now() < deadline,
+            "witness blocked behind the first stream"
+        );
+        client.pump();
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    // The witness has already progressed. Reading the 100 now returns stream credit.
+    let mut statuses = [Vec::new(), Vec::new()];
+    let mut bodies = [Vec::new(), Vec::new()];
+    let mut finished = [false; 2];
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while !finished.iter().all(|&fin| fin) && Instant::now() < deadline {
+        client.pump();
+        let http = client.http.as_mut().unwrap();
+        loop {
+            let (id, event) = match http.poll(&mut client.conn) {
+                Ok(item) => item,
+                Err(h3::Error::Done) => break,
+                Err(error) => panic!("HTTP/3 poll failed: {error:?}"),
+            };
+            assert!(id == stream || id == witness);
+            let index = usize::from(id == witness);
+            match event {
+                h3::Event::Headers { list, .. } => {
+                    let status = list.iter().find(|h| h.name() == b":status").unwrap();
+                    statuses[index].push(status.value().to_vec());
+                }
+                h3::Event::Data => {
+                    let mut part = [0; 4096];
+                    while let Ok(len) = http.recv_body(&mut client.conn, id, &mut part) {
+                        bodies[index].extend_from_slice(&part[..len]);
+                    }
+                }
+                h3::Event::Finished => finished[index] = true,
+                h3::Event::Reset(code) => panic!("stream {id} reset: {code}"),
+                _ => (),
+            }
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert!(finished[1] && statuses[1].last().is_some_and(|s| s == b"200"));
+    assert_eq!(
+        bodies[1],
+        [0],
+        "witness must see the first queue still present"
+    );
+    assert_eq!(statuses[0], [b"100", b"200"]);
+    assert!(finished[0] && bodies[0] == media_bytes(6000));
+}
+
+#[test]
+#[ignore = "requires explicit local fixture root and loopback"]
+fn stop_sending_discards_blocked_final_headers() {
+    let (_server, mut client) = start_server_with_window("response-fin", Some((68, 4_200)));
+    let stream = request_with_blocked_final_headers(&mut client);
+    let resets = client.conn.stats().reset_stream_count_remote;
+    stop_download(&mut client, stream);
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while client.conn.stats().reset_stream_count_remote == resets {
+        assert!(Instant::now() < deadline, "missing peer RESET_STREAM");
+        client.pump();
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let witness = client.request(b"/previous-queue-released", false);
+    assert_eq!(witness, stream + 4);
+    assert_eq!(terminal(&mut client, witness).unwrap(), [1]);
+}
+
+#[test]
+#[ignore = "requires explicit local fixture root and loopback"]
+fn blocked_final_headers_leave_residual_credit_usable_for_data() {
+    let (_server, mut client) = start_server_with_window("response-fin", Some((66, 14)));
+    let stream = request_with_blocked_final_headers(&mut client);
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let mut headers = Vec::new();
+    loop {
+        assert!(
+            Instant::now() < deadline,
+            "first DATA did not use the remaining four bytes"
+        );
+        client.receive_datagrams(|_| true);
+        match client.http.as_mut().unwrap().poll(&mut client.conn) {
+            Ok((id, h3::Event::Headers { list, .. })) if id == stream => {
+                let status = list
+                    .iter()
+                    .find(|h| h.name() == b":status")
+                    .unwrap()
+                    .value();
+                headers.push(status.to_vec());
+                if status == b"100" {
+                    // Grant 14 bytes once. The final HEADERS use ten. Reading
+                    // the 200 must not replenish credit before the first DATA.
+                    client.flush();
+                }
+            }
+            Ok((id, h3::Event::Data)) if id == stream => {
+                assert_eq!(headers, [b"100", b"200"]);
+                let mut byte = [255];
+                let count = client
+                    .http
+                    .as_mut()
+                    .unwrap()
+                    .recv_body(&mut client.conn, id, &mut byte)
+                    .unwrap();
+                assert_eq!((count, byte), (1, [0]));
+                break;
+            }
+            Err(h3::Error::Done) => std::thread::sleep(Duration::from_millis(1)),
+            other => panic!("unexpected HTTP/3 event: {other:?}"),
+        }
+    }
 }
